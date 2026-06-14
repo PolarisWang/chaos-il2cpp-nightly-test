@@ -183,7 +183,7 @@ phase_collect() {
 }
 
 # ============================================================
-# Phase 5: Generate Report
+# Phase 5: Generate Report (with baseline regression comparison)
 # ============================================================
 phase_report() {
     echo ""
@@ -196,14 +196,36 @@ phase_report() {
         return
     fi
 
+    # Auto-discover the previous night's data for benchmark regression comparison
+    BASELINE=""
+    PREV_DATE=$(date -d 'yesterday' '+%Y%m%d' 2>/dev/null || echo "")
+    if [[ -n "$PREV_DATE" ]]; then
+        PREV_DATA="${ARTIFACTS_DIR}/nightly-data-${PREV_DATE}.json"
+        if [[ -f "$PREV_DATA" ]]; then
+            BASELINE="$PREV_DATA"
+            echo "Baseline found: ${PREV_DATA}"
+        else
+            # Also search in report-server
+            for dir in "${REPORT_SERVER_DIR}" "${ARTIFACTS_DIR}"; do
+                FOUND=$(ls -t "${dir}"/nightly-data-*.json 2>/dev/null | head -1)
+                if [[ -n "$FOUND" && "$FOUND" != "$DATA_FILE" ]]; then
+                    BASELINE="$FOUND"
+                    echo "Baseline found (auto): ${BASELINE}"
+                    break
+                fi
+            done
+        fi
+    fi
+
     if $DRY_RUN; then
-        echo "  [DRY-RUN] generate-nightly-report.py --data ${DATA_FILE} --build-number ${BUILD_NUMBER}"
+        echo "  [DRY-RUN] generate-nightly-report.py --data ${DATA_FILE} --build-number ${BUILD_NUMBER} ${BASELINE:+--baseline $BASELINE}"
         return
     fi
 
     REPORT_SCRIPT="${REPO_ROOT}/scripts/generate-nightly-report.py"
     python3 "$REPORT_SCRIPT" \
         --data "$DATA_FILE" \
+        ${BASELINE:+--baseline "$BASELINE"} \
         --output "${ARTIFACTS_DIR}/${REPORT_FILE_NAME}" \
         --build-number "$BUILD_NUMBER"
 
