@@ -1,0 +1,32 @@
+# Core
+configuration-as-code:latest
+workflow-aggregator:latest
+pipeline-stage-view:latest
+blueocean:latest
+
+# Source management
+git:latest
+github:latest
+github-branch-source:latest
+
+# Build & test
+junit:latest
+performance:latest
+htmlpublisher:latest
+plot:latest
+
+# Agent management
+docker-plugin:latest
+docker-commons:latest
+credentials:latest
+ssh-slaves:latest
+
+# Notifications
+mailer:latest
+email-ext:latest
+
+# Pipeline utilities
+pipeline-utility-steps:latest
+pipeline-graph-analysis:latest
+timestamper:latest
+build-timeout:latest

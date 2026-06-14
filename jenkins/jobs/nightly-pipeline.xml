@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow-definition plugin="workflow-job@latest">
+  <description>chaos-il2cpp Nightly Multi-Platform Build &amp; Test Pipeline</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.StringParameterDefinition>
+          <name>BOOMING_REPO</name>
+          <description>Path to booming-il2cpp repository</description>
+          <defaultValue>/booming-il2cpp</defaultValue>
+          <trim>true</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.ChoiceParameterDefinition>
+          <name>BUILD_CONFIG</name>
+          <description>Build configuration tier</description>
+          <choices class="java.util.Arrays$ArrayList">
+            <string class="string">profile</string>
+            <string class="string">debug</string>
+            <string class="string">ship</string>
+          </choices>
+        </hudson.model.ChoiceParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+    <org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty>
+      <triggers>
+        <hudson.triggers.TimerTrigger>
+          <!-- Daily at 3:00 AM -->
+          <spec>H 3 * * *</spec>
+        </hudson.triggers.TimerTrigger>
+      </triggers>
+    </org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps@latest">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git@latest">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>*/main</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+    </scm>
+    <scriptPath>Jenkinsfile</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <triggers>
+    <hudson.triggers.TimerTrigger>
+      <spec>H 3 * * *</spec>
+    </hudson.triggers.TimerTrigger>
+  </triggers>
+  <disabled>false</disabled>
+</flow-definition>

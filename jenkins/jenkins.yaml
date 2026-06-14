@@ -1,0 +1,35 @@
+jenkins:
+  systemMessage: "chaos-il2cpp Nightly Build Pipeline — Multi-Platform Quality Monitoring"
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+          name: "Admin"
+
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  remotingSecurity:
+    enabled: true
+
+  slaveAgentPort: 50000
+  numExecutors: 0
+
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "/usr/bin/git"
+        properties:
+          - installSource:
+              installers:
+                - command:
+                    command: "git --version"
+
+unclassified:
+  location:
+    url: "http://chaos-master:8080/"

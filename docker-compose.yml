@@ -1,0 +1,88 @@
+networks:
+  jenkins:
+    driver: bridge
+
+volumes:
+  jenkins-home:
+  jenkins-casc:
+
+services:
+  master:
+    build:
+      context: .
+      dockerfile: jenkins/Dockerfile
+    image: chaos-jenkins-master:latest
+    container_name: chaos-master
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - CASC_JENKINS_CONFIG=/usr/share/jenkins/ref/jenkins.yaml
+      - JENKINS_ADMIN_ID=admin
+      - JENKINS_ADMIN_PASSWORD=chaos123!
+      - JENKINS_AGENT_JNLP_PORT=50000
+      - JENKINS_MASTER_URL=http://chaos-master:8080
+      - JENKINS_URL=http://chaos-master:8080
+    volumes:
+      - jenkins-home:/var/jenkins_home
+      - ./jenkins/jenkins.yaml:/usr/share/jenkins/ref/jenkins.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+    networks:
+      - jenkins
+    restart: unless-stopped
+
+  linux-x64-agent:
+    build:
+      context: ./docker/linux-x64-agent
+    image: chaos-agent-linux-x64:latest
+    container_name: chaos-agent-x64
+    environment:
+      - JENKINS_MASTER_URL=http://chaos-master:8080
+      - JENKINS_AGENT_NAME=linux-x64
+      - JENKINS_AGENT_SECRET=
+      - AGENT_LABELS=linux x64 native
+    volumes:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  linux-arm64-agent:
+    build:
+      context: ./docker/linux-arm64-agent
+    image: chaos-agent-linux-arm64:latest
+    container_name: chaos-agent-arm64
+    environment:
+      - JENKINS_MASTER_URL=http://chaos-master:8080
+      - JENKINS_AGENT_NAME=linux-arm64
+      - JENKINS_AGENT_SECRET=
+      - AGENT_LABELS=linux arm64 qemu
+    volumes:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  android-arm64-agent:
+    build:
+      context: ./docker/android-arm64-agent
+    image: chaos-agent-android-arm64:latest
+    container_name: chaos-agent-android
+    environment:
+      - JENKINS_MASTER_URL=http://chaos-master:8080
+      - JENKINS_AGENT_NAME=android-arm64
+      - JENKINS_AGENT_SECRET=
+      - AGENT_LABELS=android arm64 ndk
+    volumes:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
