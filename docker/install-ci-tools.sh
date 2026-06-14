@@ -7,8 +7,8 @@ set -euo pipefail
 ALLURE_VERSION="${ALLURE_VERSION:-2.30.0}"
 SONAR_VERSION="${SONAR_VERSION:-4.8.0.2856}"
 
-# The binaries.sonarsource.com URL only works for versions <= 4.8.x
-# For newer versions, see: https://github.com/SonarSource/sonar-scanner-cli/releases
+# The binaries.sonarsource.com URL works for these versions
+SONAR_VERSION="${SONAR_VERSION:-5.0.2.4997}"
 SONAR_URL="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-linux.zip"
 
 # Install Allure CLI
@@ -30,9 +30,14 @@ if ! command -v sonar-scanner &>/dev/null; then
     curl -fsSL "${SONAR_URL}" \
         -o /tmp/sonar-scanner.zip
     unzip -q /tmp/sonar-scanner.zip -d /opt
-    ln -sf "/opt/sonar-scanner-${SONAR_VERSION}/bin/sonar-scanner" /usr/local/bin/sonar-scanner
+    SONAR_DIR="/opt/$(ls /opt | grep sonar-scanner | head -1)"
+    if [ -z "$SONAR_DIR" ]; then
+        echo "WARNING: Could not find sonar-scanner directory"
+    else
+        ln -sf "${SONAR_DIR}/bin/sonar-scanner" /usr/local/bin/sonar-scanner
+        echo "SonarScanner installed: $(sonar-scanner --version 2>&1 | head -1)"
+    fi
     rm -f /tmp/sonar-scanner.zip
-    echo "SonarScanner installed: $(sonar-scanner --version 2>&1 | head -1)"
 else
     echo "SonarScanner already installed: $(sonar-scanner --version 2>&1 | head -1)"
 fi
