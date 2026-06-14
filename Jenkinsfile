@@ -55,25 +55,16 @@ pipeline {
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
 
-                        echo "=== [x64] Phase 1: Fact ==="
-                        python3 -m verification.chunk_pipeline --all --stages fact 2>&1 || {
-                            echo "WARNING: Fact stage had failures"
-                            FAILED_PLATFORMS+=("linux-x64-fact")
+                        echo "=== [x64] Full Pipeline (all stages) ==="
+                        python3 -m verification --all-chunks \
+                            --stages build,fact,benchmark,hotupdate,profile,coverage-audit,aggregate,reporting \
+                            --native-config "${BUILD_CONFIG}" \
+                            2>&1 || {
+                            echo "WARNING: Pipeline stages had failures"
+                            FAILED_PLATFORMS+=("linux-x64-pipeline")
                         }
 
-                        echo "=== [x64] Phase 2: Benchmark ==="
-                        python3 -m verification.chunk_pipeline --all --stages benchmark 2>&1 || {
-                            echo "WARNING: Benchmark stage had failures"
-                            FAILED_PLATFORMS+=("linux-x64-benchmark")
-                        }
-
-                        echo "=== [x64] Phase 3: HotUpdate ==="
-                        python3 -m verification.chunk_pipeline --all --stages hotupdate 2>&1 || true
-
-                        echo "=== [x64] Phase 4: Profile ==="
-                        python3 -m verification.chunk_pipeline --all --stages profile 2>&1 || true
-
-                        echo "=== [x64] Phase 5: Collect Results ==="
+                        echo "=== [x64] Collect Results ==="
                         bash "${WORKSPACE}/scripts/collect-all-results.sh" \
                             --foundation-dir "${BOOMING_DIR}/testing/foundation-dll" \
                             --output-dir "${ARTIFACTS_DIR}"
