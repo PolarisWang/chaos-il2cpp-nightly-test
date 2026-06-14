@@ -15,6 +15,12 @@ performance:latest
 htmlpublisher:latest
 plot:latest
 
+# Allure test reporting
+allure-jenkins-plugin:latest
+
+# SonarQube integration
+sonar:latest
+
 # Agent management
 docker-plugin:latest
 docker-commons:latest
@@ -30,3 +36,10 @@ pipeline-utility-steps:latest
 pipeline-graph-analysis:latest
 timestamper:latest
 build-timeout:latest
+
+# Shared library
+workflow-cps-global-lib:latest
+
+# Multi-branch & PR
+pipeline-github-lib:latest
+blue-ocean:latest

@@ -16,6 +16,10 @@ RUN apt-get update -qq && \
         openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
+# Install SonarScanner & Allure CLI
+COPY docker/install-ci-tools.sh /tmp/install-ci-tools.sh
+RUN bash /tmp/install-ci-tools.sh && rm /tmp/install-ci-tools.sh
+
 ENV ANDROID_NDK_ROOT=/opt/android-ndk
 ENV ANDROID_NDK_VERSION=r27c
 

@@ -1,0 +1,24 @@
+# Feishu Bot Configuration
+# Set FEISHU_WEBHOOK_URL in Jenkins environment or .env file
+
+# Webhook URL for Feishu group robot
+# Format: https://open.feishu.cn/open-apis/bot/v2/hook/<webhook-id>
+webhook_url: "${FEISHU_WEBHOOK_URL}"
+
+# Default notification settings
+notifications:
+  nightly:
+    enabled: true
+    time: "08:00"  # Send daily summary at 8 AM
+    color: "green"  # green/red/blue
+  pr_review:
+    enabled: true
+    color: "blue"
+  performance:
+    enabled: true
+    color: "blue"
+
+# Card template customizations
+card:
+  footer_text: "chaos-il2cpp CI · Auto-generated"
+  button_text: "查看详情"

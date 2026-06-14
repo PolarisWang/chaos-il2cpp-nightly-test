@@ -5,8 +5,8 @@
 set -e
 
 MASTER_URL="${1:-http://localhost:8080}"
-JENKINS_USER="${JENKINS_ADMIN_ID:-admin}"
-JENKINS_PASS="${JENKINS_ADMIN_PASSWORD:-chaos123!}"
+JENKINS_USER="${JENKINS_ADMIN_ID:-qa004}"
+JENKINS_PASS="${JENKINS_ADMIN_PASSWORD:-abcd@1234}"
 
 echo "Waiting for Jenkins to be fully ready..."
 for i in $(seq 1 60); do

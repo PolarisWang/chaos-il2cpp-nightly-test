@@ -12,6 +12,7 @@ RUN apt-get update -qq && \
         python3-pip \
         curl \
         ca-certificates \
+        unzip \
         openjdk-17-jre-headless \
         gcc-aarch64-linux-gnu \
         g++-aarch64-linux-gnu \
@@ -20,6 +21,10 @@ RUN apt-get update -qq && \
         binfmt-support \
         libc6-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
+
+# Install SonarScanner & Allure CLI
+COPY docker/install-ci-tools.sh /tmp/install-ci-tools.sh
+RUN bash /tmp/install-ci-tools.sh && rm /tmp/install-ci-tools.sh
 
 ENV QEMU_LD_PREFIX=/usr/aarch64-linux-gnu
 

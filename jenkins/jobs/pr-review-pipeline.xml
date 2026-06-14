@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow-definition plugin="workflow-job@latest">
+  <description>chaos-il2cpp PR Review Pipeline — triggered by GitHub webhook on PR open/sync</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty>
+      <triggers>
+        <com.nirima.jenkins.plugins.webhook.WebHookTrigger plugin="webhook-trigger">
+          <token>pr-review-trigger</token>
+        </com.nirima.jenkins.plugins.webhook.WebHookTrigger>
+      </triggers>
+    </org.jenkinsci.plugins.workflow.job.properties.PipelineTriggersJobProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps@latest">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git@latest">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>*/main</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+    </scm>
+    <scriptPath>Jenkinsfile</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <disabled>false</disabled>
+</flow-definition>

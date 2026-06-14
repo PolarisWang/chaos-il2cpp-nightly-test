@@ -1,0 +1,33 @@
+# Environment
+.env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+artifacts/
+*.tar.gz
+*.zip
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Jenkins temp
+@tmp/

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow-definition plugin="workflow-job@latest">
+  <description>chaos-il2cpp Performance Test Pipeline — manually triggered, multi-iteration benchmarks</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.ChoiceParameterDefinition>
+          <name>PERF_PLATFORM</name>
+          <choices class="java.util.Arrays$ArrayList">
+            <string class="string">linux-x64</string>
+            <string class="string">linux-arm64</string>
+          </choices>
+          <description>Target platform for performance test</description>
+        </hudson.model.ChoiceParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>PERF_ITERATIONS</name>
+          <description>Number of benchmark iterations</description>
+          <defaultValue>3</defaultValue>
+          <trim>true</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.ChoiceParameterDefinition>
+          <name>BUILD_CONFIG</name>
+          <choices class="java.util.Arrays$ArrayList">
+            <string class="string">profile</string>
+            <string class="string">debug</string>
+            <string class="string">ship</string>
+          </choices>
+          <description>Build configuration</description>
+        </hudson.model.ChoiceParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps@latest">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git@latest">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>*/main</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+    </scm>
+    <scriptPath>Jenkinsfile</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <disabled>false</disabled>
+</flow-definition>

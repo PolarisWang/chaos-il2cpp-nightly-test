@@ -12,8 +12,13 @@ RUN apt-get update -qq && \
         python3-pip \
         curl \
         ca-certificates \
+        unzip \
         openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
+
+# Install SonarScanner & Allure CLI
+COPY docker/install-ci-tools.sh /tmp/install-ci-tools.sh
+RUN bash /tmp/install-ci-tools.sh && rm /tmp/install-ci-tools.sh
 
 COPY docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

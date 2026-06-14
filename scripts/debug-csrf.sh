@@ -1,12 +1,12 @@
 #!/bin/bash
 # Debug CSRF agent creation
-CRUMB=$(curl -s -c /tmp/cookies -u "admin:chaos123!" \
+CRUMB=$(curl -s -c /tmp/cookies -u "qa004:abcd@1234" \
   "http://localhost:8080/crumbIssuer/api/xml?xpath=//crumb" | grep -oP "<crumb>\K[^<]+")
 echo "Crumb: ${CRUMB}"
 
 NODEXML='<slave><name>test-agent3</name><remoteFS>/tmp</remoteFS><numExecutors>1</numExecutors><mode>NORMAL</mode><retentionStrategy class="hudson.slaves.RetentionStrategy$Always"/><launcher class="hudson.slaves.JNLPLauncher"/></slave>'
 
-HTTP=$(curl -s -b /tmp/cookies -u "admin:chaos123!" \
+HTTP=$(curl -s -b /tmp/cookies -u "qa004:abcd@1234" \
   -H "Content-Type: application/xml" \
   -H "Jenkins-Crumb: ${CRUMB}" \
   -d "${NODEXML}" \
@@ -15,5 +15,5 @@ HTTP=$(curl -s -b /tmp/cookies -u "admin:chaos123!" \
 echo "Create result: HTTP ${HTTP}"
 
 echo "Nodes after:"
-curl -s -b /tmp/cookies -u "admin:chaos123!" \
+curl -s -b /tmp/cookies -u "qa004:abcd@1234" \
   "http://localhost:8080/computer/api/json" | grep -oP '"displayName":"[^"]*"'
