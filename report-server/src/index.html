@@ -25,6 +25,13 @@
                  font-weight: 600; margin-left: 8px; }
         .badge-pass { background: #d4edda; color: #155724; }
         .badge-fail { background: #f8d7da; color: #721c24; }
+        .badge-warn { background: #fff3cd; color: #856404; }
+        .btn { display: inline-block; padding: 10px 20px; background: #4361ee; color: #fff;
+               border-radius: 6px; text-decoration: none; font-weight: 600; margin-right: 8px; }
+        .btn:hover { background: #3651d4; }
+        .btn-outline { display: inline-block; padding: 10px 20px; border: 2px solid #4361ee; color: #4361ee;
+                       border-radius: 6px; text-decoration: none; font-weight: 600; }
+        .btn-outline:hover { background: #f0f7ff; }
         .platform-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
         .footer { text-align: center; padding: 20px; color: #666; font-size: 0.85rem; }
     </style>
@@ -35,22 +42,18 @@
         <p>Multi-Platform Build · Test · Code Quality</p>
     </div>
     <div class="container">
-        <div class="card">
+        <div class="card" style="text-align:center;">
             <h2>最新日报</h2>
-            <ul>
-                <li><a href="/daily/">查看所有历史日报 →</a></li>
-            </ul>
+            <p style="margin-bottom:16px;color:#666;">查看最近一次 Nightly Build 完整报告</p>
+            <a class="btn" href="/daily/nightly-latest.html">查看最新报告 →</a>
+            <a class="btn-outline" href="/daily/">浏览历史报告</a>
         </div>
         <div class="card">
-            <h2>测试报告</h2>
-            <div class="platform-grid" id="allure-links">
-                <p>加载中...</p>
-            </div>
-        </div>
-        <div class="card">
-            <h2>代码质量</h2>
+            <h2>快速入口</h2>
             <ul>
-                <li><a href="/sonar/dashboard?id=chaos-il2cpp" target="_blank">SonarQube 仪表盘 →</a></li>
+                <li><a href="/daily/">📅 历史日报列表</a> — 按日期排列所有 Nightly 报告</li>
+                <li><a href="/daily/nightly-latest.html">📊 最新报告</a> — 完整的综合日报</li>
+                <li><a href="/sonar/dashboard?id=chaos-il2cpp" target="_blank">🔍 SonarQube 仪表盘</a> — 代码质量详情</li>
             </ul>
         </div>
         <div class="card">

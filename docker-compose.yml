@@ -163,7 +163,10 @@ services:
     ports:
       - "8081:80"
     volumes:
-      - report-data:/usr/share/nginx/html
+      # Host bind mount — orchestrator writes here, Nginx serves from here
+      - /var/lib/report-server/daily:/usr/share/nginx/html/daily
+      # Static assets (index.html, etc.)
+      - ./report-server/src:/usr/share/nginx/html:ro
     depends_on:
       - sonarqube
     restart: unless-stopped
