@@ -95,6 +95,38 @@
             </div>
         </div>
 
+        <!-- Benchmark / HotUpdate / Memory Drill-Down -->
+        <div class="card" id="drilldownCard">
+            <h2>数据钻取</h2>
+            <div class="tab-bar" id="ddTabBar">
+                <button class="tab-btn active" data-tab="benchmark" onclick="switchDDTab('benchmark')">Benchmark</button>
+                <button class="tab-btn" data-tab="hotupdate" onclick="switchDDTab('hotupdate')">HotUpdate</button>
+                <button class="tab-btn" data-tab="memory" onclick="switchDDTab('memory')">Memory</button>
+            </div>
+            <div id="ddBreadcrumb" style="font-size:0.85rem;color:#666;margin-bottom:12px;display:none;">
+                <a href="#" onclick="ddLevelUp();return false;" style="color:#4361ee;">Dashboard</a>
+                <span id="ddBreadcrumbPath"></span>
+            </div>
+            <div id="ddLevel1" style="height:320px;"></div>
+            <div id="ddLevel2" style="height:300px;display:none;"></div>
+            <div id="ddLevel3" style="display:none;">
+                <div style="max-height:400px;overflow-y:auto;">
+                    <table class="recent-table" id="ddMethodTable">
+                        <thead><tr>
+                            <th>#</th>
+                            <th onclick="ddSort('method_name')" style="cursor:pointer;">方法名<span id="sortArrow1"></span></th>
+                            <th>类型</th>
+                            <th onclick="ddSort('elapsed_ms')" style="cursor:pointer;">耗时<span id="sortArrow2"></span></th>
+                            <th onclick="ddSort('ops_per_sec')" style="cursor:pointer;">吞吐<span id="sortArrow3"></span></th>
+                            <th onclick="ddSort('memory_bytes')" style="cursor:pointer;">内存<span id="sortArrow4"></span></th>
+                        </tr></thead>
+                        <tbody id="ddMethodBody"></tbody>
+                    </table>
+                    <div id="ddPagination" style="text-align:center;padding:8px;"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- New Charts Row (3) -->
         <div class="card">
             <h2>深度分析</h2>
@@ -639,12 +671,369 @@
         return false;
     }
 
+    // ── Drill-Down State ──────────────────────────────────────────
+    let ddState = {
+        currentTab: 'benchmark',
+        currentDate: null,
+        currentDll: null,
+        currentChunk: null,
+        level: 1,
+        sortField: 'elapsed_ms',
+        sortDir: 'desc',
+        page: 0,
+        pageSize: 50,
+    };
+
+    async function getLatestDate() {
+        try {
+            const { reports } = await fetchJSON('/api/reports?limit=1');
+            if (reports && reports.length > 0) return reports[0].date_tag.slice(0, 8);
+        } catch (_) {}
+        return '20260614';
+    }
+
+    function switchDDTab(tab) {
+        ddState.currentTab = tab;
+        ddState.level = 1;
+        ddState.currentDll = null;
+        ddState.currentChunk = null;
+        document.querySelectorAll('#ddTabBar .tab-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.tab === tab);
+        });
+        document.getElementById('ddBreadcrumb').style.display = 'none';
+        renderDDLevel1();
+    }
+
+    function ddLevelUp() {
+        if (ddState.level === 3) {
+            ddState.level = 2;
+            ddState.currentChunk = null;
+            renderDDLevel2();
+        } else if (ddState.level === 2) {
+            ddState.level = 1;
+            ddState.currentDll = null;
+            document.getElementById('ddBreadcrumb').style.display = 'none';
+            renderDDLevel1();
+        }
+    }
+
+    async function ddDrillToDll(dllName) {
+        ddState.currentDll = dllName;
+        ddState.level = 2;
+        ddState.currentChunk = null;
+        renderDDLevel2();
+    }
+
+    async function ddDrillToChunk(chunkName) {
+        ddState.currentChunk = chunkName;
+        ddState.level = 3;
+        ddState.page = 0;
+        renderDDLevel3();
+    }
+
+    async function renderDDLevel1() {
+        const tab = ddState.currentTab;
+        const date = ddState.currentDate || await getLatestDate();
+        ddState.currentDate = date;
+
+        const container = document.getElementById('ddLevel1');
+        document.getElementById('ddLevel2').style.display = 'none';
+        document.getElementById('ddLevel3').style.display = 'none';
+        container.style.display = 'block';
+
+        try {
+            let url, title, color;
+            if (tab === 'benchmark') {
+                url = `/api/benchmark/dll-summary?date_tag=${date}`;
+                title = '基准测试 — DLL 排名';
+                color = '#4361ee';
+            } else if (tab === 'hotupdate') {
+                url = `/api/hotupdate/dll-summary?date_tag=${date}`;
+                title = '热更新 — DLL 排名';
+                color = '#8b5cf6';
+            } else {
+                url = `/api/memory/dll-summary?date_tag=${date}`;
+                title = '内存 — DLL 排名';
+                color = '#10b981';
+            }
+
+            const data = await fetchJSON(url);
+            const dlls = data.dlls || [];
+
+            if (dlls.length === 0) {
+                container.innerHTML = `<div class="error-msg">暂无 ${tab} 数据 (${date}) — 等待 Nightly 构建</div>`;
+                return;
+            }
+
+            const names = dlls.map(d => d.dll_name.length > 28 ? d.dll_name.slice(0, 26) + '..' : d.dll_name);
+            let values, unit, tooltipFn;
+
+            if (tab === 'benchmark') {
+                values = dlls.map(d => d.total_methods);
+                unit = '方法数';
+                tooltipFn = d => `${unit}: ${d.total_methods}<br/>平均耗时: ${d.avg_duration_ms ? d.avg_duration_ms.toFixed(3) + 'ms' : 'N/A'}<br/>总分配: ${fmtBytes(d.total_allocated_bytes)}`;
+            } else if (tab === 'hotupdate') {
+                values = dlls.map(d => d.total_passed || 0);
+                unit = '通过数';
+                tooltipFn = d => `${unit}: ${d.total_passed}/${d.total_tests}<br/>全语义: ${d.all_semantic || 0}<br/>全回退: ${d.all_revert || 0}`;
+            } else {
+                values = dlls.map(d => Math.round((d.total_nursery_alloc || 0) / (1024*1024) * 10) / 10);
+                unit = 'MB (Nursery)';
+                tooltipFn = d => `${unit}: ${d.total_nursery_alloc ? fmtBytes(d.total_nursery_alloc) : '0'}<br/>GC暂停: ${d.total_gc_pause_ns ? (d.total_gc_pause_ns / 1e6).toFixed(1) + 'ms' : '0'}<br/>FastPath: ${d.avg_fast_path_rate ? (d.avg_fast_path_rate * 100).toFixed(1) + '%' : 'N/A'}`;
+            }
+
+            const chart = echarts.init(container);
+            chart.setOption({
+                title: { text: `${title} (${date})`, textStyle: { fontSize: 13 } },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'shadow' },
+                    formatter: params => {
+                        const p = params[0];
+                        const d = dlls[p.dataIndex];
+                        return `<b>${d.dll_name}</b><br/>${tooltipFn(d)}`;
+                    }
+                },
+                grid: { left: 200, right: 40, top: 40, bottom: 20 },
+                xAxis: { type: 'value' },
+                yAxis: { type: 'category', data: names.reverse(), axisLabel: { fontSize: 10 } },
+                series: [{
+                    type: 'bar',
+                    data: values.slice().reverse(),
+                    itemStyle: { color, borderRadius: [0, 4, 4, 0] },
+                }]
+            });
+
+            chart.on('click', params => {
+                const idx = names.length - 1 - params.dataIndex;
+                const dll = dlls[idx];
+                if (dll) ddDrillToDll(dll.dll_name);
+            });
+
+            window.addEventListener('resize', () => chart.resize());
+            window._ddChart = chart;
+        } catch (e) {
+            container.innerHTML = `<div class="error-msg">加载失败: ${e.message}</div>`;
+        }
+    }
+
+    async function renderDDLevel2() {
+        const dllName = ddState.currentDll;
+        const date = ddState.currentDate;
+        const tab = ddState.currentTab;
+
+        document.getElementById('ddLevel1').style.display = 'none';
+        document.getElementById('ddLevel3').style.display = 'none';
+        const container = document.getElementById('ddLevel2');
+        container.style.display = 'block';
+
+        const bc = document.getElementById('ddBreadcrumb');
+        bc.style.display = 'block';
+        document.getElementById('ddBreadcrumbPath').innerHTML =
+            ` > <a href="#" onclick="ddDrillToDll('${dllName}');return false;" style="color:#4361ee;">${dllName}</a>`;
+
+        try {
+            let url;
+            if (tab === 'benchmark') url = `/api/benchmark/${encodeURIComponent(dllName)}/chunks?date_tag=${date}`;
+            else if (tab === 'hotupdate') url = `/api/hotupdate/${encodeURIComponent(dllName)}/chunks?date_tag=${date}`;
+            else url = `/api/benchmark/${encodeURIComponent(dllName)}/chunks?date_tag=${date}`;
+
+            const data = await fetchJSON(url);
+            const chunks = data.chunks || [];
+
+            // Filter non-empty chunks based on tab
+            let hasData = false;
+            let barData, lineData, barName, lineName, barColor, lineColor;
+
+            if (tab === 'benchmark') {
+                const filtered = chunks.filter(c => (c.bm_method_count || 0) > 0);
+                if (filtered.length > 0) { hasData = true; }
+                barData = chunks.map(c => c.bm_method_count || 0);
+                lineData = chunks.map(c => c.bm_mean_duration_ms || 0);
+                barName = '方法数'; lineName = '平均耗时 (ms)';
+                barColor = '#4361ee'; lineColor = '#f59e0b';
+            } else if (tab === 'hotupdate') {
+                const filtered = chunks.filter(c => (c.hu_passed + c.hu_failed) > 0);
+                if (filtered.length > 0) { hasData = true; }
+                barData = chunks.map(c => c.hu_passed || 0);
+                lineData = chunks.map(c => c.hu_failed || 0);
+                barName = '通过'; lineName = '失败';
+                barColor = '#8b5cf6'; lineColor = '#ef4444';
+            } else {
+                const filtered = chunks.filter(c => (c.mem_methods_profiled || 0) > 0);
+                if (filtered.length > 0) { hasData = true; }
+                barData = chunks.map(c => Math.round((c.mem_total_nursery_alloc_bytes || 0) / (1024*1024) * 10) / 10);
+                lineData = chunks.map(c => c.mem_methods_profiled || 0);
+                barName = 'Nursery (MB)'; lineName = '方法数';
+                barColor = '#10b981'; lineColor = '#4361ee';
+            }
+
+            if (!hasData) {
+                container.innerHTML = `<div class="error-msg">${dllName} 无 ${tab} 分块数据</div>`;
+                return;
+            }
+
+            const names = chunks.map(c => c.chunk_name || '(root)');
+
+            const chart = echarts.init(container);
+            chart.setOption({
+                title: { text: `${dllName} — Chunk 分解`, textStyle: { fontSize: 13 } },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: params => {
+                        let html = `<b>${params[0].name}</b>`;
+                        params.forEach(p => { html += `<br/>${p.seriesName}: ${p.value}`; });
+                        return html;
+                    }
+                },
+                legend: { data: [barName, lineName], bottom: 0, fontSize: 10 },
+                grid: { left: 60, right: 50, top: 40, bottom: 40 },
+                xAxis: { type: 'category', data: names, axisLabel: { rotate: 30, fontSize: 10 } },
+                yAxis: [
+                    { type: 'value', name: barName, nameTextStyle: { fontSize: 10 } },
+                    { type: 'value', name: lineName, nameTextStyle: { fontSize: 10 } },
+                ],
+                series: [
+                    { name: barName, type: 'bar', data: barData, itemStyle: { color: barColor, borderRadius: [3,3,0,0] } },
+                    { name: lineName, type: 'line', yAxisIndex: 1, data: lineData,
+                      smooth: true, lineStyle: { color: lineColor, width: 2 }, symbol: 'circle', symbolSize: 6 },
+                ]
+            });
+
+            chart.on('click', params => {
+                const chunkName = chunks[params.dataIndex]?.chunk_name;
+                if (chunkName) ddDrillToChunk(chunkName);
+            });
+
+            window.addEventListener('resize', () => chart.resize());
+            window._ddChart2 = chart;
+        } catch (e) {
+            container.innerHTML = `<div class="error-msg">加载失败: ${e.message}</div>`;
+        }
+    }
+
+    function ddSort(field) {
+        if (ddState.sortField === field) {
+            ddState.sortDir = ddState.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+            ddState.sortField = field;
+            ddState.sortDir = 'desc';
+        }
+        ddRenderMethodTable();
+    }
+
+    function ddSortArrow(field) {
+        if (ddState.sortField !== field) return '';
+        return ddState.sortDir === 'asc' ? ' ▲' : ' ▼';
+    }
+
+    function ddRenderMethodTable() {
+        const methods = ddState._fullMethodList || [];
+        const sortField = ddState.sortField;
+        const sortDir = ddState.sortDir;
+        const page = ddState.page;
+        const pageSize = ddState.pageSize;
+
+        // Update sort arrows in headers
+        document.getElementById('sortArrow1').textContent = sortField === 'method_name' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        document.getElementById('sortArrow2').textContent = sortField === 'elapsed_ms' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        document.getElementById('sortArrow3').textContent = sortField === 'ops_per_sec' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        document.getElementById('sortArrow4').textContent = sortField === 'memory_bytes' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+
+        // Sort
+        methods.sort((a, b) => {
+            const va = a[sortField] ?? '';
+            const vb = b[sortField] ?? '';
+            if (typeof va === 'string') {
+                return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+            }
+            return sortDir === 'asc' ? va - vb : vb - va;
+        });
+
+        // Paginate
+        const totalPages = Math.ceil(methods.length / pageSize) || 1;
+        const start = page * pageSize;
+        const pageMethods = methods.slice(start, start + pageSize);
+
+        const tbody = pageMethods.map((m, i) => `
+            <tr>
+                <td>${start + i + 1}</td>
+                <td title="${m.method_name}">${m.method_name.length > 50 ? m.method_name.slice(0, 48) + '..' : m.method_name}</td>
+                <td style="font-size:0.8rem;color:#666;">${m.type_name || '-'}</td>
+                <td>${fmtMs(m.elapsed_ms)}</td>
+                <td>${m.ops_per_sec ? m.ops_per_sec.toFixed(0) + ' ops/s' : 'N/A'}</td>
+                <td>${fmtBytes(m.memory_bytes)}</td>
+            </tr>
+        `).join('');
+
+        document.getElementById('ddMethodBody').innerHTML = tbody;
+
+        // Pagination controls
+        document.getElementById('ddPagination').innerHTML = `
+            <button class="btn-sm" style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;"
+                onclick="ddState.page=Math.max(0,ddState.page-1);ddRenderMethodTable();" ${page <= 0 ? 'disabled' : ''}>上一页</button>
+            <span style="margin:0 12px;font-size:0.85rem;color:#666;">${page + 1} / ${totalPages} (共 ${methods.length} 条)</span>
+            <button class="btn-sm" style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;"
+                onclick="ddState.page=Math.min(${totalPages - 1},ddState.page+1);ddRenderMethodTable();" ${page >= totalPages - 1 ? 'disabled' : ''}>下一页</button>
+        `;
+    }
+
+    async function renderDDLevel3() {
+        const dllName = ddState.currentDll;
+        const chunkName = ddState.currentChunk;
+        const date = ddState.currentDate;
+        const tab = ddState.currentTab;
+
+        document.getElementById('ddLevel2').style.display = 'none';
+        const container = document.getElementById('ddLevel3');
+        container.style.display = 'block';
+
+        const bc = document.getElementById('ddBreadcrumb');
+        bc.style.display = 'block';
+        document.getElementById('ddBreadcrumbPath').innerHTML =
+            ` > <a href="#" onclick="ddDrillToDll('${dllName}');return false;" style="color:#4361ee;">${dllName}</a> > ${chunkName}`;
+
+        try {
+            let data;
+            if (tab === 'benchmark') {
+                data = await fetchJSON(
+                    `/api/benchmark/${encodeURIComponent(dllName)}/${encodeURIComponent(chunkName)}/methods?date_tag=${date}&limit=500`
+                );
+            } else if (tab === 'hotupdate') {
+                data = await fetchJSON(
+                    `/api/hotupdate/${encodeURIComponent(dllName)}/${encodeURIComponent(chunkName)}/methods?date_tag=${date}`
+                );
+            } else {
+                data = await fetchJSON(
+                    `/api/benchmark/${encodeURIComponent(dllName)}/${encodeURIComponent(chunkName)}/methods?date_tag=${date}&limit=500`
+                );
+            }
+
+            const methods = data.methods || [];
+
+            if (methods.length === 0) {
+                document.getElementById('ddMethodBody').innerHTML =
+                    '<tr><td colspan="6" style="text-align:center;color:#999;">暂无方法数据</td></tr>';
+                document.getElementById('ddPagination').innerHTML = '';
+                return;
+            }
+
+            ddState._fullMethodList = methods;
+            ddState.page = 0;
+            ddRenderMethodTable();
+        } catch (e) {
+            document.getElementById('ddMethodBody').innerHTML =
+                `<tr><td colspan="6" style="text-align:center;color:#ef4444;">加载失败: ${e.message}</td></tr>`;
+        }
+    }
+
     // ── Init ─────────────────────────────────────────────────────
     renderTrends();
     renderMethodHeatmap();
     renderCoverage();
     renderComparisonRadar();
     renderRecentReports();
+    renderDDLevel1();
 
     // Enter key triggers for search
     document.getElementById('methodSearchInput').addEventListener('keydown', e => {

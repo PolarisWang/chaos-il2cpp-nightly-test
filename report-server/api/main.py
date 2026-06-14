@@ -185,6 +185,7 @@ def ingest_data(date_tag: str = Query(..., description="Date tag e.g. 20260614")
 
     summary = data.get("summary", {})
     dlls = data.get("dlls", {})
+    entry_maps = data.get("entry_maps", {})
     date_tag_val = data.get("date_tag", date_tag)
 
     # Build summary row
@@ -257,44 +258,107 @@ def ingest_data(date_tag: str = Query(..., description="Date tag e.g. 20260614")
             "mem_gc_pause_ns": mem_gc,
         })
 
-        # Per-method benchmark data
+        # Per-method benchmark data with entry_map name resolution
+        dll_entry_map = entry_maps.get(dll_name, {})
         bm_methods = []
         for slug, chunk in dll_data.get("chunks", {}).items():
             bench = chunk.get("benchmark", {})
             if bench and "error" not in bench and "results" in bench:
+                chunk_entry_map = dll_entry_map.get(slug, {})
                 for result in bench["results"]:
+                    entry_idx = result.get("entryIndex")
+                    resolved = chunk_entry_map.get(str(entry_idx), {}) if entry_idx is not None else {}
                     bm_methods.append({
                         "chunk_name": slug,
-                        "method_name": result.get("methodName", result.get("name", "unknown")),
+                        "entry_index": entry_idx,
+                        "method_name": resolved.get("method_name")
+                            or result.get("methodName")
+                            or result.get("name")
+                            or f"entry_{entry_idx}",
+                        "type_name": resolved.get("type_name", ""),
                         "elapsed_ms": result.get("elapsedMilliseconds") or result.get("elapsedMs"),
                         "ops_per_sec": result.get("opsPerSecond"),
-                        "memory_bytes": result.get("memoryBytes"),
+                        "memory_bytes": result.get("allocatedBytes") or result.get("memoryBytes"),
                     })
         if bm_methods:
-            # Limit to top 100 per DLL by elapsed_ms descending
             bm_methods.sort(key=lambda x: x.get("elapsed_ms") or 0, reverse=True)
-            db.upsert_benchmark_methods(date_tag_val, dll_name, bm_methods[:100])
+            db.upsert_benchmark_methods(date_tag_val, dll_name, bm_methods)
 
-        # Coverage data from aggregate
+        # Chunk summaries from benchmark-summary.json aggregate
         agg = dll_data.get("aggregate", {})
+        bench_summary = agg.get("benchmark-summary")
+        if bench_summary and "chunkSummaries" in bench_summary:
+            for cs in bench_summary["chunkSummaries"]:
+                chunk_slug = cs.get("slug", "")
+                bm = cs.get("benchmark", {}) or {}
+                db.upsert_chunk_summary(date_tag_val, dll_name, chunk_slug, {
+                    "methodCount": bm.get("methodCount", 0),
+                    "meanDurationMs": bm.get("meanDurationMs"),
+                    "meanOpsPerSec": bm.get("meanOpsPerSecond"),
+                    "minDurationMs": bm.get("minDurationMs"),
+                    "maxDurationMs": bm.get("maxDurationMs"),
+                    "totalDurationMs": bm.get("totalDurationMs"),
+                    "totalAllocatedBytes": bm.get("totalAllocatedBytes"),
+                    "meanCv": bm.get("meanCv"),
+                })
+
+        # HotUpdate per-method data
+        for slug, chunk in dll_data.get("chunks", {}).items():
+            hot = chunk.get("hotupdate", {})
+            if hot and "error" not in hot and "details" in hot:
+                details = hot["details"]
+                chunk_entry_map = dll_entry_map.get(slug, {})
+                hu_methods = []
+                # Collect all subject indices from baseline, patched, reverted
+                seen_sis = set()
+                for phase_key in ("baselineFact", "patchedFact", "revertedFact"):
+                    phase_data = details.get(phase_key, [])
+                    for entry in phase_data:
+                        si = entry.get("si") or entry.get("subjectIndex")
+                        if si is None:
+                            continue
+                        seen_sis.add(si)
+
+                for si in sorted(seen_sis):
+                    resolved = chunk_entry_map.get(str(si), {})
+
+                    def find_phase(pk):
+                        for e in details.get(pk, []):
+                            if (e.get("si") or e.get("subjectIndex")) == si:
+                                return e.get("passed")
+                        return None
+
+                    hu_methods.append({
+                        "si": si,
+                        "method_name": resolved.get("method_name", f"subject_{si}"),
+                        "type_name": resolved.get("type_name", ""),
+                        "assembly_name": resolved.get("assembly_name", ""),
+                        "baseline_passed": find_phase("baselineFact"),
+                        "patched_passed": find_phase("patchedFact"),
+                        "reverted_passed": find_phase("revertedFact"),
+                    })
+                if hu_methods:
+                    db.upsert_hotupdate_methods(date_tag_val, dll_name, slug, hu_methods)
+
+        # Coverage data from aggregate (actual format: totalDeclaredMethods, totalChunks, chunksWithResults)
         coverage = agg.get("coverage-audit")
         if coverage:
             db.upsert_coverage(date_tag_val, dll_name, coverage)
 
-        # Comparison data from aggregate
+        # Comparison data from aggregate (actual format: perChunk[].methods[].methodSubjectId)
         comparison_summary = agg.get("comparison-summary")
         if comparison_summary:
             comparisons = []
-            results = comparison_summary.get("results", comparison_summary.get("methods", []))
-            for method in results:
-                comparisons.append({
-                    "method_name": method.get("name", method.get("methodName", "unknown")),
-                    "chaos_aot_ms": method.get("chaosAotMs") or method.get("chaos_aot_ms"),
-                    "dotnet_8_ms": method.get("dotnet8Ms") or method.get("dotnet_8_ms"),
-                    "dotnet_10_ms": method.get("dotnet10Ms") or method.get("dotnet_10_ms"),
-                    "speedup_vs_8": method.get("speedupVs8") or method.get("speedup_vs_8"),
-                    "speedup_vs_10": method.get("speedupVs10") or method.get("speedup_vs_10"),
-                })
+            for chunk_entry in comparison_summary.get("perChunk", []):
+                for method in chunk_entry.get("methods", []):
+                    comparisons.append({
+                        "method_name": method.get("methodSubjectId", "unknown"),
+                        "chaos_aot_ms": method.get("chaosAotMs"),
+                        "dotnet_8_ms": method.get("net8Ms") or method.get("dotnet_8_ms"),
+                        "dotnet_10_ms": method.get("net10Ms") or method.get("dotnet_10_ms"),
+                        "speedup_vs_8": method.get("net10VsNet8Pct") or method.get("speedup_vs_8"),
+                        "speedup_vs_10": method.get("speedup_vs_10"),
+                    })
             if comparisons:
                 db.upsert_benchmark_comparison(date_tag_val, dll_name, comparisons)
 
@@ -320,6 +384,80 @@ def get_benchmark_methods(
 ):
     rows = db.get_benchmark_methods(dll_name, date_tag, limit=limit, offset=offset)
     return {"dll_name": dll_name, "methods": rows, "total": len(rows)}
+
+
+# ── Benchmark Drill-Down: Level 1 — DLL Summary ──────────────────
+@app.get("/api/benchmark/dll-summary")
+def benchmark_dll_summary(
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_dll_benchmark_summary(date_tag)
+    return {"date_tag": date_tag, "dlls": rows, "total": len(rows)}
+
+
+# ── Benchmark Drill-Down: Level 2 — Chunk Details ────────────────
+@app.get("/api/benchmark/{dll}/chunks")
+def benchmark_chunks(
+    dll: str,
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_chunk_summaries(date_tag, dll)
+    return {"date_tag": date_tag, "dll_name": dll, "chunks": rows, "total": len(rows)}
+
+
+# ── Benchmark Drill-Down: Level 3 — Per-Method List ──────────────
+@app.get("/api/benchmark/{dll}/{chunk}/methods")
+def benchmark_chunk_methods(
+    dll: str,
+    chunk: str,
+    date_tag: str | None = Query(None, description="Date tag e.g. 20260614"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    rows = db.get_benchmark_methods(dll, date_tag, limit=limit, offset=offset)
+    # Filter to only methods from this chunk
+    chunk_rows = [r for r in rows if r.get("chunk_name") == chunk]
+    return {"dll_name": dll, "chunk_name": chunk, "methods": chunk_rows, "total": len(chunk_rows)}
+
+
+# ── HotUpdate Drill-Down: Level 1 — DLL Summary ──────────────────
+@app.get("/api/hotupdate/dll-summary")
+def hotupdate_dll_summary(
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_dll_hotupdate_summary(date_tag)
+    return {"date_tag": date_tag, "dlls": rows, "total": len(rows)}
+
+
+# ── HotUpdate Drill-Down: Level 2 — Chunk Details ────────────────
+@app.get("/api/hotupdate/{dll}/chunks")
+def hotupdate_chunks(
+    dll: str,
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_chunk_summaries(date_tag, dll)
+    hu_rows = [r for r in rows if (r.get("hu_passed", 0) + r.get("hu_failed", 0)) > 0]
+    return {"date_tag": date_tag, "dll_name": dll, "chunks": hu_rows, "total": len(hu_rows)}
+
+
+# ── HotUpdate Drill-Down: Level 3 — Per-Method Detail ────────────
+@app.get("/api/hotupdate/{dll}/{chunk}/methods")
+def hotupdate_chunk_methods(
+    dll: str,
+    chunk: str,
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_hotupdate_methods(date_tag, dll, chunk)
+    return {"dll_name": dll, "chunk_name": chunk, "methods": rows, "total": len(rows)}
+
+
+# ── Memory Drill-Down: Level 1 — DLL Summary ─────────────────────
+@app.get("/api/memory/dll-summary")
+def memory_dll_summary(
+    date_tag: str = Query(..., description="Date tag e.g. 20260614"),
+):
+    rows = db.get_dll_memory_summary(date_tag)
+    return {"date_tag": date_tag, "dlls": rows, "total": len(rows)}
 
 
 # ── Search Benchmark Methods ──────────────────────────────────────

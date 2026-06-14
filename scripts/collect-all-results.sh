@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 FOUNDATION_DIR=""
 OUTPUT_DIR=""
-DATE_TAG="$(date +%Y%m%d-%H%M%S)"
+DATE_TAG="$(date +%Y%m%d)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -50,7 +50,7 @@ echo "=== Collecting results from ${FOUNDATION_DIR} ==="
 
 # Build JSON payload using python3 for robust JSON handling
 python3 - "$FOUNDATION_DIR" "$OUTPUT_DIR" "$DATE_TAG" << 'PYEOF'
-import json, os, sys, glob
+import json, os, sys, glob, re
 from pathlib import Path
 
 foundation_dir = Path(sys.argv[1])
@@ -160,7 +160,7 @@ for dll in all_dlls:
     # Aggregate report
     for ag_file in ["fact-summary.json", "benchmark-summary.json",
                     "profile-summary.json", "dashboard.json",
-                    "comparison-summary.json"]:
+                    "comparison-summary.json", "coverage-audit.json"]:
         ap = reports_dir / ag_file
         if ap.exists():
             try:
@@ -170,28 +170,74 @@ for dll in all_dlls:
 
     report["dlls"][dll] = dll_data
 
+# ── Parse entry.cpp for method name resolution ──
+ENTRY_PATTERN = re.compile(
+    r'\{\s*(\d+),\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",\s*(True|False),\s*"([^"]*)"\s*\}'
+)
+
+entry_maps = {}
+for dll_name in all_dlls:
+    dll_dir = foundation_dir / dll_name
+    chunks_dir = dll_dir / "chunks"
+    dll_entry_maps = {}
+    for slug in sorted(d.name for d in chunks_dir.iterdir() if d.is_dir()):
+        chunk_slug_dir = chunks_dir / slug
+        entry_cpp_files = sorted(chunk_slug_dir.rglob("entry.cpp"))
+        if not entry_cpp_files:
+            continue
+        for ecf in entry_cpp_files:
+            if not ecf.exists():
+                continue
+            try:
+                text = ecf.read_text(encoding="utf-8", errors="replace")
+                entries = {}
+                for match in ENTRY_PATTERN.finditer(text):
+                    idx = int(match.group(1))
+                    entries[idx] = {
+                        "subject_id": match.group(2),
+                        "assembly_name": match.group(3),
+                        "type_name": match.group(4),
+                        "method_name": match.group(5),
+                        "is_static": match.group(6) == "True",
+                        "kind": match.group(7),
+                    }
+                if entries:
+                    dll_entry_maps[slug] = entries
+                    print(f"  Parsed {len(entries)} entries from {dll_name}/{slug}")
+            except Exception as e:
+                print(f"  WARNING: Failed to parse entry.cpp for {dll_name}/{slug}: {e}")
+    if dll_entry_maps:
+        entry_maps[dll_name] = dll_entry_maps
+
+report["entry_maps"] = entry_maps
+
 # Extract per-method benchmark, coverage, and comparison data for expanded ingestion
 benchmark_methods_all = {}
 coverage_all = {}
 comparison_all = {}
 
 for dll_name, dll_data in report["dlls"].items():
-    # Per-method benchmark data
+    # Per-method benchmark data with entry_map name resolution
+    dll_entry_map = entry_maps.get(dll_name, {})
     methods_list = []
     for slug, chunk in dll_data.get("chunks", {}).items():
         bench = chunk.get("benchmark", {})
         if bench and "error" not in bench and "results" in bench:
+            chunk_entry_map = dll_entry_map.get(slug, {})
             for result in bench["results"]:
+                entry_idx = result.get("entryIndex")
+                resolved = chunk_entry_map.get(entry_idx, {})
                 methods_list.append({
                     "chunk_name": slug,
-                    "method_name": result.get("methodName", result.get("name", "unknown")),
+                    "method_name": resolved.get("method_name") or result.get("methodName") or result.get("name") or f"entry_{entry_idx}",
+                    "type_name": resolved.get("type_name", ""),
                     "elapsed_ms": result.get("elapsedMilliseconds") or result.get("elapsedMs"),
                     "ops_per_sec": result.get("opsPerSecond"),
-                    "memory_bytes": result.get("memoryBytes"),
+                    "memory_bytes": result.get("allocatedBytes") or result.get("memoryBytes"),
                 })
     if methods_list:
         methods_list.sort(key=lambda x: x.get("elapsed_ms") or 0, reverse=True)
-        benchmark_methods_all[dll_name] = methods_list[:100]
+        benchmark_methods_all[dll_name] = methods_list
 
     # Coverage data
     agg = dll_data.get("aggregate", {})
