@@ -1,6 +1,8 @@
 # Environment
 .env
-*.env.local
+.env.local
+*.secret
+secrets/
 
 # IDE
 .vscode/
@@ -18,6 +20,8 @@ artifacts/
 *.tar.gz
 *.zip
 *.log
+tmp/
+temp/
 
 # Docker
 docker-compose.override.yml
@@ -28,6 +32,9 @@ __pycache__/
 *.pyo
 venv/
 .venv/
+
+# Claude Code
+.claude/
 
 # Jenkins temp
 @tmp/
