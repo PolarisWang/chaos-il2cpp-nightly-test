@@ -17,7 +17,7 @@ RUN apt-get update -qq && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install SonarScanner & Allure CLI
-COPY docker/install-ci-tools.sh /tmp/install-ci-tools.sh
+COPY install-ci-tools.sh /tmp/install-ci-tools.sh
 RUN bash /tmp/install-ci-tools.sh && rm /tmp/install-ci-tools.sh
 
 ENV ANDROID_NDK_ROOT=/opt/android-ndk
@@ -29,7 +29,7 @@ RUN curl -fsSL -o /tmp/ndk.zip \
     mv /opt/android-ndk-${ANDROID_NDK_VERSION} ${ANDROID_NDK_ROOT} && \
     rm /tmp/ndk.zip
 
-COPY docker-entrypoint.sh /entrypoint.sh
+COPY android-arm64-agent/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /home/jenkins

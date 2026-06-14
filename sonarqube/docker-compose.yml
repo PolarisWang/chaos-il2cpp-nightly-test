@@ -1,5 +1,6 @@
 networks:
   jenkins:
+    name: chaos-il2cpp-nightly-test_jenkins
     external: true
 
 volumes:

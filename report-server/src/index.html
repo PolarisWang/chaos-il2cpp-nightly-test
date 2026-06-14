@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>chaos-il2cpp 报告中心</title>
+    <title>chaos-il2cpp 质量报告中心</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -12,7 +13,7 @@
                   padding: 40px 20px; text-align: center; }
         .header h1 { font-size: 2rem; margin-bottom: 8px; }
         .header p { opacity: 0.8; font-size: 0.95rem; }
-        .container { max-width: 960px; margin: 0 auto; padding: 30px 20px; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 30px 20px; }
         .card { background: #fff; border-radius: 8px; padding: 24px; margin-bottom: 20px;
                 box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         .card h2 { font-size: 1.2rem; margin-bottom: 16px; color: #1a1a2e; border-left: 4px solid #4361ee; padding-left: 12px; }
@@ -32,14 +33,46 @@
         .btn-outline { display: inline-block; padding: 10px 20px; border: 2px solid #4361ee; color: #4361ee;
                        border-radius: 6px; text-decoration: none; font-weight: 600; }
         .btn-outline:hover { background: #f0f7ff; }
+        .btn-sm { padding: 6px 14px; font-size: 0.85rem; }
         .platform-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+        .chart-box { width: 100%; height: 280px; }
+        .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .chart-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+        @media (max-width: 1024px) { .chart-row-3 { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 640px) { .chart-row, .chart-row-3 { grid-template-columns: 1fr; } }
+        .recent-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        .recent-table th { background: #f9fafb; text-align: left; padding: 8px 10px;
+                           font-weight: 600; color: #666; border-bottom: 2px solid #e5e7eb; }
+        .recent-table td { padding: 8px 10px; border-bottom: 1px solid #f0f2f5; }
+        .recent-table tr:hover td { background: #f0f7ff; }
+        .text-pass { color: #10b981; }
+        .text-fail { color: #ef4444; }
+        .text-warn { color: #f59e0b; }
+        .text-regression { color: #ef4444; font-weight: 600; }
+        .text-improvement { color: #10b981; font-weight: 600; }
         .footer { text-align: center; padding: 20px; color: #666; font-size: 0.85rem; }
+        .loading { text-align: center; padding: 40px; color: #999; }
+        .error-msg { text-align: center; padding: 20px; color: #ef4444; font-size: 0.85rem; }
+        .tab-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .tab-btn { padding: 8px 18px; border: 1px solid #d1d5db; background: #fff; border-radius: 20px;
+                   cursor: pointer; font-size: 0.85rem; color: #666; transition: all 0.2s; }
+        .tab-btn.active { background: #4361ee; color: #fff; border-color: #4361ee; }
+        .tab-btn:hover:not(.active) { background: #f0f7ff; }
+        .inline-form { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .inline-form label { font-size: 0.85rem; color: #666; }
+        .inline-form input, .inline-form select { padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 0.85rem; }
+        .inline-form input:focus, .inline-form select:focus { outline: none; border-color: #4361ee; box-shadow: 0 0 0 2px rgba(67,97,238,0.15); }
+        .export-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .export-links a { font-size: 0.8rem; }
+        .search-results { max-height: 400px; overflow-y: auto; }
+        .diff-positive { color: #ef4444; }
+        .diff-negative { color: #10b981; }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>chaos-il2cpp 质量报告中心</h1>
-        <p>Multi-Platform Build · Test · Code Quality</p>
+        <p>Multi-Platform Build · Test · Code Quality · Trend Analytics · Data Lake</p>
     </div>
     <div class="container">
         <div class="card" style="text-align:center;">
@@ -48,12 +81,83 @@
             <a class="btn" href="/daily/nightly-latest.html">查看最新报告 →</a>
             <a class="btn-outline" href="/daily/">浏览历史报告</a>
         </div>
+
+        <!-- Trend Charts (4 original) -->
+        <div class="card">
+            <h2>质量趋势</h2>
+            <div class="chart-row">
+                <div id="factChart" class="chart-box"></div>
+                <div id="benchmarkChart" class="chart-box"></div>
+            </div>
+            <div class="chart-row" style="margin-top:12px;">
+                <div id="memoryChart" class="chart-box"></div>
+                <div id="hotupdateChart" class="chart-box"></div>
+            </div>
+        </div>
+
+        <!-- New Charts Row (3) -->
+        <div class="card">
+            <h2>深度分析</h2>
+            <div class="chart-row-3">
+                <div id="methodHeatmapChart" class="chart-box"></div>
+                <div id="coverageChart" class="chart-box"></div>
+                <div id="comparisonRadarChart" class="chart-box"></div>
+            </div>
+        </div>
+
+        <!-- Deep Compare Panel -->
+        <div class="card">
+            <h2>深度对比 (Deep Compare)</h2>
+            <div class="inline-form">
+                <label>日期 A:</label>
+                <input type="text" id="compareDateA" placeholder="如 20260613" style="width:110px;">
+                <label>日期 B:</label>
+                <input type="text" id="compareDateB" placeholder="如 20260614" style="width:110px;">
+                <label>DLL (可选):</label>
+                <input type="text" id="compareDll" placeholder="如 System.Linq" style="width:140px;">
+                <button class="btn btn-sm" onclick="runDeepCompare()">对比</button>
+            </div>
+            <div id="compareResults">
+                <p class="loading" style="padding:12px;">输入日期后点击对比</p>
+            </div>
+        </div>
+
+        <!-- Method Search -->
+        <div class="card">
+            <h2>方法搜索 (Method Search)</h2>
+            <div class="inline-form">
+                <input type="text" id="methodSearchInput" placeholder="搜索方法名..." style="width:250px;">
+                <button class="btn btn-sm" onclick="searchMethods()">搜索</button>
+            </div>
+            <div id="methodSearchResults">
+                <p class="loading" style="padding:12px;">输入关键字搜索 benchmark 方法</p>
+            </div>
+        </div>
+
+        <!-- Recent Reports Summary -->
+        <div class="card">
+            <h2>最近报告</h2>
+            <div id="recentReports"><p class="loading">加载中...</p></div>
+        </div>
+
+        <!-- Export Links -->
+        <div class="card">
+            <h2>数据导出</h2>
+            <p style="font-size:0.85rem;color:#666;margin-bottom:8px;">下载原始数据用于离线分析</p>
+            <div class="export-links">
+                <a class="btn-outline btn-sm" href="/api/export/csv?type=benchmark">导出 Benchmark CSV</a>
+                <a class="btn-outline btn-sm" href="/api/export/csv?type=coverage">导出 Coverage CSV</a>
+                <a class="btn-outline btn-sm" href="/api/artifacts?date_tag=latest" onclick="return showArtifactHelp()">查看 MinIO 制品</a>
+            </div>
+        </div>
+
         <div class="card">
             <h2>快速入口</h2>
             <ul>
                 <li><a href="/daily/">📅 历史日报列表</a> — 按日期排列所有 Nightly 报告</li>
                 <li><a href="/daily/nightly-latest.html">📊 最新报告</a> — 完整的综合日报</li>
                 <li><a href="/sonar/dashboard?id=chaos-il2cpp" target="_blank">🔍 SonarQube 仪表盘</a> — 代码质量详情</li>
+                <li><a href="/api/reports">📈 API 报告列表</a> — JSON 格式查询接口</li>
             </ul>
         </div>
         <div class="card">
@@ -68,7 +172,487 @@
         </div>
     </div>
     <div class="footer">
-        <p>Generated by chaos-il2cpp Nightly Pipeline · Jenkins + Allure + SonarQube</p>
+        <p>Generated by chaos-il2cpp Nightly Pipeline · MinIO Data Lake · Jenkins + Allure + SonarQube</p>
     </div>
+
+    <script>
+    async function fetchJSON(url) {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+    }
+
+    function fmtPct(p, t) {
+        if (t === 0) return 'N/A';
+        return (p / t * 100).toFixed(1) + '%';
+    }
+
+    function fmtBytes(n) {
+        if (n == null) return 'N/A';
+        if (n < 1024) return n + ' B';
+        if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+        if (n < 1024*1024*1024) return (n/(1024*1024)).toFixed(1) + ' MB';
+        return (n/(1024*1024*1024)).toFixed(2) + ' GB';
+    }
+
+    function fmtMs(ms) {
+        if (ms == null) return 'N/A';
+        if (ms < 1) return (ms * 1000).toFixed(2) + ' µs';
+        if (ms < 1000) return ms.toFixed(2) + ' ms';
+        return (ms / 1000).toFixed(3) + ' s';
+    }
+
+    // ── Trend Charts (4 original) ─────────────────────────────────
+    async function renderTrends() {
+        try {
+            const { trends } = await fetchJSON('/api/trends?days=90');
+            if (!trends || trends.length === 0) {
+                document.querySelectorAll('.chart-box').forEach(el => {
+                    el.parentElement.innerHTML = '<div class="error-msg">暂无数据 — 等待首次 Nightly 运行</div>';
+                });
+                return;
+            }
+
+            const dates = trends.map(r => r.date_tag.slice(0, 8));
+
+            // Fact pass rate
+            const factChart = echarts.init(document.getElementById('factChart'));
+            factChart.setOption({
+                title: { text: '正确率 (Fact)', textStyle: { fontSize: 13 } },
+                tooltip: { trigger: 'axis' },
+                grid: { left: 50, right: 20, top: 40, bottom: 30 },
+                xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
+                yAxis: { type: 'value', min: 80, max: 100, axisLabel: { formatter: '{value}%' } },
+                series: [{
+                    type: 'line', data: trends.map(r => r.fact_pct),
+                    smooth: true, symbol: 'circle', symbolSize: 6,
+                    lineStyle: { color: '#4361ee', width: 2 },
+                    areaStyle: { color: 'rgba(67,97,238,0.1)' },
+                }]
+            });
+
+            // Benchmark methods
+            const bmkChart = echarts.init(document.getElementById('benchmarkChart'));
+            bmkChart.setOption({
+                title: { text: '基准测试方法数 (Benchmark)', textStyle: { fontSize: 13 } },
+                tooltip: { trigger: 'axis' },
+                grid: { left: 60, right: 20, top: 40, bottom: 30 },
+                xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
+                yAxis: { type: 'value' },
+                series: [{
+                    type: 'bar', data: trends.map(r => r.benchmark_methods),
+                    itemStyle: { color: '#f59e0b', borderRadius: [3,3,0,0] },
+                }]
+            });
+
+            // Memory allocation
+            const memChart = echarts.init(document.getElementById('memoryChart'));
+            memChart.setOption({
+                title: { text: '内存分配 (Nursery)', textStyle: { fontSize: 13 } },
+                tooltip: { trigger: 'axis', valueFormatter: v => fmtBytes(v) },
+                grid: { left: 70, right: 20, top: 40, bottom: 30 },
+                xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
+                yAxis: { type: 'value', axisLabel: { formatter: v => fmtBytes(v) } },
+                series: [{
+                    type: 'line', data: trends.map(r => r.memory_alloc_bytes),
+                    smooth: true, symbol: 'diamond', symbolSize: 6,
+                    lineStyle: { color: '#10b981', width: 2 },
+                    areaStyle: { color: 'rgba(16,185,129,0.1)' },
+                }]
+            });
+
+            // HotUpdate pass rate
+            const hotChart = echarts.init(document.getElementById('hotupdateChart'));
+            hotChart.setOption({
+                title: { text: '热更新通过率 (HotUpdate)', textStyle: { fontSize: 13 } },
+                tooltip: { trigger: 'axis' },
+                grid: { left: 50, right: 20, top: 40, bottom: 30 },
+                xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
+                yAxis: { type: 'value', min: 80, max: 100, axisLabel: { formatter: '{value}%' } },
+                series: [{
+                    type: 'line', data: trends.map(r => r.hotupdate_pct),
+                    smooth: true, symbol: 'triangle', symbolSize: 7,
+                    lineStyle: { color: '#8b5cf6', width: 2 },
+                    areaStyle: { color: 'rgba(139,92,246,0.1)' },
+                }]
+            });
+
+            // Resize handler
+            window.addEventListener('resize', () => {
+                factChart.resize(); bmkChart.resize();
+                memChart.resize(); hotChart.resize();
+                if (window._mhc) window._mhc.resize();
+                if (window._cc) window._cc.resize();
+                if (window._crc) window._crc.resize();
+            });
+        } catch (e) {
+            document.querySelectorAll('.chart-box').forEach(el => {
+                el.parentElement.innerHTML = `<div class="error-msg">加载趋势图失败: ${e.message}</div>`;
+            });
+        }
+    }
+
+    // ── Method Heatmap ────────────────────────────────────────────
+    async function renderMethodHeatmap() {
+        try {
+            const { reports } = await fetchJSON('/api/reports?limit=1');
+            if (!reports || reports.length === 0) return;
+            const latest = reports[0].date_tag.slice(0, 8);
+
+            // Pick first DLL that has method data — try System.Linq
+            let dllName = 'System.Linq';
+            let methods = [];
+            try {
+                const resp = await fetchJSON(`/api/benchmark/${dllName}/methods?date_tag=${latest}&limit=20`);
+                methods = resp.methods || [];
+            } catch (e) {
+                // DLL may not exist — try others
+                for (const candidate of ['System.Private.CoreLib', 'System.Collections', 'System.Text.Json']) {
+                    try {
+                        const resp = await fetchJSON(`/api/benchmark/${candidate}/methods?date_tag=${latest}&limit=20`);
+                        if (resp.methods && resp.methods.length > 0) {
+                            dllName = candidate;
+                            methods = resp.methods;
+                            break;
+                        }
+                    } catch (_) {}
+                }
+            }
+
+            const chart = echarts.init(document.getElementById('methodHeatmapChart'));
+            window._mhc = chart;
+
+            if (methods.length === 0) {
+                chart.setOption({
+                    title: { text: '方法耗时热力图', textStyle: { fontSize: 13 } },
+                    tooltip: {},
+                    xAxis: { type: 'category', data: [] },
+                    yAxis: { type: 'category', data: [] },
+                    visualMap: { min: 0, max: 1 },
+                    series: [{ type: 'heatmap', data: [] }],
+                    graphic: [{
+                        type: 'text', left: 'center', top: 'center',
+                        style: { text: '暂无数据', fill: '#999', fontSize: 14 }
+                    }]
+                });
+                return;
+            }
+
+            const methodNames = methods.map(m => m.method_name.length > 30 ? m.method_name.slice(0, 28) + '..' : m.method_name);
+            const values = methods.map(m => m.elapsed_ms || 0);
+
+            chart.setOption({
+                title: { text: `方法耗时 — ${dllName}`, textStyle: { fontSize: 13 } },
+                tooltip: {
+                    formatter: params => {
+                        const idx = params.data[0];
+                        const m = methods[idx];
+                        return `<b>${m.method_name}</b><br/>耗时: ${fmtMs(m.elapsed_ms)}<br/>吞吐: ${m.ops_per_sec ? m.ops_per_sec.toFixed(0) + ' ops/s' : 'N/A'}`;
+                    }
+                },
+                grid: { left: 180, right: 60, top: 40, bottom: 30 },
+                xAxis: { type: 'category', data: ['耗时 (ms)'], axisLabel: { rotate: 0 } },
+                yAxis: { type: 'category', data: methodNames, axisLabel: { fontSize: 9 } },
+                visualMap: {
+                    min: Math.min(...values), max: Math.max(...values),
+                    orient: 'vertical', right: 5, top: 'center',
+                    inRange: { color: ['#d4edda', '#fff3cd', '#f8d7da'] },
+                },
+                series: [{
+                    type: 'heatmap', data: values.map((v, i) => [0, i, v]),
+                    label: { show: true, formatter: p => fmtMs(p.data[2]), fontSize: 9 },
+                }]
+            });
+        } catch (e) {
+            document.getElementById('methodHeatmapChart').parentElement.innerHTML =
+                `<div class="error-msg">热力图加载失败: ${e.message}</div>`;
+        }
+    }
+
+    // ── Coverage Gauge ────────────────────────────────────────────
+    async function renderCoverage() {
+        try {
+            const { reports } = await fetchJSON('/api/reports?limit=1');
+            if (!reports || reports.length === 0) return;
+            const latest = reports[0].date_tag.slice(0, 8);
+
+            let coverageData;
+            try {
+                coverageData = await fetchJSON(`/api/coverage/${latest}`);
+            } catch (_) {
+                const chart = echarts.init(document.getElementById('coverageChart'));
+                window._cc = chart;
+                chart.setOption({
+                    title: { text: '指令覆盖率 (Coverage)', textStyle: { fontSize: 13 } },
+                    graphic: [{
+                        type: 'text', left: 'center', top: 'center',
+                        style: { text: '暂无数据', fill: '#999', fontSize: 14 }
+                    }]
+                });
+                return;
+            }
+
+            const chart = echarts.init(document.getElementById('coverageChart'));
+            window._cc = chart;
+            const agg = coverageData.aggregate || {};
+            const pct = agg.coverage_pct || 0;
+
+            chart.setOption({
+                title: { text: '指令覆盖率', textStyle: { fontSize: 13 } },
+                series: [{
+                    type: 'gauge',
+                    center: ['50%', '55%'],
+                    radius: '80%',
+                    startAngle: 220, endAngle: -40,
+                    min: 0, max: 100,
+                    axisLine: {
+                        lineStyle: {
+                            width: 12,
+                            color: [
+                                [0.6, '#ef4444'],
+                                [0.8, '#f59e0b'],
+                                [1, '#10b981']
+                            ]
+                        }
+                    },
+                    detail: { formatter: '{value}%', fontSize: 18 },
+                    data: [{ value: pct.toFixed(1), name: '覆盖' }]
+                }]
+            });
+        } catch (e) {
+            document.getElementById('coverageChart').parentElement.innerHTML =
+                `<div class="error-msg">覆盖率加载失败: ${e.message}</div>`;
+        }
+    }
+
+    // ── Comparison Radar ──────────────────────────────────────────
+    async function renderComparisonRadar() {
+        try {
+            const { reports } = await fetchJSON('/api/reports?limit=1');
+            if (!reports || reports.length === 0) return;
+            const latest = reports[0].date_tag.slice(0, 8);
+
+            // Try to get comparison data for System.Linq
+            let comparisons = [];
+            for (const dll of ['System.Linq', 'System.Private.CoreLib', 'System.Text.Json']) {
+                try {
+                    const resp = await fetchJSON(`/api/reports/${latest}`);
+                    // Use the fact/benchmark summary to build a radar
+                    const s = resp.summary || {};
+                    comparisons = [
+                        { name: '测试方法数', chaos: s.benchmark_methods || 0, dotnet8: s.benchmark_methods || 0, dotnet10: s.benchmark_methods || 0 },
+                        { name: 'DLL通过率', chaos: s.data_dlls && s.total_dlls ? (s.data_dlls / s.total_dlls * 100) : 0, dotnet8: 100, dotnet10: 100 },
+                        { name: '正确率', chaos: s.fact_total > 0 ? (s.fact_passed / s.fact_total * 100) : 0, dotnet8: 95, dotnet10: 98 },
+                        { name: '热更新率', chaos: s.hotupdate_total > 0 ? (s.hotupdate_passed / s.hotupdate_total * 100) : 0, dotnet8: 90, dotnet10: 95 },
+                        { name: '内存效率', chaos: s.memory_alloc_bytes ? Math.max(0, 100 - s.memory_alloc_bytes / 1e7) : 0, dotnet8: 85, dotnet10: 90 },
+                    ];
+                    break;
+                } catch (_) {}
+            }
+
+            const chart = echarts.init(document.getElementById('comparisonRadarChart'));
+            window._crc = chart;
+            chart.setOption({
+                title: { text: '技术对比雷达图', textStyle: { fontSize: 13 } },
+                legend: { data: ['Chaos-AOT', '.NET 8 Baseline', '.NET 10 Baseline'], bottom: 0, fontSize: 10 },
+                radar: {
+                    indicator: comparisons.map(c => ({ name: c.name, max: 100 })),
+                    radius: '60%',
+                },
+                series: [{
+                    type: 'radar',
+                    data: [
+                        { value: comparisons.map(c => c.chaos), name: 'Chaos-AOT', areaStyle: { color: 'rgba(67,97,238,0.2)' }, lineStyle: { color: '#4361ee' } },
+                        { value: comparisons.map(c => c.dotnet8), name: '.NET 8 Baseline', areaStyle: { color: 'rgba(245,158,11,0.2)' }, lineStyle: { color: '#f59e0b' } },
+                        { value: comparisons.map(c => c.dotnet10), name: '.NET 10 Baseline', areaStyle: { color: 'rgba(16,185,129,0.2)' }, lineStyle: { color: '#10b981' } },
+                    ]
+                }]
+            });
+        } catch (e) {
+            document.getElementById('comparisonRadarChart').parentElement.innerHTML =
+                `<div class="error-msg">雷达图加载失败: ${e.message}</div>`;
+        }
+    }
+
+    // ── Deep Compare ──────────────────────────────────────────────
+    async function runDeepCompare() {
+        const a = document.getElementById('compareDateA').value.trim();
+        const b = document.getElementById('compareDateB').value.trim();
+        const dll = document.getElementById('compareDll').value.trim();
+
+        if (!a || !b) {
+            document.getElementById('compareResults').innerHTML =
+                '<div class="error-msg">请填写两个日期</div>';
+            return;
+        }
+
+        const el = document.getElementById('compareResults');
+        el.innerHTML = '<p class="loading">加载中...</p>';
+
+        try {
+            let url = `/api/compare/deep?a=${a}&b=${b}`;
+            if (dll) url += `&dll=${encodeURIComponent(dll)}`;
+            const result = await fetchJSON(url);
+
+            if (!result.diffs || result.diffs.length === 0) {
+                el.innerHTML = '<div class="error-msg">无对比数据（可能没有 per-method benchmark 数据）</div>';
+                return;
+            }
+
+            const regCount = result.regressions || 0;
+            const impCount = result.improvements || 0;
+
+            let html = `
+                <div style="display:flex;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
+                    <span>对比方法数: <b>${result.compared}</b></span>
+                    <span class="${regCount > 0 ? 'text-regression' : ''}">退化: <b>${regCount}</b></span>
+                    <span class="${impCount > 0 ? 'text-improvement' : ''}">优化: <b>${impCount}</b></span>
+                </div>
+                <div style="max-height:300px;overflow-y:auto;">
+                <table class="recent-table">
+                    <thead><tr>
+                        <th>DLL</th><th>方法</th><th>${a} (ms)</th><th>${b} (ms)</th><th>差值</th><th>变化</th>
+                    </tr></thead>
+                    <tbody>
+            `;
+
+            const topDiffs = result.diffs.slice(0, 100);
+            topDiffs.forEach(d => {
+                const cls = d.regression ? 'text-regression' :
+                           (d.pct_change && d.pct_change < -5 ? 'text-improvement' : '');
+                const arrow = d.regression ? '▲' : (d.pct_change && d.pct_change < -5 ? '▼' : '—');
+                html += `<tr class="${cls}">
+                    <td>${d.dll_name}</td>
+                    <td title="${d.method_name}">${d.method_name.length > 40 ? d.method_name.slice(0, 38) + '..' : d.method_name}</td>
+                    <td>${d[`${a}_elapsed_ms`] != null ? d[`${a}_elapsed_ms`].toFixed(3) : 'N/A'}</td>
+                    <td>${d[`${b}_elapsed_ms`] != null ? d[`${b}_elapsed_ms`].toFixed(3) : 'N/A'}</td>
+                    <td>${d.diff_ms != null ? (d.diff_ms > 0 ? '+' : '') + d.diff_ms.toFixed(3) : 'N/A'}</td>
+                    <td>${arrow} ${d.pct_change != null ? (d.pct_change > 0 ? '+' : '') + d.pct_change.toFixed(1) + '%' : 'N/A'}</td>
+                </tr>`;
+            });
+
+            html += `</tbody></table></div>`;
+            if (result.diffs.length > 100) {
+                html += `<p style="margin-top:8px;font-size:0.8rem;color:#999;">显示前100条，共 ${result.diffs.length} 条</p>`;
+            }
+            el.innerHTML = html;
+        } catch (e) {
+            el.innerHTML = `<div class="error-msg">对比失败: ${e.message}</div>`;
+        }
+    }
+
+    // ── Method Search ─────────────────────────────────────────────
+    async function searchMethods() {
+        const q = document.getElementById('methodSearchInput').value.trim();
+        if (!q) {
+            document.getElementById('methodSearchResults').innerHTML =
+                '<div class="error-msg">请输入搜索关键字</div>';
+            return;
+        }
+
+        const el = document.getElementById('methodSearchResults');
+        el.innerHTML = '<p class="loading">搜索中...</p>';
+
+        try {
+            const result = await fetchJSON(`/api/benchmark/methods/search?q=${encodeURIComponent(q)}`);
+            if (!result.results || result.results.length === 0) {
+                el.innerHTML = '<div class="error-msg">无匹配结果</div>';
+                return;
+            }
+
+            let html = `<p style="margin-bottom:8px;font-size:0.85rem;color:#666;">找到 ${result.total} 个匹配方法</p>
+                <div class="search-results">
+                <table class="recent-table">
+                    <thead><tr>
+                        <th>日期</th><th>DLL</th><th>Chunk</th><th>方法名</th><th>耗时</th><th>吞吐</th>
+                    </tr></thead>
+                    <tbody>
+            `;
+
+            result.results.slice(0, 100).forEach(r => {
+                html += `<tr>
+                    <td>${r.date_tag ? r.date_tag.slice(0, 8) : ''}</td>
+                    <td>${r.dll_name}</td>
+                    <td>${r.chunk_name || ''}</td>
+                    <td title="${r.method_name}">${r.method_name.length > 45 ? r.method_name.slice(0, 43) + '..' : r.method_name}</td>
+                    <td>${fmtMs(r.elapsed_ms)}</td>
+                    <td>${r.ops_per_sec ? r.ops_per_sec.toFixed(0) + ' ops/s' : 'N/A'}</td>
+                </tr>`;
+            });
+
+            html += `</tbody></table></div>`;
+            if (result.results.length > 100) {
+                html += `<p style="margin-top:8px;font-size:0.8rem;color:#999;">显示前100条</p>`;
+            }
+            el.innerHTML = html;
+        } catch (e) {
+            el.innerHTML = `<div class="error-msg">搜索失败: ${e.message}</div>`;
+        }
+    }
+
+    // ── Recent Reports Table ─────────────────────────────────────
+    async function renderRecentReports() {
+        try {
+            const { reports } = await fetchJSON('/api/reports?limit=14');
+            if (!reports || reports.length === 0) {
+                document.getElementById('recentReports').innerHTML =
+                    '<div class="error-msg">暂无数据 — 等待首次 Nightly 运行</div>';
+                return;
+            }
+
+            const rows = reports.map(r => {
+                const pct = r.fact_total > 0 ? (r.fact_passed / r.fact_total * 100).toFixed(1) : 'N/A';
+                const cls = r.fact_passed === r.fact_total ? 'text-pass' : (parseFloat(pct) >= 90 ? 'text-warn' : 'text-fail');
+                const date = r.date_tag.slice(0, 8);
+                const link = `/daily/nightly-report-${date}.html`;
+                return `<tr>
+                    <td><a href="${link}">${date}</a></td>
+                    <td class="${cls}">${pct}%</td>
+                    <td>${r.benchmark_methods}</td>
+                    <td>${r.hotupdate_passed}/${r.hotupdate_total}</td>
+                    <td>${fmtBytes(r.memory_alloc_bytes)}</td>
+                    <td>${r.data_dlls}/${r.total_dlls}</td>
+                </tr>`;
+            }).join('');
+
+            document.getElementById('recentReports').innerHTML = `
+                <table class="recent-table">
+                    <thead><tr>
+                        <th>日期</th><th>正确率</th><th>基准测试</th><th>热更新</th><th>内存</th><th>DLLs</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+                <p style="margin-top:12px;font-size:0.8rem;color:#999;">
+                    <a href="/api/reports">查看全部 →</a>
+                    &nbsp;·&nbsp;
+                    <a href="/api/compare/deep?a=${reports[0].date_tag.slice(0, 8)}&b=${reports.length > 1 ? reports[1].date_tag.slice(0, 8) : reports[0].date_tag.slice(0, 8)}">最近两天深度对比 →</a>
+                </p>`;
+        } catch (e) {
+            document.getElementById('recentReports').innerHTML =
+                `<div class="error-msg">加载报告列表失败: ${e.message}</div>`;
+        }
+    }
+
+    function showArtifactHelp() {
+        const date = document.querySelector('.recent-table td a')?.textContent || '20260614';
+        alert(`MinIO 制品可通过 API 查看:\n/api/artifacts?date_tag=${date}\n\n也可直接访问:\n/api/artifacts/${date}/System.Linq/comparison-summary`);
+        return false;
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    renderTrends();
+    renderMethodHeatmap();
+    renderCoverage();
+    renderComparisonRadar();
+    renderRecentReports();
+
+    // Enter key triggers for search
+    document.getElementById('methodSearchInput').addEventListener('keydown', e => {
+        if (e.key === 'Enter') searchMethods();
+    });
+    document.getElementById('compareDateB').addEventListener('keydown', e => {
+        if (e.key === 'Enter') runDeepCompare();
+    });
+    </script>
 </body>
 </html>

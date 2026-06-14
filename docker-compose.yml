@@ -50,7 +50,8 @@ services:
   # ================================================================
   linux-x64-agent:
     build:
-      context: ./docker/linux-x64-agent
+      context: ./docker
+      dockerfile: linux-x64-agent/Dockerfile
     image: chaos-agent-linux-x64:latest
     container_name: chaos-agent-x64
     environment:
@@ -60,6 +61,9 @@ services:
       - AGENT_LABELS=linux x64 native
       - SONAR_HOST_URL=http://sonarqube:9000
       - SONAR_TOKEN=${SONAR_TOKEN:-}
+      - MINIO_ENDPOINT=http://chaos-minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
     volumes:
       - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
       - /var/run/docker.sock:/var/run/docker.sock
@@ -71,7 +75,8 @@ services:
 
   linux-arm64-agent:
     build:
-      context: ./docker/linux-arm64-agent
+      context: ./docker
+      dockerfile: linux-arm64-agent/Dockerfile
     image: chaos-agent-linux-arm64:latest
     container_name: chaos-agent-arm64
     environment:
@@ -91,7 +96,8 @@ services:
 
   android-arm64-agent:
     build:
-      context: ./docker/android-arm64-agent
+      context: ./docker
+      dockerfile: android-arm64-agent/Dockerfile
     image: chaos-agent-android-arm64:latest
     container_name: chaos-agent-android
     environment:
@@ -110,52 +116,12 @@ services:
     restart: unless-stopped
 
   # ================================================================
-  # SonarQube (Code Quality)
-  # ================================================================
-  postgresql:
-    image: postgres:15-alpine
-    container_name: chaos-sonar-db
-    networks:
-      - jenkins
-    environment:
-      - POSTGRES_USER=sonar
-      - POSTGRES_PASSWORD=sonar_pass
-      - POSTGRES_DB=sonarqube
-    volumes:
-      - postgresql-data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sonar"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  sonarqube:
-    image: sonarqube:lts-community
-    container_name: chaos-sonarqube
-    networks:
-      - jenkins
-    ports:
-      - "9000:9000"
-    environment:
-      - SONAR_JDBC_URL=jdbc:postgresql://postgresql:5432/sonarqube
-      - SONAR_JDBC_USERNAME=sonar
-      - SONAR_JDBC_PASSWORD=sonar_pass
-      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
-    volumes:
-      - sonarqube-data:/opt/sonarqube/data
-      - sonarqube-extensions:/opt/sonarqube/extensions
-    depends_on:
-      postgresql:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # ================================================================
-  # Report Server (Allure + Daily Reports)
+  # Report Server (Nginx + Allure + Daily Reports)
   # ================================================================
   report-server:
     build:
       context: ./report-server
+      dockerfile: Dockerfile
     image: chaos-report-server:latest
     container_name: chaos-report-server
     networks:
@@ -163,10 +129,77 @@ services:
     ports:
       - "8081:80"
     volumes:
-      # Host bind mount — orchestrator writes here, Nginx serves from here
-      - /var/lib/report-server/daily:/usr/share/nginx/html/daily
-      # Static assets (index.html, etc.)
+      - /var/lib/report-server/daily:/reports/daily
       - ./report-server/src:/usr/share/nginx/html:ro
     depends_on:
-      - sonarqube
+      - report-api
     restart: unless-stopped
+
+  # ================================================================
+  # Report API (FastAPI + SQLite — trends, search, comparison)
+  # ================================================================
+  report-api:
+    build:
+      context: ./report-server
+      dockerfile: api/Dockerfile
+    image: chaos-report-api:latest
+    container_name: chaos-report-api
+    networks:
+      - jenkins
+    expose:
+      - "8000"
+    environment:
+      - MINIO_ENDPOINT=http://chaos-minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - /var/lib/report-server/db:/var/lib/report-server/db
+      - /var/lib/report-server/daily:/reports/daily:ro
+    restart: unless-stopped
+
+  # ================================================================
+  # MinIO S3 — Object Storage for Raw Artifacts
+  # ================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: chaos-minio
+    networks:
+      - jenkins
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - report-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # MinIO bucket setup (runs once after MinIO starts)
+  minio-setup:
+    image: minio/mc:latest
+    container_name: chaos-minio-setup
+    networks:
+      - jenkins
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+      sleep 2 &&
+      mc alias set local http://chaos-minio:9000 $$MINIO_ACCESS_KEY $$MINIO_SECRET_KEY &&
+      mc mb -p local/nightly-raw &&
+      mc mb -p local/nightly-export &&
+      echo 'MinIO buckets created successfully' &&
+      exit 0
+      "
+    restart: "no"

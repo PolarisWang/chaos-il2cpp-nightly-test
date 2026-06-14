@@ -170,6 +170,57 @@ for dll in all_dlls:
 
     report["dlls"][dll] = dll_data
 
+# Extract per-method benchmark, coverage, and comparison data for expanded ingestion
+benchmark_methods_all = {}
+coverage_all = {}
+comparison_all = {}
+
+for dll_name, dll_data in report["dlls"].items():
+    # Per-method benchmark data
+    methods_list = []
+    for slug, chunk in dll_data.get("chunks", {}).items():
+        bench = chunk.get("benchmark", {})
+        if bench and "error" not in bench and "results" in bench:
+            for result in bench["results"]:
+                methods_list.append({
+                    "chunk_name": slug,
+                    "method_name": result.get("methodName", result.get("name", "unknown")),
+                    "elapsed_ms": result.get("elapsedMilliseconds") or result.get("elapsedMs"),
+                    "ops_per_sec": result.get("opsPerSecond"),
+                    "memory_bytes": result.get("memoryBytes"),
+                })
+    if methods_list:
+        methods_list.sort(key=lambda x: x.get("elapsed_ms") or 0, reverse=True)
+        benchmark_methods_all[dll_name] = methods_list[:100]
+
+    # Coverage data
+    agg = dll_data.get("aggregate", {})
+    cov = agg.get("coverage-audit")
+    if cov:
+        coverage_all[dll_name] = cov
+
+    # Comparison data
+    comp = agg.get("comparison-summary")
+    if comp:
+        results_list = comp.get("results", comp.get("methods", []))
+        comparisons = []
+        for method in results_list:
+            comparisons.append({
+                "method_name": method.get("name", method.get("methodName", "unknown")),
+                "chaos_aot_ms": method.get("chaosAotMs") or method.get("chaos_aot_ms"),
+                "dotnet_8_ms": method.get("dotnet8Ms") or method.get("dotnet_8_ms"),
+                "dotnet_10_ms": method.get("dotnet10Ms") or method.get("dotnet_10_ms"),
+                "speedup_vs_8": method.get("speedupVs8") or method.get("speedup_vs_8"),
+                "speedup_vs_10": method.get("speedupVs10") or method.get("speedup_vs_10"),
+            })
+        if comparisons:
+            comparison_all[dll_name] = comparisons
+
+# Attach expanded data to report
+report["benchmark_methods"] = benchmark_methods_all
+report["coverage"] = coverage_all
+report["comparison"] = comparison_all
+
 # Write output
 output_file = output_dir / f"nightly-data-{date_tag}.json"
 output_file.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -186,3 +237,65 @@ print(f"            {summary['memory_alloc_bytes'] / (1024*1024):.1f} MB nursery
 print(f"            {summary['memory_gc_pause_ns'] / 1e9:.2f}s total GC pause")
 print(f"  Output:   {output_file}")
 PYEOF
+
+# ── Ingest into Report API (SQLite trends) ──
+API_URL="${REPORT_API_URL:-http://report-api:8000}"
+DATE_TAG_CLEAN="${DATE_TAG%%-*}"
+echo ""
+echo "=== Ingesting into Report API ==="
+if curl -sf -X POST "${API_URL}/api/ingest?date_tag=${DATE_TAG_CLEAN}" 2>/dev/null; then
+    echo "  Ingestion successful"
+else
+    echo "  WARNING: API ingestion failed (API may not be running yet)"
+    echo "  You can manually ingest later:"
+    echo "    curl -X POST '${API_URL}/api/ingest?date_tag=${DATE_TAG_CLEAN}'"
+fi
+
+# ── Upload to MinIO ───────────────────────────────────────────
+echo ""
+echo "=== Uploading raw artifacts to MinIO ==="
+if command -v mc &>/dev/null; then
+    MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://chaos-minio:9000}"
+    MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
+    MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
+
+    # Configure mc alias
+    mc alias set local "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" 2>/dev/null || {
+        echo "  WARNING: Failed to configure MinIO client (mc)"
+        echo "  Skipping MinIO upload"
+        exit 0
+    }
+
+    UPLOAD_COUNT=0
+    for dll_dir in "${FOUNDATION_DIR}"/_dll/reports/latest; do
+        for dll_name in "${FOUNDATION_DIR}"/*/; do
+            dll=$(basename "$dll_name")
+            reports_dir="${FOUNDATION_DIR}/${dll}/_dll/reports/latest"
+            [[ -d "$reports_dir" ]] || continue
+
+            for artifact in comparison-summary.json benchmark-summary.json benchmark-full-report.json coverage-audit.json dashboard.json; do
+                artifact_path="${reports_dir}/${artifact}"
+                if [[ -f "$artifact_path" ]]; then
+                    target="local/nightly-raw/${DATE_TAG_CLEAN}/${dll}/${artifact}"
+                    if mc cp "$artifact_path" "$target" 2>/dev/null; then
+                        UPLOAD_COUNT=$((UPLOAD_COUNT + 1))
+                    fi
+                fi
+            done
+        done
+        break  # only process once (the _dll path pattern)
+    done
+
+    # Also upload the aggregated nightly data JSON
+    OUTPUT_FILE="${OUTPUT_DIR}/nightly-data-${DATE_TAG}.json"
+    if [[ -f "$OUTPUT_FILE" ]]; then
+        if mc cp "$OUTPUT_FILE" "local/nightly-raw/${DATE_TAG_CLEAN}/_aggregated/nightly-data.json" 2>/dev/null; then
+            UPLOAD_COUNT=$((UPLOAD_COUNT + 1))
+        fi
+    fi
+
+    echo "  Uploaded ${UPLOAD_COUNT} artifacts to MinIO"
+else
+    echo "  WARNING: mc (MinIO client) not found — install it to enable artifact uploads"
+    echo "  Install: curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc"
+fi

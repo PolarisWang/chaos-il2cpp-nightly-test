@@ -23,12 +23,12 @@ RUN apt-get update -qq && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install SonarScanner & Allure CLI
-COPY docker/install-ci-tools.sh /tmp/install-ci-tools.sh
+COPY install-ci-tools.sh /tmp/install-ci-tools.sh
 RUN bash /tmp/install-ci-tools.sh && rm /tmp/install-ci-tools.sh
 
 ENV QEMU_LD_PREFIX=/usr/aarch64-linux-gnu
 
-COPY docker-entrypoint.sh /entrypoint.sh
+COPY linux-arm64-agent/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /home/jenkins

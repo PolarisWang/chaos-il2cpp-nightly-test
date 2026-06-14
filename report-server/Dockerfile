@@ -7,7 +7,6 @@ COPY nginx.conf /etc/nginx/nginx.conf
 
 # Report directories served as static content
 RUN mkdir -p /usr/share/nginx/html/allure \
-              /usr/share/nginx/html/daily \
               /usr/share/nginx/html/sonar
 
 # Landing page
