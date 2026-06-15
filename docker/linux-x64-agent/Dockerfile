@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 LABEL description="chaos-il2cpp Linux x64 Native Build Agent"
 
@@ -13,7 +13,8 @@ RUN apt-get update -qq && \
         curl \
         ca-certificates \
         unzip \
-        openjdk-17-jre-headless \
+        openjdk-21-jre-headless \
+        libnuma1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install SonarScanner & Allure CLI
