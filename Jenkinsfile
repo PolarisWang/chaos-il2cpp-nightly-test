@@ -215,15 +215,13 @@ pipeline {
     post {
         failure {
             script {
-                notifyFeishu("❌ chaos-il2cpp Nightly #${BUILD_NUMBER} FAILED",
-                             "Config: ${BUILD_CONFIG}\\nDate: ${DATE_TAG}\\n${BUILD_URL}")
+                sendNightlyNotification(status: 'FAILURE', artifactsDir: ARTIFACTS_DIR)
             }
         }
 
         success {
             script {
-                notifyFeishu("✅ chaos-il2cpp Nightly #${BUILD_NUMBER} Passed",
-                             "Report: ${BUILD_URL}/Nightly_Comprehensive_Report")
+                sendNightlyNotification(status: 'SUCCESS', artifactsDir: ARTIFACTS_DIR)
             }
         }
 
@@ -265,25 +263,147 @@ def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
     }
 }
 
-def notifyFeishu(title, message) {
-    def webhook = env.FEISHU_WEBHOOK_URL
-    if (webhook) {
-        sh """
-            curl -sf -X POST "${webhook}" \
-                -H "Content-Type: application/json" \
-                -d '{
-                    "msg_type": "post",
-                    "content": {
-                        "post": {
-                            "zh_cn": {
-                                "title": "${title}",
-                                "content": [[
-                                    {"tag": "text", "text": "${message}"}
-                                ]]
-                            }
-                        }
-                    }
-                }' 2>/dev/null || true
-        """
+def sendNightlyNotification(Map params) {
+    def status     = params.status ?: 'SUCCESS'
+    def artifacts  = params.artifactsDir ?: "${env.WORKSPACE}/artifacts"
+    def dataFile   = "${artifacts}/nightly-data-${DATE_TAG}.json"
+    def webhook    = env.FEISHU_WEBHOOK_URL
+
+    if (!webhook) {
+        echo "FEISHU_WEBHOOK_URL not set, skipping notification"
+        return
     }
+
+    def color = status == 'SUCCESS' ? 'green' : 'red'
+    def icon  = status == 'SUCCESS' ? '✅' : '❌'
+    def title = "${icon} chaos-il2cpp Nightly #${BUILD_NUMBER} — ${DATE_TAG}"
+
+    def reportLink = "${env.BUILD_URL}Nightly_Comprehensive_Report"
+    def message = ""
+
+    try {
+        // Try Pipeline Utility Steps plugin first; fall back to Python
+        def summary = [:]
+        def dlls = [:]
+        def totalDlls = 0
+        def dataDlls = 0
+
+        try {
+            def dataStr = sh(script: "cat '${dataFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
+            def data = readJSON text: dataStr
+            summary = data.summary ?: [:]
+            dlls = data.dlls ?: [:]
+            totalDlls = data.total_dlls ?: dlls.size()
+            dataDlls = data.data_dlls ?: 0
+        } catch (err) {
+            echo "readJSON failed, falling back to Python: ${err.message}"
+            def result = sh(script: """python3 -c "
+import json, sys
+try:
+    with open('${dataFile}') as f:
+        d = json.load(f)
+    s = d.get('summary', {})
+    sys.stdout.write(json.dumps({
+        'factPassed': s.get('fact_passed', 0),
+        'factTotal': s.get('fact_total', 0),
+        'bmkMethods': s.get('benchmark_methods', 0),
+        'hotPassed': s.get('hotupdate_passed', 0),
+        'hotTotal': s.get('hotupdate_total', 0),
+        'memMethods': s.get('memory_methods_profiled', 0),
+        'memAlloc': s.get('memory_alloc_bytes', 0),
+        'memGcPause': s.get('memory_gc_pause_ns', 0),
+        'totalDlls': d.get('total_dlls', len(d.get('dlls', {}))),
+        'dataDlls': d.get('data_dlls', 0),
+        'failedDlls': [k for k, v in d.get('dlls', {}).items()
+                       if any(c.get('fact', {}).get('status', '') not in ('passed', '')
+                              for c in v.get('chunks', {}).values())],
+    }))
+except Exception:
+    sys.stdout.write('{}')
+" 2>/dev/null""", returnStdout: true).trim()
+            def parsed = readJSON text: result
+            summary.fact_passed  = parsed.factPassed
+            summary.fact_total   = parsed.factTotal
+            summary.benchmark_methods = parsed.bmkMethods
+            summary.hotupdate_passed  = parsed.hotPassed
+            summary.hotupdate_total   = parsed.hotTotal
+            summary.memory_methods_profiled = parsed.memMethods
+            summary.memory_alloc_bytes = parsed.memAlloc
+            summary.memory_gc_pause_ns = parsed.memGcPause
+            totalDlls = parsed.totalDlls
+            dataDlls  = parsed.dataDlls
+        }
+
+        def factPassed  = summary.fact_passed         ?: 0
+        def factTotal   = summary.fact_total          ?: 0
+        def bmkMethods  = summary.benchmark_methods   ?: 0
+        def hotPassed   = summary.hotupdate_passed    ?: 0
+        def hotTotal    = summary.hotupdate_total     ?: 0
+        def memMethods  = summary.memory_methods_profiled ?: 0
+        def memAlloc    = summary.memory_alloc_bytes  ?: 0
+        def memGcPause  = summary.memory_gc_pause_ns  ?: 0
+
+        def factPct = factTotal > 0 ? String.format("%.1f%%", (double) factPassed / factTotal * 100) : "N/A"
+        def hotPct  = hotTotal  > 0 ? String.format("%.1f%%", (double) hotPassed  / hotTotal  * 100) : "N/A"
+        def memAllocStr = memAlloc > 0 ? String.format("%.1f MB", memAlloc / (1024 * 1024.0)) : "N/A"
+        def memGcStr    = memGcPause > 0 ? String.format("%.1f ms", memGcPause / 1_000_000.0) : "N/A"
+
+        // Count failed DLLs (chunks with fact errors)
+        def failedDlls = []
+        def dllResults = [:]
+        dlls.each { dllName, dllData ->
+            def chunkResults = []
+            (dllData.chunks ?: [:]).each { slug, chunk ->
+                def fact  = chunk.fact ?: [:]
+                def bmk   = chunk.benchmark ?: [:]
+                def hot   = chunk.hotupdate ?: [:]
+                def stages = []
+                if (fact.status && fact.status != "passed") { stages.add("fact:${fact.status}") }
+                if (bmk.status && bmk.status != "passed")  { stages.add("bmk:${bmk.status}") }
+                if (hot.status && hot.status != "passed")  { stages.add("hu:${hot.status}") }
+                if (stages) {
+                    chunkResults.add("${slug} [${stages.join(', ')}]")
+                }
+            }
+            if (chunkResults) {
+                dllResults[dllName] = chunkResults
+            }
+        }
+
+        def failSummary = ""
+        if (dllResults) {
+            def failLines = dllResults.collect { k, v -> "${k}: ${v.size()} failed chunk(s)" }
+            if (failLines.size() <= 10) {
+                failSummary = "\n**失败详情:**\n" + failLines.join("\n")
+            } else {
+                failSummary = "\n**失败详情:** ${failLines.size()} DLL(s) 有失败"
+            }
+        }
+
+        message = """**构建配置:** ${BUILD_CONFIG}
+**状态:** ${status}
+
+**覆盖范围:** ${dataDlls}/${totalDlls} DLLs 有数据
+**正确率 (Fact):** ${factPassed}/${factTotal} (${factPct})
+**基准测试:** ${bmkMethods} 方法
+**热更新:** ${hotPassed}/${hotTotal} (${hotPct})
+**内存 Profile:** ${memMethods} 方法, Nursery=${memAllocStr}, GC=${memGcStr}${failSummary}
+
+🔗 [查看完整报告](${reportLink})
+🔗 [Jenkins Build](${env.BUILD_URL})"""
+    } catch (err) {
+        echo "Failed to read nightly data for notification: ${err.message}"
+        message = """**构建配置:** ${BUILD_CONFIG}
+**状态:** ${status}
+
+🔗 [Jenkins Build](${env.BUILD_URL})"""
+    }
+
+    sh """
+        scripts/notify-feishu.sh \\
+            --title  '${title}' \\
+            --message '${message}' \\
+            --link   '${reportLink}' \\
+            --color  '${color}'
+    """
 }
