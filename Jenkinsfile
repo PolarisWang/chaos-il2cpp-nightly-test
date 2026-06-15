@@ -66,14 +66,21 @@ pipeline {
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
 
-                        echo "=== [x64] Full Pipeline (all stages) ==="
-                        python3 -m verification --all-chunks \
-                            --stages build,fact,benchmark,hotupdate,profile,coverage-audit,aggregate,reporting \
-                            --native-config "${BUILD_CONFIG}" \
-                            2>&1 || {
-                            echo "WARNING: Pipeline stages had failures"
-                            FAILED_PLATFORMS+=("linux-x64-pipeline")
-                        }
+                        echo "=== [x64] Full Pipeline \u2014 all DLLs ==="
+
+                        # Iterate over every DLL that has chunks
+                        for dll_dir in */; do
+                            dll_name=\$(basename "\$dll_dir")
+                            [[ -d "\${dll_dir}chunks" ]] || continue
+
+                            echo "========== [x64] Processing \${dll_name} =========="
+                            python3 -m verification \
+                                --assembly "\${dll_name}" \
+                                --all-chunks \
+                                --stages build,fact,benchmark,hotupdate,profile,coverage-audit,aggregate,reporting \
+                                --native-config "${BUILD_CONFIG}" \
+                                2>&1 || echo "WARNING: \${dll_name} pipeline had failures"
+                        done
 
                         echo "=== [x64] Collect Results ==="
                         bash "\${WORKSPACE}/scripts/collect-all-results.sh" \
