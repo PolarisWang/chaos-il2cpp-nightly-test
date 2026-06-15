@@ -36,6 +36,7 @@ pipeline-utility-steps:latest
 pipeline-graph-analysis:latest
 timestamper:latest
 build-timeout:latest
+ws-cleanup:latest
 
 # Shared library
 workflow-cps-global-lib:latest

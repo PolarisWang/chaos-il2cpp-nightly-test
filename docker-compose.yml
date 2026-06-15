@@ -66,6 +66,14 @@ services:
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
     volumes:
       - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  linux-arm64-agent:
     build:
       context: ./docker
       dockerfile: linux-arm64-agent/Dockerfile
@@ -80,6 +88,13 @@ services:
       - SONAR_TOKEN=${SONAR_TOKEN:-}
     volumes:
       - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  android-arm64-agent:
     build:
       context: ./docker
       dockerfile: android-arm64-agent/Dockerfile
