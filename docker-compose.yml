@@ -67,6 +67,7 @@ services:
     volumes:
       - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/report-server/daily:/var/lib/report-server/daily
     networks:
       - jenkins
     depends_on:
