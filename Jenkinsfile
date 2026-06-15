@@ -17,7 +17,7 @@
 
 def BOOMING_DIR   = params.BOOMING_REPO ?: '/booming-il2cpp'
 def BUILD_CONFIG  = params.BUILD_CONFIG ?: 'profile'
-def ARTIFACTS_DIR = "${WORKSPACE}/artifacts"
+def ARTIFACTS_DIR = ""
 def DATE_TAG      = new Date().format('yyyyMMdd')
 def FAILED_PLATFORMS = []
 
@@ -37,12 +37,23 @@ pipeline {
 
     environment {
         DATE_TAG = "${DATE_TAG}"
-        ARTIFACTS_DIR = "${ARTIFACTS_DIR}"
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
     }
 
     stages {
+        // ─────────────────────────────────────────────────────
+        // Init — set workspace-dependent paths
+        // ─────────────────────────────────────────────────────
+        stage('Init') {
+            agent { label 'linux-x64' }
+            steps {
+                script {
+                    ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
+                }
+            }
+        }
+
         // ─────────────────────────────────────────────────────
         // linux-x64 — Full Pipeline
         // ─────────────────────────────────────────────────────

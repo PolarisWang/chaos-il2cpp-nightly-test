@@ -64,21 +64,3 @@ unclassified:
       - name: "SonarQube"
         serverUrl: "${SONAR_HOST_URL}"
         credentialsId: "sonarqube-token"
-        triggerOnScannFail: false
-        triggerOnlyOnBuildSuccess: true
-
-  # ================================================================
-  # Allure Global Configuration
-  # ================================================================
-  allureGlobalConfiguration:
-    installations:
-      - name: "AllureDefault"
-        properties:
-          - installSource:
-              installers:
-                - command:
-                    command: |
-                      ALLURE_VERSION=2.30.0
-                      curl -sSL https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz | tar xz -C /tmp
-                      mv /tmp/allure-${ALLURE_VERSION} /opt/allure
-                      ln -sf /opt/allure/bin/allure /usr/local/bin/allure
