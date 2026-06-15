@@ -61,7 +61,7 @@ pipeline {
             agent { label 'linux-x64' }
             steps {
                 script {
-                    sh """
+                    sh """#!/bin/bash
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
@@ -76,7 +76,7 @@ pipeline {
                         }
 
                         echo "=== [x64] Collect Results ==="
-                        bash "${WORKSPACE}/scripts/collect-all-results.sh" \
+                        bash "\${WORKSPACE}/scripts/collect-all-results.sh" \
                             --foundation-dir "${BOOMING_DIR}/testing/foundation-dll" \
                             --output-dir "${ARTIFACTS_DIR}"
 
@@ -92,7 +92,7 @@ pipeline {
         stage('linux-arm64 Smoke') {
             agent { label 'linux-arm64' }
             steps {
-                sh """
+                sh """#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -114,7 +114,7 @@ pipeline {
         stage('android-arm64 Verify') {
             agent { label 'android-arm64' }
             steps {
-                sh """
+                sh """#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
                     echo "=== [android] Verify ==="
@@ -172,13 +172,14 @@ pipeline {
                     def prevFile = "${ARTIFACTS_DIR}/nightly-data-${prevDate}.json"
                     def baselineFlag = fileExists(prevFile) ? "--baseline ${prevFile}" : ""
 
-                    sh """
+                    sh """#!/bin/bash
+                        set -euo pipefail
                         echo "=== Generate Nightly Report ==="
-                        python3 "${WORKSPACE}/scripts/generate-nightly-report.py" \
+                        python3 "\${WORKSPACE}/scripts/generate-nightly-report.py" \
                             --data "${dataFile}" \
                             ${baselineFlag} \
                             --output "${ARTIFACTS_DIR}/nightly-report-${DATE_TAG}.html" \
-                            --build-number "${BUILD_NUMBER}"
+                            --build-number "\${BUILD_NUMBER}"
 
                         echo "=== Ingest into Report API ==="
                         curl -sf -X POST "${REPORT_API_URL}/api/ingest?date_tag=${DATE_TAG}" \
@@ -220,12 +221,14 @@ pipeline {
         }
 
         always {
-            archiveArtifacts artifacts: "artifacts/**/*",
-                           allowEmptyArchive: true,
-                           fingerprint: true
-            cleanWs notFailBuild: true, cleanWhenAborted: true,
-                    cleanWhenFailure: true, cleanWhenSuccess: true,
-                    cleanWhenUnstable: true
+            node('linux-x64') {
+                archiveArtifacts artifacts: "artifacts/**/*",
+                               allowEmptyArchive: true,
+                               fingerprint: true
+                cleanWs notFailBuild: true, cleanWhenAborted: true,
+                        cleanWhenFailure: true, cleanWhenSuccess: true,
+                        cleanWhenUnstable: true
+            }
         }
     }
 }
@@ -236,7 +239,8 @@ pipeline {
 
 def runSonarScan(platform, boomingDir, buildConfig) {
     try {
-        sh """
+        sh """#!/bin/bash
+            set -euo pipefail
             mkdir -p "${ARTIFACTS_DIR}"
             sonar-scanner \
                 -D sonar.host.url="${SONAR_HOST_URL}" \
