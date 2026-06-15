@@ -28,6 +28,11 @@ pipeline {
         cron('H 3 * * *')
     }
 
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 6, unit: 'HOURS')
+    }
+
     parameters {
         string(name: 'BOOMING_REPO', defaultValue: '/booming-il2cpp',
                description: 'Path to booming-il2cpp repository')

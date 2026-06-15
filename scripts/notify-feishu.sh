@@ -37,7 +37,7 @@ esac
 TIMESTAMP=$(date +%s)
 
 # Build JSON payload for Feishu interactive card
-read -r PAYLOAD << PAYLOADEOF || true
+PAYLOAD=$(cat << PAYLOADEOF || true
 {
     "msg_type": "interactive",
     "card": {
