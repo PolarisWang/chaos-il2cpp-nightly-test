@@ -149,13 +149,14 @@ for dll in all_dlls:
 
         prof = chunk_data.get("profile", {})
         if prof and "error" not in prof:
-            report["summary"]["memory_alloc_bytes"] += prof.get("totalNurseryAllocBytes", 0)
-            report["summary"]["memory_gc_pause_ns"] += prof.get("totalGcPauseNs", 0)
+            ps = prof.get("summary", {})
+            report["summary"]["memory_alloc_bytes"] += ps.get("totalNurseryAllocBytes", 0)
+            report["summary"]["memory_gc_pause_ns"] += ps.get("totalGcPauseNs", 0)
             report["summary"]["memory_fast_path_rate"] = max(
                 report["summary"]["memory_fast_path_rate"],
-                prof.get("fastPathRate", 0)
+                ps.get("fastPathRate", 0)
             )
-            report["summary"]["memory_methods_profiled"] += prof.get("methodCount", 0)
+            report["summary"]["memory_methods_profiled"] += ps.get("methodCount", 0)
 
     # Aggregate report
     for ag_file in ["fact-summary.json", "benchmark-summary.json",
