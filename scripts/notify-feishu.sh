@@ -36,8 +36,9 @@ esac
 
 TIMESTAMP=$(date +%s)
 
-# Build JSON payload for Feishu interactive card
-PAYLOAD=$(cat << PAYLOADEOF || true
+# Write JSON payload to temp file to avoid nested $() issues
+_TMPFILE=$(mktemp)
+cat > "$_TMPFILE" << PAYLOADEOF
 {
     "msg_type": "interactive",
     "card": {
@@ -68,22 +69,26 @@ PAYLOAD=$(cat << PAYLOADEOF || true
 PAYLOADEOF
 
 if [[ -n "$LINK" ]]; then
-    # Add a button link at the end
-    PAYLOAD=$(echo "$PAYLOAD" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
+    python3 -c "
+import json
+with open('$_TMPFILE') as f:
+    data = json.load(f)
 data['card']['elements'].insert(-1, {
     'tag': 'action',
     'actions': [{
         'tag': 'button',
         'text': {'tag': 'plain_text', 'content': '查看详情'},
-        'url': '${LINK}',
+        'url': '$LINK',
         'type': 'default'
     }]
 })
-json.dump(data, sys.stdout, ensure_ascii=False)
-")
+with open('$_TMPFILE', 'w') as f:
+    json.dump(data, f, ensure_ascii=False)
+"
 fi
+
+PAYLOAD=$(cat "$_TMPFILE")
+rm -f "$_TMPFILE"
 
 # Send to Feishu
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
