@@ -144,8 +144,8 @@ for dll in all_dlls:
 
         hot = chunk_data.get("hotupdate", {})
         if hot and "error" not in hot:
-            report["summary"]["hotupdate_passed"] += hot.get("passCount", 0)
-            report["summary"]["hotupdate_total"] += hot.get("patchCount", 0)
+            report["summary"]["hotupdate_passed"] += hot.get("passed", 0)
+            report["summary"]["hotupdate_total"] += hot.get("passed", 0) + hot.get("failed", 0)
 
         prof = chunk_data.get("profile", {})
         if prof and "error" not in prof:
