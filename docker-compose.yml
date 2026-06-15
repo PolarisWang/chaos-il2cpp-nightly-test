@@ -65,15 +65,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - jenkins
-    depends_on:
-      - master
-    restart: unless-stopped
-
-  linux-arm64-agent:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
     build:
       context: ./docker
       dockerfile: linux-arm64-agent/Dockerfile
@@ -87,14 +79,7 @@ services:
       - SONAR_HOST_URL=http://sonarqube:9000
       - SONAR_TOKEN=${SONAR_TOKEN:-}
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
-    networks:
-      - jenkins
-    depends_on:
-      - master
-    restart: unless-stopped
-
-  android-arm64-agent:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
     build:
       context: ./docker
       dockerfile: android-arm64-agent/Dockerfile
@@ -108,7 +93,7 @@ services:
       - SONAR_HOST_URL=http://sonarqube:9000
       - SONAR_TOKEN=${SONAR_TOKEN:-}
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
     networks:
       - jenkins
     depends_on:

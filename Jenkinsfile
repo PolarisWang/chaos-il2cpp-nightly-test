@@ -130,11 +130,11 @@ pipeline {
             parallel {
                 stage('x64 SonarQube') {
                     agent { label 'linux-x64' }
-                    steps { script { runSonarScan('linux-x64', BOOMING_DIR, BUILD_CONFIG) } }
+                    steps { script { runSonarScan('linux-x64', BOOMING_DIR, BUILD_CONFIG, ARTIFACTS_DIR) } }
                 }
                 stage('arm64 SonarQube') {
                     agent { label 'linux-arm64' }
-                    steps { script { runSonarScan('linux-arm64', BOOMING_DIR, BUILD_CONFIG) } }
+                    steps { script { runSonarScan('linux-arm64', BOOMING_DIR, BUILD_CONFIG, ARTIFACTS_DIR) } }
                 }
             }
         }
@@ -237,11 +237,11 @@ pipeline {
 // Helper Functions
 // ============================================================
 
-def runSonarScan(platform, boomingDir, buildConfig) {
+def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
     try {
         sh """#!/bin/bash
             set -euo pipefail
-            mkdir -p "${ARTIFACTS_DIR}"
+            mkdir -p "${artifactsDir}"
             sonar-scanner \
                 -D sonar.host.url="${SONAR_HOST_URL}" \
                 -D sonar.projectKey=chaos-il2cpp \
@@ -251,7 +251,7 @@ def runSonarScan(platform, boomingDir, buildConfig) {
                 -D sonar.language=cs \
                 -D sonar.sourceEncoding=UTF-8 \
                 -D sonar.exclusions="**/build/**/*,**/native/build/**/*" \
-                2>&1 | tee "${ARTIFACTS_DIR}/${platform}-sonar.log"
+                2>&1 | tee "${artifactsDir}/${platform}-sonar.log"
         """
     } catch (err) {
         echo "${platform}: SonarQube scan failed (non-fatal): ${err.message}"
