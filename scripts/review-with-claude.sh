@@ -240,10 +240,14 @@ PROMPT_HEADER
   ]
 }
 PROMPT_FOOTER
-} | claude --print) || {
+} 2>/tmp/claude-review-debug.log | claude --print 2>>/tmp/claude-review-debug.log) || {
     echo "ERROR: claude --print failed" >&2
+    echo "DEBUG: See /tmp/claude-review-debug.log" >&2
+    cat /tmp/claude-review-debug.log >&2
     exit 1
 }
+echo "DEBUG: CLAUDE_OUTPUT length = $(echo "$CLAUDE_OUTPUT" | wc -c)" >&2
+echo "DEBUG: CLAUDE_OUTPUT first 100 = [$(echo "$CLAUDE_OUTPUT" | head -c 100)]" >&2
 
 # Write Claude output to findings file
 echo "$CLAUDE_OUTPUT" > "$OUTPUT_FILE"
