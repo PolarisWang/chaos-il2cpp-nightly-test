@@ -516,7 +516,7 @@ def runCodeReview(Map params = [:]) {
                 rm -rf '${workspaceDir}/booming-il2cpp'
 
                 # Fresh shallow clone from local upstream
-                git clone --depth 50 '${boomingDir}' '${workspaceDir}/booming-il2cpp' 2>&1
+                git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
                 cd '${workspaceDir}/booming-il2cpp'
 
                 # Fetch latest from origin
