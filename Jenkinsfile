@@ -576,22 +576,7 @@ def runCodeReview(Map params = [:]) {
                 def summaryStr = ''
                 try {
                     summaryStr = sh(
-                        script: """python3 -c "
-                    import json
-                    try:
-                        with open('${findingsFile}') as f:
-                            d = json.load(f)
-                        s = d.get('summary', {})
-                        print(json.dumps({
-                            'critical': s.get('critical', 0),
-                            'high': s.get('high', 0),
-                            'medium': s.get('medium', 0),
-                            'low': s.get('low', 0),
-                            'total': s.get('total_findings', 0),
-                        }))
-                    except Exception as e:
-                        print(json.dumps({'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'total': 0, 'error': str(e)}))
-                    """",
+                        script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" 2>/dev/null || echo '{\"critical\":0,\"high\":0,\"medium\":0,\"low\":0,\"total_findings\":0}'",
                         returnStdout: true
                     ).trim()
                 } catch (err) {
