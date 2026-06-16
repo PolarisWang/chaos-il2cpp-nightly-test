@@ -592,9 +592,6 @@ def runCodeReview(Map params = [:]) {
                 env.FINDINGS_TOTAL = parsed.total.toString()
 
                 echo "Findings: ${env.FINDINGS_CRIT} CRITICAL · ${env.FINDINGS_HIGH} HIGH · ${env.FINDINGS_MED} MEDIUM · ${env.FINDINGS_LOW} LOW"
-                // Copy findings to current workspace for archiving
-                sh "cp '${findingsFile}' '${env.WORKSPACE}/code-review/findings.json' 2>/dev/null; true"
-                archiveArtifacts artifacts: "code-review/findings.json", allowEmptyArchive: true
             }
         }
     }
