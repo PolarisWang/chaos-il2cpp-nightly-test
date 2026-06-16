@@ -279,15 +279,19 @@ def sendNightlyNotification(Map params) {
         return
     }
 
+    // External URLs from container environment (set in docker-compose.yml)
+    def JENKINS_EXT_URL = env.JENKINS_URL ?: 'http://10.10.1.173:8080'
+    def REPORT_EXT_URL  = env.REPORT_URL  ?: 'http://10.10.1.173:8081'
+
     def color = status == 'SUCCESS' ? 'green' : 'red'
     def icon  = status == 'SUCCESS' ? '✅' : '❌'
     def title = "${icon} chaos-il2cpp Nightly #${BUILD_NUMBER} — ${DATE_TAG}"
 
-    def reportLink = "${env.BUILD_URL}Nightly_Comprehensive_Report"
+    def buildLink  = "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}"
+    def reportLink = "${REPORT_EXT_URL}/?build=${BUILD_NUMBER}&date=${DATE_TAG}"
     def message = ""
 
     try {
-        // Try Pipeline Utility Steps plugin first; fall back to Python
         def summary = [:]
         def dlls = [:]
         def totalDlls = 0
@@ -319,9 +323,6 @@ try:
         'memGcPause': s.get('memory_gc_pause_ns', 0),
         'totalDlls': d.get('total_dlls', len(d.get('dlls', {}))),
         'dataDlls': d.get('data_dlls', 0),
-        'failedDlls': [k for k, v in d.get('dlls', {}).items()
-                       if any(c.get('fact', {}).get('status', '') not in ('passed', '')
-                              for c in v.get('chunks', {}).values())],
     }))
 except Exception:
     sys.stdout.write('{}')
@@ -353,19 +354,15 @@ except Exception:
         def memAllocStr = memAlloc > 0 ? String.format("%.1f MB", memAlloc / (1024 * 1024.0)) : "N/A"
         def memGcStr    = memGcPause > 0 ? String.format("%.1f ms", memGcPause / 1_000_000.0) : "N/A"
 
-        // Count failed DLLs (chunks with fact errors)
-        def failedDlls = []
+        // Collect failed DLL/chunk details
         def dllResults = [:]
         dlls.each { dllName, dllData ->
             def chunkResults = []
             (dllData.chunks ?: [:]).each { slug, chunk ->
-                def fact  = chunk.fact ?: [:]
-                def bmk   = chunk.benchmark ?: [:]
-                def hot   = chunk.hotupdate ?: [:]
                 def stages = []
-                if (fact.status && fact.status != "passed") { stages.add("fact:${fact.status}") }
-                if (bmk.status && bmk.status != "passed")  { stages.add("bmk:${bmk.status}") }
-                if (hot.status && hot.status != "passed")  { stages.add("hu:${hot.status}") }
+                if (chunk.fact?.status && chunk.fact.status != "passed")        { stages.add("fact:${chunk.fact.status}") }
+                if (chunk.benchmark?.status && chunk.benchmark.status != "passed") { stages.add("bmk:${chunk.benchmark.status}") }
+                if (chunk.hotupdate?.status && chunk.hotupdate.status != "passed") { stages.add("hu:${chunk.hotupdate.status}") }
                 if (stages) {
                     chunkResults.add("${slug} [${stages.join(', ')}]")
                 }
@@ -377,11 +374,11 @@ except Exception:
 
         def failSummary = ""
         if (dllResults) {
-            def failLines = dllResults.collect { k, v -> "${k}: ${v.size()} failed chunk(s)" }
+            def failLines = dllResults.collect { k, v -> "• ${k}: ${v.size()} failed chunk(s)" }
             if (failLines.size() <= 10) {
-                failSummary = "\n**失败详情:**\n" + failLines.join("\n")
+                failSummary = "\n\n**失败详情:**\n" + failLines.join("\n")
             } else {
-                failSummary = "\n**失败详情:** ${failLines.size()} DLL(s) 有失败"
+                failSummary = "\n\n**失败详情:** ${failLines.size()} DLL(s) 有失败"
             }
         }
 
@@ -392,23 +389,19 @@ except Exception:
 **正确率 (Fact):** ${factPassed}/${factTotal} (${factPct})
 **基准测试:** ${bmkMethods} 方法
 **热更新:** ${hotPassed}/${hotTotal} (${hotPct})
-**内存 Profile:** ${memMethods} 方法, Nursery=${memAllocStr}, GC=${memGcStr}${failSummary}
-
-🔗 [查看完整报告](${reportLink})
-🔗 [Jenkins Build](${env.BUILD_URL})"""
+**内存 Profile:** ${memMethods} 方法 · Nursery=${memAllocStr} · GC=${memGcStr}${failSummary}"""
     } catch (err) {
         echo "Failed to read nightly data for notification: ${err.message}"
         message = """**构建配置:** ${BUILD_CONFIG}
-**状态:** ${status}
-
-🔗 [Jenkins Build](${env.BUILD_URL})"""
+**状态:** ${status}"""
     }
 
     sh """
         scripts/notify-feishu.sh \\
-            --title  '${title}' \\
-            --message '${message}' \\
-            --link   '${reportLink}' \\
-            --color  '${color}'
+            --title       '${title}' \\
+            --message     '${message}' \\
+            --report-link '${reportLink}' \\
+            --build-link  '${buildLink}' \\
+            --color       '${color}'
     """
 }

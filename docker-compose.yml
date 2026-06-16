@@ -10,6 +10,14 @@ volumes:
   sonarqube-extensions:
   report-data:
 
+# ================================================================
+# Shared External URLs (anchored for reuse across services)
+# ================================================================
+x-external-urls: &external-urls
+  JENKINS_URL: http://10.10.1.173:8080
+  REPORT_URL: http://10.10.1.173:8081
+  FEISHU_WEBHOOK_URL: https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff
+
 services:
   # ================================================================
   # Jenkins Master
@@ -24,18 +32,15 @@ services:
       - "8080:8080"
       - "50000:50000"
     environment:
-      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
-      - CASC_JENKINS_CONFIG=/usr/share/jenkins/ref/jenkins.yaml
-      - JENKINS_ADMIN_ID=${JENKINS_ADMIN_ID:-qa004}
-      - JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD:-abcd@1234}
-      - JENKINS_AGENT_JNLP_PORT=50000
-      - JENKINS_MASTER_URL=http://chaos-master:8080
-      - JENKINS_URL=http://chaos-master:8080
-      # SonarQube integration
-      - SONAR_HOST_URL=http://sonarqube:9000
-      - SONAR_TOKEN=${SONAR_TOKEN:-}
-      # Feishu notification
-      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL:-}
+      JAVA_OPTS: -Djenkins.install.runSetupWizard=false
+      CASC_JENKINS_CONFIG: /usr/share/jenkins/ref/jenkins.yaml
+      JENKINS_ADMIN_ID: ${JENKINS_ADMIN_ID:-qa004}
+      JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:-abcd@1234}
+      JENKINS_AGENT_JNLP_PORT: "50000"
+      JENKINS_MASTER_URL: http://chaos-master:8080
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+      <<: *external-urls
     volumes:
       - jenkins-home:/var/jenkins_home
       - ./jenkins/jenkins.yaml:/usr/share/jenkins/ref/jenkins.yaml
@@ -55,15 +60,16 @@ services:
     image: chaos-agent-linux-x64:latest
     container_name: chaos-agent-x64
     environment:
-      - JENKINS_MASTER_URL=http://chaos-master:8080
-      - JENKINS_AGENT_NAME=linux-x64
-      - JENKINS_AGENT_SECRET=
-      - AGENT_LABELS=linux x64 native
-      - SONAR_HOST_URL=http://sonarqube:9000
-      - SONAR_TOKEN=${SONAR_TOKEN:-}
-      - MINIO_ENDPOINT=http://chaos-minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      JENKINS_MASTER_URL: http://chaos-master:8080
+      JENKINS_AGENT_NAME: linux-x64
+      JENKINS_AGENT_SECRET: ""
+      AGENT_LABELS: linux x64 native
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+      MINIO_ENDPOINT: http://chaos-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      <<: *external-urls
     volumes:
       - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
       - /var/run/docker.sock:/var/run/docker.sock

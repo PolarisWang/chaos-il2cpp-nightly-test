@@ -20,19 +20,25 @@
 | 维度 | 内容 |
 |------|------|
 | 用途 | IL2CPP 多平台编译验证 + 全量测试 + 质量报告 |
-| 核心工具 | Jenkins + SonarQube + Allure + FastAPI + Nginx |
+| 核心工具 | Jenkins + SonarQube + FastAPI + Nginx + MinIO |
 | 测试平台 | Linux x64, Linux ARM64, Android ARM64 |
 | 测试维度 | Fact(正确性), Benchmark(性能), HotUpdate(热更新), Memory(内存) |
-| 触发方式 | 每日 03:00 cron / GitHub Webhook / 手动 |
-| 通知渠道 | 飞书卡片 + 邮件 |
+| 触发方式 | 每日 03:00 cron / 手动 |
+| 通知渠道 | 飞书双按钮交互卡片 |
 
 ## 快速链接
 
-- Jenkins: http://host:8080
-- SonarQube: http://host:9000
-- Report Server: http://host:8081
-- Report API: http://host:8081/api/reports
+- Jenkins: http://10.10.1.173:8080
+- SonarQube: http://10.10.1.173:9000
+- Report Server: http://10.10.1.173:8081
+- Report API: http://10.10.1.173:8081/api/reports
+
+## 最近更新
+
+- **2026-06-16**: 飞书通知双按钮卡片（查看报告 + Jenkins Build）
+- **2026-06-16**: YAML anchor 统一外部 URL 配置
+- **2026-06-16**: 修复 FEISHU_WEBHOOK_URL 需配置在 agent 容器的问题
 
 ---
 
-*Last updated: 2026-06-14*
+*Last updated: 2026-06-16*

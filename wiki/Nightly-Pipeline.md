@@ -2,101 +2,162 @@
 
 ## 触发方式
 
-- **定时触发**: Jenkins 内置 cron `H 3 * * *`（每日 03:00-04:00 之间）
-- **手动触发**: Jenkins 页面点击"立即构建"，或 API:
+- **定时触发**: Jenkinsfile 内 cron `H 3 * * *`（每日 03:00-04:00 之间）
+- **手动触发**: Jenkins → `chaos-il2cpp-nightly` → "立即构建"，或 API:
 
 ```bash
-curl -X POST http://localhost:8080/job/NightlyPipeline/build \
-    --user admin:abcd@1234
+curl -X POST http://10.10.1.173:8080/job/chaos-il2cpp-nightly/buildWithParameters \
+    --user qa004:abcd@1234
 ```
+
+## 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `BOOMING_REPO` | `/booming-il2cpp` | 源码仓库路径（Docker volume 挂载） |
+| `BUILD_CONFIG` | `profile` | 编译配置 (profile/debug/ship) |
 
 ## 执行流程
 
-### 阶段 1: 多平台并行编译
+### 阶段 1: Init
+
+在 linux-x64 节点上设置 `ARTIFACTS_DIR` 环境变量。
+
+### 阶段 2: 多平台并行
 
 ```
-03:00 ── 触发
-         │
-         ├── linux-x64  ── cmake --preset linux-x64-packaging
-         ├── linux-arm64 ── cmake --preset linux-arm64-smoke
-         └── android-arm64 ── cmake --preset android-arm64-smoke
+linux-x64 (全量)
+  ├── 遍历所有有 chunks/ 的 DLL
+  ├── 每个 DLL 执行 8 个阶段
+  └── collect-all-results.sh 汇总
+
+linux-arm64 (冒烟)
+  └── 对 System.Linq / System.Collections / System.Text.Json
+      执行 fact 阶段
+
+android-arm64 (编译验证)
+  └── fix_all_failures.py --platform android
 ```
 
-### 阶段 2: linux-x64 全量测试 (4-8h)
+### 阶段 3: SonarQube 分析
+
+x64 + arm64 并行执行 sonar-scanner。
+
+### 阶段 4: Allure 报告
+
+如果 `_allure-results` 存在，生成 Allure HTML 报告。
+
+### 阶段 5: Nightly 报告
 
 ```
-build → fact → profile → benchmark → managed_benchmark
-      → benchmark_report → hotupdate → coverage-audit → aggregate
+generate-nightly-report.py
+  ├── 读取 nightly-data-<date>.json
+  ├── 自动发现前一日 baseline（如有）
+  ├── 生成 nightly-report-<date>.html
+  ├── 复制到 /var/lib/report-server/daily/
+  ├── POST /api/ingest → Report API → SQLite
+  └── publishHTML (Jenkins 归档)
 ```
 
-24 个 DLL 以 4 个为一组并行执行，每批超时 7200s：
+### 阶段 6: 飞书通知
 
 ```
-Batch 1: System.Private.CoreLib, System.Collections,
-         System.Collections.Immutable, System.ComponentModel.TypeConverter
-
-Batch 2: System.Data.Common, System.Diagnostics.DiagnosticSource,
-         System.Formats.Asn1, System.IO.Compression.Brotli
-...
+sendNightlyNotification() → notify-feishu.sh
+  ├── 读取 nightly-data 中的汇总指标
+  ├── 构建双按钮交互卡片
+  ├── 📊 查看报告 → REPORT_URL
+  └── 🔧 Jenkins Build → JENKINS_URL
 ```
 
-### 阶段 3: 数据聚合
+## 每个 DLL 的 8 个阶段详解
+
+```
+① build
+   │
+   ├── AutoTestGenerator (ATG)
+   │   --all-types → --emit-metadata → subjects.metadata.json
+   │
+   ├── dotnet build CombinedSubjects.csproj → CombinedSubjects.dll
+   │
+   ├── TestProjectGenerator (TPG)
+   │   generate-dll → C++ codegen → CMake → entry.exe
+   │
+   ├── Hephaestus 缓存
+   │   ├── CACHE HIT: 直接恢复缓存的 entry.exe
+   │   └── CACHE MISS: 完整 ATG + TPG 构建
+   │
+   └── --profile 注入
+       └── runtime-entry.cpp 补丁 → entry.exe 支持 --profile
+
+② fact
+   entry.exe --fact-json
+   ├── AOT: entry.exe
+   ├── JIT: entry-jit.exe (如果存在)
+   └── 交叉对比: AOT vs JIT 结果一致性
+
+③ benchmark
+   entry.exe --benchmark-all
+   ├── 自适应迭代校准 (adaptive)
+   └── AOT + JIT 独立跑
+
+④ hotupdate
+   ├── ATG --patch-mode (如果目标 DLL 存在)
+   ├── 无 patch DLL → 只跑 assert + semantic check
+   └── revert 验证
+
+⑤ profile
+   entry.exe --profile
+   ├── 逐方法记录: GC/heap_before/heap_after
+   ├── Nursery 分配量 / GC 暂停时间
+   └── 本批次多数 DLL 无 profile 数据
+
+⑥ coverage-audit
+   └── manifest 声明的方法数 vs meteorology 实际覆盖数
+
+⑦ aggregate
+   └── 汇总所有 chunk 数据，写入 _dll/reports/latest/
+
+⑧ reporting
+   └── 写入 per-assembly 报告数据库
+```
+
+## Docker volume 挂载
+
+booming-il2cpp 源码仓库**不通过 git clone** 获取，而是由 `docker-compose.yml` 直接挂载：
+
+```yaml
+volumes:
+  - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro   # master
+  - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw   # agent
+```
+
+Agent 上的测试框架入口: `/booming-il2cpp/testing/foundation-dll/verification/`
+
+## 数据聚合
+
+所有 DLL 跑完后：
 
 ```
 collect-all-results.sh
   ├── 扫描所有 DLL chunks/*/results/*.json
   ├── 生成 nightly-data-<date>.json
-  └── POST /api/ingest → SQLite 趋势数据库
+  └── POST /api/ingest → Report API → SQLite
 ```
 
-### 阶段 4: 报告生成
+## 失败处理
 
-```
-generate-nightly-report.py
-  ├── 读取当前数据 + 自动发现前一日 baseline
-  ├── 生成 nightly-report-<date>.html
-  ├── 复制到 /var/lib/report-server/daily/
-  └── 更新 nightly-latest.html 软链接
-```
+- 每个 DLL 的 pipeline 失败不会终止整体构建（`|| echo "WARNING"`）
+- 失败 DLL 会在飞书通知中列出
+- `FAILED_PLATFORMS` 记录 arm64 失败
 
-### 阶段 5: 质量扫描 + 通知
+## 超时设置
 
-```
-SonarQube 扫描 (3 平台并行)
-Allure 报告发布
-飞书卡片推送 + 邮件通知（仅失败时发邮件）
-```
-
-## 报告内容
-
-生成的 HTML 报告包含：
-
-1. **汇总卡片**: 构建状态、正确率、基准测试方法数、热更新通过率、内存分配
-2. **Per-DLL 表格**: 每个 DLL 的 Fact/Benchmark/HotUpdate/Memory 指标
-3. **Benchmark 回归对比**: 与前一日 baseline 的 Δ% 差异（绿色↑ / 红色↓）
-4. **Chunk 详情**: 可展开查看每个 chunk 的具体数据
-5. **回归告警**: 方法数下降的 DLL 列表 + 方法数上升的 DLL 列表
-
-## 测试维度
-
-| 阶段 | 产出 | 评估标准 |
-|------|------|---------|
-| build | 编译日志 | 编译通过/失败 |
-| fact | chunks/*/results/fact.json | passed/total, valueSuspicious |
-| profile | results/profile.json | GC pause, nursery alloc, fastPathRate |
-| benchmark | results/benchmark.json | 方法耗时 |
-| managed_benchmark | benchmark-history.jsonl | .NET 8/10 基线对比 |
-| benchmark_report | comparison.json | 跨技术栈差异 |
-| hotupdate | results/hotupdate.json | patch/revert 通过率 |
-| coverage-audit | coverage-audit.json | 指令覆盖率 |
-
-## 参数说明
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `BOOMING_REPO` | `/booming-il2cpp-nightly` | 源码仓库路径 |
-| `BUILD_CONFIG` | `profile` | 编译配置 (profile/debug/ship) |
+- Pipeline 总超时: 6 小时
+- TPG build: 2 小时
+- ATG: 20 分钟
+- Fact: 10 分钟
+- Benchmark: 自适应
 
 ---
 
-*Last updated: 2026-06-14*
+*Last updated: 2026-06-16*
