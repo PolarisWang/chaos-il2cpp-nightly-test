@@ -473,6 +473,8 @@ def runCodeReview(Map params = [:]) {
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
                     curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
+                    curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
                     chmod +x '${SCRIPT_DIR}/'*.sh
                     echo "Scripts downloaded to ${SCRIPT_DIR}"
                 else
