@@ -591,10 +591,12 @@ def runCodeReview(Map params = [:]) {
                 def critCount = safeInt(env.FINDINGS_CRIT)
                 def highCount = safeInt(env.FINDINGS_HIGH)
                 def medCount  = safeInt(env.FINDINGS_MED)
+                def lowCount  = safeInt(env.FINDINGS_LOW)
                 def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
-                def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
-                def feishuTitle = "chaos-il2cpp Code Review — ${riskWord}"
+                def colorTag = critCount > 0 || highCount > 0 ? 'red' : (medCount > 0 ? 'blue' : 'green')
+                def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
+                def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
 
                 sh """#!/bin/bash
 python3 -c "
@@ -609,60 +611,83 @@ except Exception:
     d['findings'] = []
 
 commits = d.get('commits', [])
+flist = d.get('findings', [])
+
+# Build commit list with emoji + links
 cl = []
 for c in commits[:5]:
-    s = c.get('sha', '')[:7]
-    m = c.get('message', '')
-    u = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-    cl.append('  * ' + s + ' ' + m)
-    cl.append('    ' + u)
-ct = chr(10).join(cl) if cl else '  (see Jenkins for details)'
+    sha = c.get('sha', '')[:7]
+    msg = c.get('message', '')
+    url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+    cl.append('  • [' + sha + '] ' + msg)
+    cl.append('    ' + url)
+ct = chr(10).join(cl) if cl else '  （无新提交）'
 
-findings = d.get('findings', [])
-fl = []
-si = {'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH   ', 'MEDIUM': 'MEDIUM ', 'LOW': 'LOW    '}
-for fx in findings[:10]:
-    se = fx.get('severity', 'LOW')
-    ic = si.get(se, 'LOW')
+# Build findings list with emoji per severity
+severity_icons = {'CRITICAL': '🔴', 'HIGH': '🟠', 'MEDIUM': '🔵', 'LOW': '⚪'}
+severity_labels = {'CRITICAL': '严重', 'HIGH': '高危', 'MEDIUM': '中等', 'LOW': '低危'}
+flines = []
+for fx in flist[:10]:
+    sev = fx.get('severity', 'LOW')
+    icon = severity_icons.get(sev, '⚪')
+    label = severity_labels.get(sev, '低危')
     fp = fx.get('file', '')
     ln = fx.get('line', 0)
-    mx = fx.get('message', '')
-    fl.append('  ' + ic + ' | ' + fp + ':' + str(ln) + ' -- ' + mx)
-if len(findings) > 10:
-    fl.append('  ... +' + str(len(findings) - 10) + ' more')
-ft = chr(10).join(fl) if fl else '  (no detailed findings parsed)'
-
-if ${critCount} > 0:
-    ti = 'CRITICAL'
-elif ${highCount} > 0:
-    ti = 'HIGH'
-else:
-    ti = 'INFO'
+    msg = fx.get('message', '')
+    flines.append('  ' + icon + ' **[' + label + ']** ' + fp + ':' + str(ln))
+    flines.append('  > ' + msg)
+if len(flist) > 10:
+    flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
+ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
 bu = '${env.BUILD_URL}'
-ml = [
-    ti + ' booming-il2cpp Code Review -- ${totalFindings} findings',
-    '',
-    'New commits (' + str(len(commits)) + '):', ct,
-    'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW',
-    ''
-]
-if findings:
-    ml.append('Problem list:')
-    ml.append(ft)
-else:
-    ml.append('Result: No issues found.')
-ml.append('')
-ml.append('Full report: ' + bu)
-msg = chr(10).join(ml)
 
-with open('${workspaceDir}/feishu_msg.txt', 'w') as f:
+# Build risk overview line with emoji icons
+risk_line = ''
+total = ${totalFindings}
+if total > 0:
+    parts = []
+    if ${critCount} > 0:
+        parts.append('🔴 **' + str(${critCount}) + '** 严重')
+    if ${highCount} > 0:
+        parts.append('🟠 **' + str(${highCount}) + '** 高危')
+    if ${medCount} > 0:
+        parts.append('🔵 **' + str(${medCount}) + '** 中等')
+    if ${lowCount} > 0:
+        parts.append('⚪ **' + str(${lowCount}) + '** 低危')
+    risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
+else:
+    risk_line = '✅ 本次未发现代码问题'
+
+commit_count = len(commits)
+lines = [
+    '📋 **审查范围:** ' + str(commit_count) + ' 个提交',
+    '',
+    '**新提交:**',
+    ct,
+    '',
+    '**风险概览:**',
+    risk_line,
+    '',
+]
+if flines:
+    lines.append('**问题列表:**')
+    lines.append(ft)
+lines.append('')
+lines.append('🔗 [查看完整报告](' + bu + ')')
+
+msg = chr(10).join(lines)
+
+with open('${workspaceDir}/feishu_card_msg.txt', 'w') as f:
     f.write(msg)
 print('ok')
 "
-bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
-    --title    '${feishuTitle}' \
-    --message  "\$(cat '${workspaceDir}/feishu_msg.txt')"
+MSG="\$(cat '${workspaceDir}/feishu_card_msg.txt')"
+bash '${SCRIPT_DIR}/notify-feishu.sh' \
+    --title      '${feishuTitle}' \
+    --message    "\${MSG}" \
+    --build-link '${env.BUILD_URL}' \
+    --color      '${colorTag}'
                 """
             }
         }
