@@ -465,7 +465,7 @@ def runCodeReview(Map params = [:]) {
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
-    def boomingDir   = repoUrl  // Use local repo path
+    def boomingDir   = "${workspaceDir}/booming-il2cpp"  // Fresh clone each run
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${env.WORKSPACE}/scripts"
 
@@ -508,21 +508,29 @@ def runCodeReview(Map params = [:]) {
 
     stage('Code Review: Checkout') {
         node('linux-x64') {
+            // Fresh shallow clone from local repo (fast, avoids polluting shared repo)
             sh """#!/bin/bash
                 set -euo pipefail
-                cd '${boomingDir}'
-                echo "=== Fetch latest from origin ==="
-                git fetch origin 2>&1 || echo "WARNING: fetch failed (network?), using local HEAD"
+
+                # Remove old clone if present
+                rm -rf '${workspaceDir}/booming-il2cpp'
+
+                # Fresh shallow clone from local upstream
+                git clone --depth 50 '${boomingDir}' '${workspaceDir}/booming-il2cpp' 2>&1
+                cd '${workspaceDir}/booming-il2cpp'
+
+                # Fetch latest from origin
+                git fetch origin 2>&1 || echo "WARNING: fetch failed, using local HEAD"
                 git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
                 echo "Now at: \$(git log --oneline -1)"
             """
             script {
                 env.CURRENT_COMMIT = sh(
-                    script: "cd '${boomingDir}' && git rev-parse HEAD",
+                    script: "cd '${workspaceDir}/booming-il2cpp' && git rev-parse HEAD",
                     returnStdout: true
                 ).trim()
             }
-            echo "Repo: ${boomingDir} @ ${env.CURRENT_COMMIT}"
+            echo "Fresh clone: ${workspaceDir}/booming-il2cpp @ ${env.CURRENT_COMMIT}"
         }
     }
 
@@ -551,9 +559,12 @@ def runCodeReview(Map params = [:]) {
     }
 
     stage('Code Review: Review with Claude') {
-        when { expression { env.REVIEW_SKIPPED == 'false' } }
         node('linux-x64') {
             script {
+                if (env.REVIEW_SKIPPED != 'false') {
+                    echo "Review skipped, no Claude invocation needed"
+                    return
+                }
                 sh """
                     bash '${SCRIPT_DIR}/review-with-claude.sh' \
                         --repo-dir    '${boomingDir}' \
@@ -596,14 +607,16 @@ def runCodeReview(Map params = [:]) {
     }
 
     stage('Code Review: Notify Feishu') {
-        when {
-            expression {
-                env.REVIEW_SKIPPED == 'false' &&
-                (env.FINDINGS_CRIT.toInteger() > 0 || env.FINDINGS_HIGH.toInteger() > 0)
-            }
-        }
         node('linux-x64') {
             script {
+                if (env.REVIEW_SKIPPED != 'false') {
+                    echo "Skipped, no notification needed"
+                    return
+                }
+                if (env.FINDINGS_CRIT.toInteger() == 0 && env.FINDINGS_HIGH.toInteger() == 0) {
+                    echo "No CRITICAL or HIGH findings, skipping notification"
+                    return
+                }
                 def critCount = env.FINDINGS_CRIT.toInteger()
                 def highCount = env.FINDINGS_HIGH.toInteger()
                 def medCount  = env.FINDINGS_MED.toInteger()
@@ -673,9 +686,12 @@ def runCodeReview(Map params = [:]) {
     }
 
     stage('Code Review: Update State') {
-        when { expression { env.REVIEW_SKIPPED == 'false' } }
         node('linux-x64') {
             script {
+                if (env.REVIEW_SKIPPED != 'false') {
+                    echo "Skipped, no state update needed"
+                    return
+                }
                 sh """#!/bin/bash
                     TMPFILE="${stateFile}.tmp"
                     python3 -c "
