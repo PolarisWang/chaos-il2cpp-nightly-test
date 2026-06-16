@@ -64,7 +64,7 @@ pipeline {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
                         runCodeReview(
-                            repoUrl: params.BOOMING_REPO_URL ?: 'https://github.com/PolarisWang/booming-il2cpp.git',
+                            repoUrl: params.BOOMING_REPO_URL ?: '/booming-il2cpp',
                             branch: params.BOOMING_BRANCH ?: 'main'
                         )
                         env.DISPATCHED = 'true'
@@ -461,18 +461,31 @@ except Exception:
 // ============================================================
 
 def runCodeReview(Map params = [:]) {
-    def repoUrl    = params.repoUrl    ?: 'https://github.com/PolarisWang/booming-il2cpp.git'
+    def repoUrl    = params.repoUrl    ?: '/booming-il2cpp'
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
-    def boomingDir   = "${workspaceDir}/booming-il2cpp"
+    def boomingDir   = repoUrl  # Use local repo path
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${env.WORKSPACE}/scripts"
 
     stage('Code Review: Init') {
         node('linux-x64') {
-            sh "mkdir -p '${workspaceDir}'"
+            sh "mkdir -p '${workspaceDir}' '${env.WORKSPACE}/scripts'"
             echo "Code review workspace: ${workspaceDir}"
+            // Download required scripts from GitHub (public repo)
+            sh """#!/bin/bash
+                if [[ ! -f '${env.WORKSPACE}/scripts/review-with-claude.sh' ]]; then
+                    curl -sL -o '${env.WORKSPACE}/scripts/review-with-claude.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
+                    curl -sL -o '${env.WORKSPACE}/scripts/notify-feishu-text.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
+                    chmod +x '${env.WORKSPACE}/scripts/'*.sh
+                    echo "Scripts downloaded"
+                else
+                    echo "Scripts already exist"
+                fi
+            """
         }
     }
 
@@ -495,17 +508,21 @@ def runCodeReview(Map params = [:]) {
 
     stage('Code Review: Checkout') {
         node('linux-x64') {
-            checkout([
-                $class: 'GitSCM',
-                branches: [[name: "*/${branch}"]],
-                userRemoteConfigs: [[url: repoUrl]],
-                changelog: true,
-                poll: false
-            ])
+            sh """#!/bin/bash
+                set -euo pipefail
+                cd '${boomingDir}'
+                echo "=== Fetch latest from origin ==="
+                git fetch origin 2>&1 || echo "WARNING: fetch failed (network?), using local HEAD"
+                git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
+                echo "Now at: \$(git log --oneline -1)"
+            """
             script {
-                env.CURRENT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                env.CURRENT_COMMIT = sh(
+                    script: "cd '${boomingDir}' && git rev-parse HEAD",
+                    returnStdout: true
+                ).trim()
             }
-            echo "Checked out ${repoUrl} @ ${env.CURRENT_COMMIT}"
+            echo "Repo: ${boomingDir} @ ${env.CURRENT_COMMIT}"
         }
     }
 
@@ -516,7 +533,7 @@ def runCodeReview(Map params = [:]) {
                 echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
 
                 def commitCount = sh(
-                    script: "cd '${env.WORKSPACE}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
+                    script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
                     returnStdout: true
                 ).trim()
 
@@ -539,7 +556,7 @@ def runCodeReview(Map params = [:]) {
             script {
                 sh """
                     bash '${SCRIPT_DIR}/review-with-claude.sh' \
-                        --repo-dir    '${env.WORKSPACE}' \
+                        --repo-dir    '${boomingDir}' \
                         --from-commit '${env.REVIEW_FROM}' \
                         --to-commit   '${env.CURRENT_COMMIT}' \
                         --output      '${findingsFile}'
