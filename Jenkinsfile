@@ -63,24 +63,13 @@ pipeline {
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
-                        // Checkout this repo for pipeline library scripts
-                        checkout([
-                            $class: 'GitSCM',
-                            branches: [[name: '*/main']],
-                            userRemoteConfigs: [[url: 'https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git']],
-                            poll: false
-                        ])
-                        // Verify checkout and load pipeline
-                        def pipelineFile = "${env.WORKSPACE}/pipelines/vars/codeReviewPipeline.groovy"
-                        echo "Loading pipeline from: ${pipelineFile}"
-                        if (!fileExists(pipelineFile)) {
-                            error "Pipeline file not found: ${pipelineFile}"
-                        }
-                        def codeReview = load pipelineFile
-                        if (codeReview == null) {
-                            error "load() returned null for: ${pipelineFile}"
-                        }
-                        codeReview.call(
+                        library identifier: 'chaos-pipeline@main',
+                                retriever: modernSCM([
+                                    $class: 'GitSCMSource',
+                                    remote: 'https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git',
+                                    traits: [[$class: 'BranchDiscoveryTrait']]
+                                ])
+                        codeReviewPipeline(
                             repoUrl: params.BOOMING_REPO_URL ?: 'https://github.com/PolarisWang/booming-il2cpp.git',
                             branch: params.BOOMING_BRANCH ?: 'main'
                         )
