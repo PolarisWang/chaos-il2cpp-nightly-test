@@ -465,7 +465,7 @@ def runCodeReview(Map params = [:]) {
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
-    def boomingDir   = repoUrl  # Use local repo path
+    def boomingDir   = repoUrl  // Use local repo path
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${env.WORKSPACE}/scripts"
 
