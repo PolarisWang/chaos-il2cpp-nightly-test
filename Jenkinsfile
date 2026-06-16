@@ -2,12 +2,14 @@
  * chaos-il2cpp Nightly Multi-Platform Build, Test & Report Pipeline
  *
  * Self-contained pipeline (no shared library dependency).
+ * Dispatches to other pipelines (code-review, pr-review, etc.) based on JOB_NAME.
  *
  * Triggered by:
  *   - cron: every day at 3:00 AM and 12:15 PM
+ *   - cron: code-review job every 30 minutes (separate job XML)
  *   - manual: with BUILD_CONFIG and BOOMING_REPO parameters
  *
- * Pipeline:
+ * Nightly Pipeline:
  *   1. linux-x64: Full pipeline (fact → benchmark → hotupdate → collect → report)
  *   2. linux-arm64: Fact verification for key DLLs
  *   3. android-arm64: Build verification
@@ -35,6 +37,7 @@ pipeline {
     options {
         buildDiscarder(logRotator(numToKeepStr: '30'))
         timeout(time: 6, unit: 'HOURS')
+        skipDefaultCheckout(true)
     }
 
     parameters {
@@ -53,9 +56,28 @@ pipeline {
 
     stages {
         // ─────────────────────────────────────────────────────
+        // Dispatch — route to the correct pipeline based on job name
+        // ─────────────────────────────────────────────────────
+        stage('Dispatch') {
+            agent { label 'linux-x64' }
+            steps {
+                script {
+                    if (env.JOB_NAME?.contains('code-review')) {
+                        codeReviewPipeline(
+                            repoUrl: params.BOOMING_REPO_URL ?: 'https://github.com/PolarisWang/booming-il2cpp.git',
+                            branch: params.BOOMING_BRANCH ?: 'main'
+                        )
+                        env.DISPATCHED = 'true'
+                    }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────
         // Init — set workspace-dependent paths
         // ─────────────────────────────────────────────────────
         stage('Init') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-x64' }
             steps {
                 script {
@@ -68,6 +90,7 @@ pipeline {
         // linux-x64 — Full Pipeline
         // ─────────────────────────────────────────────────────
         stage('linux-x64 Full Pipeline') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-x64' }
             steps {
                 script {
@@ -107,6 +130,7 @@ pipeline {
         // linux-arm64 — Smoke Test
         // ─────────────────────────────────────────────────────
         stage('linux-arm64 Smoke') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-arm64' }
             steps {
                 sh """#!/bin/bash
@@ -129,6 +153,7 @@ pipeline {
         // android-arm64 — Build Verification
         // ─────────────────────────────────────────────────────
         stage('android-arm64 Verify') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'android-arm64' }
             steps {
                 sh """#!/bin/bash
@@ -144,6 +169,7 @@ pipeline {
         // SonarQube Analysis
         // ─────────────────────────────────────────────────────
         stage('SonarQube Analysis') {
+            when { expression { env.DISPATCHED != 'true' } }
             parallel {
                 stage('x64 SonarQube') {
                     agent { label 'linux-x64' }
@@ -160,6 +186,7 @@ pipeline {
         // Generate Allure Report
         // ─────────────────────────────────────────────────────
         stage('Allure Report') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-x64' }
             steps {
                 script {
@@ -181,6 +208,7 @@ pipeline {
         // Nightly HTML Report + Ingest
         // ─────────────────────────────────────────────────────
         stage('Nightly Report') {
+            when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-x64' }
             steps {
                 script {
@@ -237,13 +265,17 @@ pipeline {
     post {
         failure {
             script {
-                sendNightlyNotification(status: 'FAILURE', artifactsDir: ARTIFACTS_DIR)
+                if (env.JOB_NAME?.contains('nightly')) {
+                    sendNightlyNotification(status: 'FAILURE', artifactsDir: ARTIFACTS_DIR)
+                }
             }
         }
 
         success {
             script {
-                sendNightlyNotification(status: 'SUCCESS', artifactsDir: ARTIFACTS_DIR)
+                if (env.JOB_NAME?.contains('nightly')) {
+                    sendNightlyNotification(status: 'SUCCESS', artifactsDir: ARTIFACTS_DIR)
+                }
             }
         }
 
