@@ -63,7 +63,16 @@ pipeline {
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
-                        codeReviewPipeline(
+                        // Checkout this repo for pipeline library scripts
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[name: '*/main']],
+                            userRemoteConfigs: [[url: 'https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git']],
+                            poll: false
+                        ])
+                        // Load the pipeline library and execute
+                        def codeReview = load "${env.WORKSPACE}/pipelines/vars/codeReviewPipeline.groovy"
+                        codeReview.call(
                             repoUrl: params.BOOMING_REPO_URL ?: 'https://github.com/PolarisWang/booming-il2cpp.git',
                             branch: params.BOOMING_BRANCH ?: 'main'
                         )
