@@ -50,14 +50,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 DATE_TAG=$(date +%Y%m%d)
+RUN_TAG="${RUN_TAG:-$(date +%H | awk '{if ($1 < 8) print "run1"; else print "run2"}')}"
 ARTIFACTS_DIR="${CLONE_DIR}/artifacts"
 FOUNDATION_DIR="${CLONE_DIR}/testing/foundation-dll"
-REPORT_FILE_NAME="nightly-report-${DATE_TAG}.html"
-DATA_FILE_NAME="nightly-data-${DATE_TAG}.json"
+REPORT_FILE_NAME="nightly-report-${DATE_TAG}-${RUN_TAG}.html"
+DATA_FILE_NAME="nightly-data-${DATE_TAG}-${RUN_TAG}.json"
 
 echo "========================================"
 echo "  chaos-il2cpp Nightly Orchestrator"
-echo "  Date:    ${DATE_TAG}"
+echo "  Date:    ${DATE_TAG} (${RUN_TAG})"
 echo "  Config:  ${BUILD_CONFIG}"
 echo "  Clone:   ${CLONE_DIR}"
 echo "  Build #: ${BUILD_NUMBER}"
@@ -196,15 +197,30 @@ phase_report() {
         return
     fi
 
-    # Auto-discover the previous night's data for benchmark regression comparison
+    # Auto-discover the previous run's data for regression comparison
     BASELINE=""
     PREV_DATE=$(date -d 'yesterday' '+%Y%m%d' 2>/dev/null || echo "")
     if [[ -n "$PREV_DATE" ]]; then
-        PREV_DATA="${ARTIFACTS_DIR}/nightly-data-${PREV_DATE}.json"
-        if [[ -f "$PREV_DATA" ]]; then
-            BASELINE="$PREV_DATA"
-            echo "Baseline found: ${PREV_DATA}"
-        else
+        if [[ "$RUN_TAG" == "run2" ]]; then
+            # Noon run: compare against this morning's run1
+            PREV_DATA="${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-run1.json"
+            if [[ -f "$PREV_DATA" ]]; then
+                BASELINE="$PREV_DATA"
+                echo "Baseline found (today run1): ${PREV_DATA}"
+            fi
+        fi
+        if [[ -z "$BASELINE" ]]; then
+            # Try yesterday's run2, then run1
+            for try_run in run2 run1; do
+                PREV_DATA="${ARTIFACTS_DIR}/nightly-data-${PREV_DATE}-${try_run}.json"
+                if [[ -f "$PREV_DATA" ]]; then
+                    BASELINE="$PREV_DATA"
+                    echo "Baseline found (${PREV_DATE} ${try_run}): ${PREV_DATA}"
+                    break
+                fi
+            done
+        fi
+        if [[ -z "$BASELINE" ]]; then
             # Also search in report-server
             for dir in "${REPORT_SERVER_DIR}" "${ARTIFACTS_DIR}"; do
                 FOUND=$(ls -t "${dir}"/nightly-data-*.json 2>/dev/null | head -1)

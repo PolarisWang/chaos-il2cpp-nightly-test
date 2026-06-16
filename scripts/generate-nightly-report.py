@@ -127,17 +127,22 @@ def generate_report(data: dict, build_number: str = "",
 
     # ── Build per-DLL rows ──
     dll_rows = []
-    regressed_dlls = []
-    improved_dlls = []
+    fact_regressed = []
+    fact_improved = []
+    bmk_regressed = []
+    bmk_improved = []
+    hot_regressed = []
+    mem_regressed = []
+    gc_regressed = []
     baseline_bmk_total = 0
 
     for dll_name in sorted(dlls.keys()):
         m = compute_dll_metrics(dlls[dll_name])
         bm = compute_dll_metrics(baseline_dlls.get(dll_name, {})) if baseline_dlls else {}
 
+        dll_fact_pct = (m["fact_passed"] / m["fact_total"] * 100) if m["fact_total"] > 0 else 0
         dll_fact = fmt_pct(m["fact_passed"], m["fact_total"])
-        fact_cls = css_color_class((m["fact_passed"] / m["fact_total"] * 100)
-                                    if m["fact_total"] > 0 else 0)
+        fact_cls = css_color_class(dll_fact_pct)
 
         dll_bmk = str(m["benchmark_methods"]) if m["benchmark_methods"] > 0 else "-"
         baseline_bmk = bm.get("benchmark_methods", 0)
@@ -152,16 +157,80 @@ def generate_report(data: dict, build_number: str = "",
             bmk_delta = f'{"+" if diff > 0 else ""}{diff} ({pct:+.1f}%)'
             bmk_delta_cls = "delta-pos" if diff > 0 else ("delta-neg" if diff < 0 else "delta-zero")
             if diff < 0:
-                regressed_dlls.append(dll_name)
+                bmk_regressed.append(dll_name)
             elif diff > 0:
-                improved_dlls.append(dll_name)
+                bmk_improved.append(dll_name)
+
+        # Fact delta vs baseline
+        fact_delta_html = ""
+        if bm.get("fact_total", 0) > 0 and m["fact_total"] > 0:
+            bl_pct = bm["fact_passed"] / bm["fact_total"] * 100
+            delta_pp = dll_fact_pct - bl_pct
+            if abs(delta_pp) >= 0.01:
+                cls = "delta-pos" if delta_pp > 0 else "delta-neg"
+                fact_delta_html = f'<td class="{cls}">{"+" if delta_pp > 0 else ""}{delta_pp:+.1f}pp</td>'
+                if delta_pp < -0.5:
+                    fact_regressed.append(dll_name)
+                elif delta_pp > 0.5:
+                    fact_improved.append(dll_name)
+            else:
+                fact_delta_html = '<td class="delta-zero">±0</td>'
+        else:
+            fact_delta_html = '<td class="delta-none">—</td>'
 
         # HotUpdate
         dll_hot = f"{m['hotupdate_passed']}/{m['hotupdate_total']}" if m["hotupdate_total"] > 0 else "-"
+        dll_hot_pct = (m["hotupdate_passed"] / m["hotupdate_total"] * 100) if m["hotupdate_total"] > 0 else 0
+
+        # HotUpdate delta vs baseline
+        hot_delta_html = ""
+        if bm.get("hotupdate_total", 0) > 0 and m["hotupdate_total"] > 0:
+            bl_hot_pct = bm["hotupdate_passed"] / bm["hotupdate_total"] * 100
+            hot_delta_pp = dll_hot_pct - bl_hot_pct
+            if abs(hot_delta_pp) >= 0.01:
+                cls = "delta-pos" if hot_delta_pp > 0 else "delta-neg"
+                hot_delta_html = f'<td class="{cls}">{"+" if hot_delta_pp > 0 else ""}{hot_delta_pp:+.1f}pp</td>'
+                if hot_delta_pp < -0.5:
+                    hot_regressed.append(dll_name)
+            else:
+                hot_delta_html = '<td class="delta-zero">±0</td>'
+        else:
+            hot_delta_html = '<td class="delta-none">—</td>'
 
         # Memory
         dll_mem_alloc_str = fmt_bytes(m["mem_alloc_bytes"]) if m["mem_alloc_bytes"] > 0 else "-"
         dll_mem_gc_str = fmt_ns_to_ms(m["mem_gc_pause_ns"]) if m["mem_gc_pause_ns"] > 0 else "-"
+
+        # Memory delta vs baseline
+        mem_delta_html = ""
+        bl_alloc = bm.get("mem_alloc_bytes", 0)
+        if bl_alloc > 0 and m["mem_alloc_bytes"] > 0:
+            mem_pct = (m["mem_alloc_bytes"] - bl_alloc) / bl_alloc * 100
+            cls = "delta-pos" if mem_pct < 0 else ("delta-neg" if mem_pct > 0 else "delta-zero")
+            # Negative delta (less alloc) is good → green
+            if abs(mem_pct) >= 1.0:
+                mem_delta_html = f'<td class="{cls}">{fmt_bytes(m["mem_alloc_bytes"] - bl_alloc)} ({mem_pct:+.1f}%)</td>'
+                if mem_pct > 10:
+                    mem_regressed.append(dll_name)
+            else:
+                mem_delta_html = '<td class="delta-zero">±0</td>'
+        else:
+            mem_delta_html = '<td class="delta-none">—</td>'
+
+        # GC delta vs baseline
+        gc_delta_html = ""
+        bl_gc = bm.get("mem_gc_pause_ns", 0)
+        if bl_gc > 0 and m["mem_gc_pause_ns"] > 0:
+            gc_pct = (m["mem_gc_pause_ns"] - bl_gc) / bl_gc * 100
+            cls = "delta-pos" if gc_pct < 0 else ("delta-neg" if gc_pct > 0 else "delta-zero")
+            if abs(gc_pct) >= 1.0:
+                gc_delta_html = f'<td class="{cls}">{fmt_ns_to_ms(m["mem_gc_pause_ns"] - bl_gc)} ({gc_pct:+.1f}%)</td>'
+                if gc_pct > 10:
+                    gc_regressed.append(dll_name)
+            else:
+                gc_delta_html = '<td class="delta-zero">±0</td>'
+        else:
+            gc_delta_html = '<td class="delta-none">—</td>'
 
         overall = "PASS" if m["fact_passed"] == m["fact_total"] else "FAIL"
         overall_cls = "pass" if overall == "PASS" else "fail"
@@ -184,36 +253,127 @@ def generate_report(data: dict, build_number: str = "",
             c_status = "pass" if c_p == c_t else "fail"
             chunk_details += f"<tr class='{c_status}'><td>{slug}</td><td>{c_p}/{c_t}</td><td>{c_pct}</td><td>{c_sus}</td><td>...</td></tr>"
 
-        dll_rows.append((dll_name, dll_fact, fact_cls, dll_bmk, bmk_delta, bmk_delta_cls,
-                         dll_hot, dll_mem_alloc_str, dll_mem_gc_str, overall_cls, chunk_details))
+        dll_rows.append((dll_name, dll_fact, fact_cls, fact_delta_html,
+                         dll_bmk, bmk_delta, bmk_delta_cls,
+                         dll_hot, hot_delta_html,
+                         dll_mem_alloc_str, mem_delta_html,
+                         dll_mem_gc_str, gc_delta_html,
+                         overall_cls, chunk_details))
 
     # ── HTML ──
     fact_color = css_color_class(fact_pct_num)
     hot_color = "pass" if hot_passed == hot_total else ("warn" if hot_pct_val != "N/A" else "pass")
 
     regression_section = ""
-    if regressed_dlls:
-        regression_section = f"""
+    if fact_regressed:
+        regression_section += f"""
+<div class="card regression-warn">
+  <h2>⚠️ Fact Regression</h2>
+  <p><strong>{len(fact_regressed)}</strong> DLL(s) dropped in fact pass rate:</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in fact_regressed)}</ul>
+</div>"""
+    if fact_improved:
+        regression_section += f"""
+<div class="card regression-pass">
+  <h2>✅ Fact Improvement</h2>
+  <p><strong>{len(fact_improved)}</strong> DLL(s) improved in fact pass rate:</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in fact_improved)}</ul>
+</div>"""
+    if bmk_regressed:
+        regression_section += f"""
 <div class="card regression-warn">
   <h2>⚠️ Benchmark Regression</h2>
-  <p><strong>{len(regressed_dlls)}</strong> DLL(s) lost benchmark methods:</p>
-  <ul>{"".join(f'<li>{d}</li>' for d in regressed_dlls)}</ul>
+  <p><strong>{len(bmk_regressed)}</strong> DLL(s) lost benchmark methods:</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in bmk_regressed)}</ul>
 </div>"""
-    if improved_dlls:
+    if bmk_improved:
         regression_section += f"""
 <div class="card regression-pass">
   <h2>✅ Benchmark Improvement</h2>
-  <p><strong>{len(improved_dlls)}</strong> DLL(s) gained benchmark methods:</p>
-  <ul>{"".join(f'<li>{d}</li>' for d in improved_dlls)}</ul>
+  <p><strong>{len(bmk_improved)}</strong> DLL(s) gained benchmark methods:</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in bmk_improved)}</ul>
+</div>"""
+    if hot_regressed:
+        regression_section += f"""
+<div class="card regression-warn">
+  <h2>⚠️ HotUpdate Regression</h2>
+  <p><strong>{len(hot_regressed)}</strong> DLL(s) dropped in hotupdate pass rate:</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in hot_regressed)}</ul>
+</div>"""
+    if mem_regressed:
+        regression_section += f"""
+<div class="card regression-warn">
+  <h2>⚠️ Memory Regression</h2>
+  <p><strong>{len(mem_regressed)}</strong> DLL(s) increased in allocation (>10%):</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in mem_regressed)}</ul>
+</div>"""
+    if gc_regressed:
+        regression_section += f"""
+<div class="card regression-warn">
+  <h2>⚠️ GC Pause Regression</h2>
+  <p><strong>{len(gc_regressed)}</strong> DLL(s) increased in GC pause (>10%):</p>
+  <ul>{"".join(f'<li>{d}</li>' for d in gc_regressed)}</ul>
 </div>"""
 
     no_data_warn = ""
     if no_data_count > 0:
         no_data_warn = f'<div class="no-data-warn">⚠️ {no_data_count} assemblies have no test data — possibly new or skipped</div>'
 
-    baseline_cols = ""
+    # ── Baseline aggregates for summary cards ──
+    bl_summary = baseline_data.get("summary", {}) if baseline_data else {}
+    bl_fact_passed = bl_summary.get("fact_passed", 0)
+    bl_fact_total = bl_summary.get("fact_total", 0)
+    bl_bmk = bl_summary.get("benchmark_methods", 0)
+    bl_hot_passed = bl_summary.get("hotupdate_passed", 0)
+    bl_hot_total = bl_summary.get("hotupdate_total", 0)
+    bl_mem_alloc = bl_summary.get("memory_alloc_bytes", 0)
+    bl_mem_gc = bl_summary.get("memory_gc_pause_ns", 0)
+
+    def summary_delta(current, baseline, is_pct=False):
+        if baseline is None or baseline == 0:
+            return '<span class="delta-none">—</span>'
+        diff = current - baseline
+        if is_pct:
+            rel = diff - baseline  # baseline is already a percentage
+            cls = "delta-pos" if diff > 0 else ("delta-neg" if diff < 0 else "delta-zero")
+            return f'<span class="{cls}">{"+" if diff > 0 else ""}{diff:+.1f}pp</span>'
+        if current == baseline:
+            return '<span class="delta-zero">±0</span>'
+        pct = diff / baseline * 100
+        cls = "delta-pos" if diff > 0 else "delta-neg"
+        return f'<span class="{cls} sub">{"+" if diff > 0 else ""}{diff} ({pct:+.1f}%)</span>'
+
+    bl_fact_delta = ""
+    bl_bmk_delta = ""
+    bl_hot_delta = ""
+    bl_mem_delta = ""
     if baseline_data:
-        baseline_cols = '<th>BMK Δ</th>'
+        bl_fact_pct = (bl_fact_passed / bl_fact_total * 100) if bl_fact_total > 0 else 0
+        cur_fact_pct = (fact_passed / fact_total * 100) if fact_total > 0 else 0
+        diff_pp = cur_fact_pct - bl_fact_pct
+        if abs(diff_pp) >= 0.01:
+            cls = "delta-pos" if diff_pp > 0 else "delta-neg"
+            bl_fact_delta = f'<div class="sub {cls}">{"+" if diff_pp > 0 else ""}{diff_pp:+.1f}pp vs 昨日</div>'
+        else:
+            bl_fact_delta = '<div class="sub delta-zero">±0 vs 昨日</div>'
+
+        bl_bmk_delta = summary_delta(bmk_methods, bl_bmk) if bl_bmk > 0 else ""
+        bl_hot_pct_cur = (hot_passed / hot_total * 100) if hot_total > 0 else 0
+        bl_hot_pct_prev = (bl_hot_passed / bl_hot_total * 100) if bl_hot_total > 0 else 0
+        bl_hot_diff = bl_hot_pct_cur - bl_hot_pct_prev
+        if abs(bl_hot_diff) >= 0.01:
+            cls = "delta-pos" if bl_hot_diff > 0 else "delta-neg"
+            bl_hot_delta = f'<div class="sub {cls}">{"+" if bl_hot_diff > 0 else ""}{bl_hot_diff:+.1f}pp vs 昨日</div>'
+        else:
+            bl_hot_delta = '<div class="sub delta-zero">±0 vs 昨日</div>'
+
+        if bl_mem_alloc > 0 and mem_alloc > 0:
+            mem_pct = (mem_alloc - bl_mem_alloc) / bl_mem_alloc * 100
+            cls = "delta-pos" if mem_pct < 0 else ("delta-neg" if mem_pct > 0 else "delta-zero")
+            sign = "+" if mem_pct > 0 else ""
+            bl_mem_delta = f'<div class="sub {cls}">{fmt_bytes(mem_alloc - bl_mem_alloc)} ({sign}{mem_pct:.1f}%) vs 昨日</div>'
+        else:
+            bl_mem_delta = '<div class="sub delta-none">— vs 昨日</div>'
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -280,22 +440,22 @@ tr.fail td {{ background:#fef2f2; }}
   <div class="card">
     <h2>正确性</h2>
     <div class="value {fact_color}">{fact_pct_val}</div>
-    <div class="sub">{fact_passed}/{fact_total} facts</div>
+    <div class="sub">{fact_passed}/{fact_total} facts</div>{bl_fact_delta}
   </div>
   <div class="card">
     <h2>性能</h2>
     <div class="value warn">{bmk_methods}</div>
-    <div class="sub">benchmarked methods</div>
+    <div class="sub">benchmarked methods</div>{bl_bmk_delta}
   </div>
   <div class="card">
     <h2>热更新</h2>
     <div class="value {hot_color}">{hot_pct_val}</div>
-    <div class="sub">{hot_passed}/{hot_total} patches</div>
+    <div class="sub">{hot_passed}/{hot_total} patches</div>{bl_hot_delta}
   </div>
   <div class="card">
     <h2>内存</h2>
     <div class="value">{fmt_bytes(mem_alloc)}</div>
-    <div class="sub">{fmt_ns_to_ms(mem_gc_pause)} GC · {mem_fast_path:.1f}% fast path</div>
+    <div class="sub">{fmt_ns_to_ms(mem_gc_pause)} GC · {mem_fast_path:.1f}% fast path</div>{bl_mem_delta}
   </div>
 </div>
 
@@ -303,21 +463,25 @@ tr.fail td {{ background:#fef2f2; }}
 
 <table>
 <thead><tr>
-  <th>Assembly</th><th>Fact</th><th>Benchmark</th>{baseline_cols}<th>HotUpdate</th><th>Memory</th><th>GC Pause</th><th>Status</th><th></th>
+  <th>Assembly</th><th>Fact</th><th>Fact Δ</th><th>Benchmark</th><th>BMK Δ</th><th>HotUpdate</th><th>Hot Δ</th><th>Memory</th><th>Mem Δ</th><th>GC Pause</th><th>GC Δ</th><th>Status</th><th></th>
 </tr></thead>
 <tbody>
 """
     for row in dll_rows:
-        name, fact, fact_cls, bmk, bmk_delta, bmk_cls, hot, mem, gc, overall_cls, details = row
+        (name, fact, fact_cls, fact_delta,
+         bmk, bmk_delta, bmk_cls,
+         hot, hot_delta,
+         mem, mem_delta,
+         gc, gc_delta,
+         overall_cls, details) = row
         expand_id = f"d{hash(name) % 100000}"
         caret = "▶" if details else ""
-        bmk_delta_cell = f'<td class="{bmk_cls}">{bmk_delta}</td>' if bmk_delta else ""
         html += f"""<tr class='{overall_cls}'>
-  <td>{name}</td><td class="{fact_cls}">{fact}</td><td>{bmk}</td>{bmk_delta_cell}<td>{hot}</td><td>{mem}</td><td>{gc}</td>
+  <td>{name}</td><td class="{fact_cls}">{fact}</td>{fact_delta}<td>{bmk}</td><td class="{bmk_cls}">{bmk_delta}</td><td>{hot}</td>{hot_delta}<td>{mem}</td>{mem_delta}<td>{gc}</td>{gc_delta}
   <td><span class='{overall_cls}'>{'✅' if overall_cls == 'pass' else '❌'}</span></td>
   <td class='expand-btn' onclick="toggleDetail('{expand_id}')">{caret}</td>
 </tr>
-<tr id='{expand_id}' class='detail-row'><td colspan=9>
+<tr id='{expand_id}' class='detail-row'><td colspan=13>
 <table>"""
         if details:
             html += f"<tr><th>Chunk</th><th>Fact</th><th>%</th><th>Susp.</th><th>Bench</th></tr>{details}"

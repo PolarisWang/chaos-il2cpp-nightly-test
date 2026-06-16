@@ -15,6 +15,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FOUNDATION_DIR=""
 OUTPUT_DIR=""
 DATE_TAG="$(date +%Y%m%d)"
+RUN_TAG="${RUN_TAG:-$(date +%H | awk '{if ($1 < 8) print "run1"; else print "run2"}')}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,7 +50,8 @@ mkdir -p "$OUTPUT_DIR"
 echo "=== Collecting results from ${FOUNDATION_DIR} ==="
 
 # Build JSON payload using python3 for robust JSON handling
-python3 - "$FOUNDATION_DIR" "$OUTPUT_DIR" "$DATE_TAG" << 'PYEOF'
+DATE_TAG_FULL="${DATE_TAG}-${RUN_TAG}"
+python3 - "$FOUNDATION_DIR" "$OUTPUT_DIR" "$DATE_TAG_FULL" << 'PYEOF'
 import json, os, sys, glob, re
 from pathlib import Path
 
@@ -334,7 +336,7 @@ if command -v mc &>/dev/null; then
     done
 
     # Also upload the aggregated nightly data JSON
-    OUTPUT_FILE="${OUTPUT_DIR}/nightly-data-${DATE_TAG}.json"
+    OUTPUT_FILE="${OUTPUT_DIR}/nightly-data-${DATE_TAG_FULL}.json"
     if [[ -f "$OUTPUT_FILE" ]]; then
         if mc cp "$OUTPUT_FILE" "local/nightly-raw/${DATE_TAG_CLEAN}/_aggregated/nightly-data.json" 2>/dev/null; then
             UPLOAD_COUNT=$((UPLOAD_COUNT + 1))

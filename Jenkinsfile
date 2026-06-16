@@ -4,7 +4,7 @@
  * Self-contained pipeline (no shared library dependency).
  *
  * Triggered by:
- *   - cron: every day at 3:00 AM
+ *   - cron: every day at 3:00 AM and 12:15 PM
  *   - manual: with BUILD_CONFIG and BOOMING_REPO parameters
  *
  * Pipeline:
@@ -19,13 +19,17 @@ def BOOMING_DIR   = params.BOOMING_REPO ?: '/booming-il2cpp'
 def BUILD_CONFIG  = params.BUILD_CONFIG ?: 'profile'
 def ARTIFACTS_DIR = ""
 def DATE_TAG      = new Date().format('yyyyMMdd')
+def RUN_TAG       = (new Date().format('HH') as int) < 8 ? 'run1' : 'run2'
 def FAILED_PLATFORMS = []
 
 pipeline {
     agent none
 
     triggers {
-        cron('H 3 * * *')
+        cron('''
+            H 3 * * *
+            15 12 * * *
+        ''')
     }
 
     options {
@@ -42,6 +46,7 @@ pipeline {
 
     environment {
         DATE_TAG = "${DATE_TAG}"
+        RUN_TAG  = "${RUN_TAG}"
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
     }
@@ -179,9 +184,21 @@ pipeline {
             agent { label 'linux-x64' }
             steps {
                 script {
-                    def dataFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}.json"
-                    def prevDate = sh(script: "date -d '${DATE_TAG} 1 day ago' +%Y%mdd", returnStdout: true).trim()
-                    def prevFile = "${ARTIFACTS_DIR}/nightly-data-${prevDate}.json"
+                    def dataFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
+
+                    // Find previous run's data for baseline comparison
+                    def prevFile = ""
+                    if (RUN_TAG == 'run2') {
+                        // Noon run: compare against this morning's run
+                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-run1.json"
+                    } else {
+                        // Morning run: compare against yesterday's last run
+                        def yesterday = sh(script: "date -d '${DATE_TAG} 1 day ago' +%Y%mdd", returnStdout: true).trim()
+                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run2.json"
+                        if (!fileExists(prevFile)) {
+                            prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run1.json"
+                        }
+                    }
                     def baselineFlag = fileExists(prevFile) ? "--baseline ${prevFile}" : ""
 
                     sh """#!/bin/bash
@@ -190,7 +207,7 @@ pipeline {
                         python3 "\${WORKSPACE}/scripts/generate-nightly-report.py" \
                             --data "${dataFile}" \
                             ${baselineFlag} \
-                            --output "${ARTIFACTS_DIR}/nightly-report-${DATE_TAG}.html" \
+                            --output "${ARTIFACTS_DIR}/nightly-report-${DATE_TAG}-${RUN_TAG}.html" \
                             --build-number "\${BUILD_NUMBER}"
 
                         echo "=== Ingest into Report API ==="
@@ -199,7 +216,7 @@ pipeline {
 
                         echo "=== Copy to Nginx volume ==="
                         mkdir -p /var/lib/report-server/daily
-                        cp -v "${ARTIFACTS_DIR}/nightly-report-${DATE_TAG}.html" \
+                        cp -v "${ARTIFACTS_DIR}/nightly-report-${DATE_TAG}-${RUN_TAG}.html" \
                               /var/lib/report-server/daily/nightly-latest.html
                         cp -v "${dataFile}" /var/lib/report-server/daily/
                     """
@@ -209,7 +226,7 @@ pipeline {
                         alwaysLinkToLastBuild: false,
                         keepAll: true,
                         reportDir: ARTIFACTS_DIR,
-                        reportFiles: "nightly-report-${DATE_TAG}.html",
+                        reportFiles: "nightly-report-${DATE_TAG}-${RUN_TAG}.html",
                         reportName: 'Nightly Comprehensive Report'
                     ])
                 }
@@ -271,7 +288,7 @@ def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
 def sendNightlyNotification(Map params) {
     def status     = params.status ?: 'SUCCESS'
     def artifacts  = params.artifactsDir ?: "${env.WORKSPACE}/artifacts"
-    def dataFile   = "${artifacts}/nightly-data-${DATE_TAG}.json"
+    def dataFile   = "${artifacts}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
     def webhook    = env.FEISHU_WEBHOOK_URL
 
     if (!webhook) {
@@ -285,7 +302,8 @@ def sendNightlyNotification(Map params) {
 
     def color = status == 'SUCCESS' ? 'green' : 'red'
     def icon  = status == 'SUCCESS' ? '✅' : '❌'
-    def title = "${icon} chaos-il2cpp Nightly #${BUILD_NUMBER} — ${DATE_TAG}"
+    def runLabel  = RUN_TAG == 'run2' ? '午后' : '凌晨'
+    def title = "${icon} chaos-il2cpp Nightly #${BUILD_NUMBER} — ${DATE_TAG} (${runLabel})"
 
     def buildLink  = "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}"
     def reportLink = "${REPORT_EXT_URL}/?build=${BUILD_NUMBER}&date=${DATE_TAG}"
