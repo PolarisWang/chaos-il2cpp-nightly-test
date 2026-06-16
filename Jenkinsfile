@@ -760,30 +760,22 @@ print('ok')
                     echo "Skipped, no state update needed"
                     return
                 }
-                sh """
-set -euo pipefail
-                    TMPFILE="${stateFile}.tmp"
-python3 << 'PYEOF'
-import json, datetime
-data = {
-    'repo': '/booming-il2cpp',
-    'branch': '${branch}',
-    'last_reviewed_commit': '${env.CURRENT_COMMIT}',
-    'last_reviewed_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'findings_last_run': {
-        'critical': ${env.FINDINGS_CRIT},
-        'high': ${env.FINDINGS_HIGH},
-        'medium': ${env.FINDINGS_MED},
-        'low': ${env.FINDINGS_LOW},
-    }
-}
-with open('${stateFile}.tmp', 'w') as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-PYEOF
-                    mv "${stateFile}.tmp" "${stateFile}"
-                    echo "State updated: ${stateFile}"
-                """
+                def stateData = [
+                    repo: '/booming-il2cpp',
+                    branch: branch,
+                    last_reviewed_commit: env.CURRENT_COMMIT,
+                    last_reviewed_at: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                    findings_last_run: [
+                        critical: env.FINDINGS_CRIT.toInteger(),
+                        high: env.FINDINGS_HIGH.toInteger(),
+                        medium: env.FINDINGS_MED.toInteger(),
+                        low: env.FINDINGS_LOW.toInteger()
+                    ]
+                ]
+                writeJSON(file: stateFile, json: stateData, pretty: 2)
+                echo "State updated: ${stateFile}"
             }
         }
     }
 }
+
