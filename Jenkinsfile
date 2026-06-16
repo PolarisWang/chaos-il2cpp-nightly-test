@@ -70,8 +70,16 @@ pipeline {
                             userRemoteConfigs: [[url: 'https://github.com/PolarisWang/chaos-il2cpp-nightly-test.git']],
                             poll: false
                         ])
-                        // Load the pipeline library and execute
-                        def codeReview = load "${env.WORKSPACE}/pipelines/vars/codeReviewPipeline.groovy"
+                        // Verify checkout and load pipeline
+                        def pipelineFile = "${env.WORKSPACE}/pipelines/vars/codeReviewPipeline.groovy"
+                        echo "Loading pipeline from: ${pipelineFile}"
+                        if (!fileExists(pipelineFile)) {
+                            error "Pipeline file not found: ${pipelineFile}"
+                        }
+                        def codeReview = load pipelineFile
+                        if (codeReview == null) {
+                            error "load() returned null for: ${pipelineFile}"
+                        }
                         codeReview.call(
                             repoUrl: params.BOOMING_REPO_URL ?: 'https://github.com/PolarisWang/booming-il2cpp.git',
                             branch: params.BOOMING_BRANCH ?: 'main'
