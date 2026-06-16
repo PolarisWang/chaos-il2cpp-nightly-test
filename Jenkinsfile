@@ -607,7 +607,9 @@ def runCodeReview(Map params = [:]) {
                 sh """
 python3 -c "
 import json, os
-with open('${findingsFile}') as f:
+ws = os.environ['WORKSPACE']
+fp = ws + '/code-review/findings.json'
+with open(fp) as f:
     d = json.load(f)
 commits = d.get('commits', [])
 cl = []
@@ -647,7 +649,7 @@ else:
 ml.append('')
 ml.append('Full report: ' + bu)
 msg = chr(10).join(ml)
-with open('${workspaceDir}/feishu_msg.txt', 'w') as f:
+with open(ws + '/code-review/feishu_msg.txt', 'w') as f:
     f.write(msg)
 print('ok')
 "
