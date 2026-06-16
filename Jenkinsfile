@@ -88,7 +88,6 @@ pipeline {
             steps {
                 script {
 sh """
-#!/bin/bash
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
@@ -128,7 +127,6 @@ sh """
             agent { label 'linux-arm64' }
             steps {
                 sh """
-#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -152,7 +150,6 @@ sh """
             agent { label 'android-arm64' }
             steps {
                 sh """
-#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
                     echo "=== [android] Verify ==="
@@ -226,7 +223,6 @@ sh """
                     def baselineFlag = fileExists(prevFile) ? "--baseline ${prevFile}" : ""
 
                     sh """
-#!/bin/bash
                         set -euo pipefail
                         echo "=== Generate Nightly Report ==="
                         python3 "\${WORKSPACE}/scripts/generate-nightly-report.py" \
@@ -296,7 +292,6 @@ sh """
 def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
     try {
         sh """
-#!/bin/bash
             set -euo pipefail
             mkdir -p "${artifactsDir}"
             sonar-scanner \
@@ -473,7 +468,7 @@ def runCodeReview(Map params = [:]) {
             echo "Code review workspace: ${workspaceDir}"
             // Download required scripts from GitHub (public repo)
             sh """
-#!/bin/bash
+set -euo pipefail
                 if [[ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]]; then
                     curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
@@ -511,7 +506,6 @@ def runCodeReview(Map params = [:]) {
         node('linux-x64') {
             // Fresh shallow clone from local repo (fast, avoids polluting shared repo)
             sh """
-#!/bin/bash
                 set -euo pipefail
 
                 # Remove old clone if present
@@ -608,7 +602,7 @@ def runCodeReview(Map params = [:]) {
                 def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
 
                 sh """
-#!/bin/bash
+set -euo pipefail
 python3 -c "
 import json, os, urllib.request
 
@@ -767,7 +761,7 @@ print('ok')
                     return
                 }
                 sh """
-#!/bin/bash
+set -euo pipefail
                     TMPFILE="${stateFile}.tmp"
 python3 << 'PYEOF'
 import json, datetime
