@@ -602,8 +602,10 @@ def runCodeReview(Map params = [:]) {
                 def medCount  = safeInt(env.FINDINGS_MED)
                 def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
-                def detail = sh(
-                    script: """python3 << 'PYEOF'
+                def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
+                def title = "chaos-il2cpp Code Review — ${riskWord}"
+                sh """
+python3 << 'PYEOF'
 import json
 
 with open('${findingsFile}') as f:
@@ -658,21 +660,13 @@ msg_lines.append('')
 msg_lines.append(f'Full report: {build_url}')
 msg = chr(10).join(msg_lines)
 
-# Write message to temp file for notify script
+# Write to file for next sh step
 with open('${workspaceDir}/feishu_msg.txt', 'w') as f:
     f.write(msg)
-
-print('MSG_WRITTEN')
-PYEOF""",
-                    returnStdout: true
-                ).trim()
-
-                def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
-                def title = "chaos-il2cpp Code Review — ${riskWord}"
-                sh """
-                    bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
-                        --title    '${title}' \
-                        --message  "\$(cat '${workspaceDir}/feishu_msg.txt')"
+PYEOF
+bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
+    --title    '${title}' \
+    --message  "\$(cat '${workspaceDir}/feishu_msg.txt')"
                 """
             }
         }
