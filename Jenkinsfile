@@ -605,20 +605,10 @@ def runCodeReview(Map params = [:]) {
                 def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
                 def title = "chaos-il2cpp Code Review — ${riskWord}"
                 sh """
-echo "DEBUG: workspaceDir=${workspaceDir}"
-echo "DEBUG: findingsFile=${findingsFile}"
-ls -la '${findingsFile}' 2>/dev/null || echo "DEBUG: findingsFile not found!"
-ls -la '${workspaceDir}/' 2>/dev/null || echo "DEBUG: workspaceDir not found!"
-pwd
 python3 << 'PYEOF'
-import json, os
+import json
 
-path = '${findingsFile}'
-print(f"DEBUG PY: path={path} exists={os.path.exists(path)} size={os.path.getsize(path) if os.path.exists(path) else 'N/A'}")
-
-with open(path) as f:
-    content = f.read()
-print(f"DEBUG PY: content=[{content[:200]}]")
+with open('${findingsFile}') as f:
     d = json.load(f)
 
 commits = d.get('commits', [])
