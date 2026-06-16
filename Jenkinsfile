@@ -469,7 +469,7 @@ def runCodeReview(Map params = [:]) {
             // Download required scripts from GitHub (public repo)
             sh """
 set -euo pipefail
-                if [[ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]]; then
+                if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
                     curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
                     curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
