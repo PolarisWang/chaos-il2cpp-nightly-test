@@ -64,7 +64,7 @@ pipeline {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
                         runCodeReview(
-                            repoUrl: params.BOOMING_REPO_URL ?: '/booming-il2cpp',
+                            repoUrl: '/booming-il2cpp',
                             branch: params.BOOMING_BRANCH ?: 'main'
                         )
                         env.DISPATCHED = 'true'
