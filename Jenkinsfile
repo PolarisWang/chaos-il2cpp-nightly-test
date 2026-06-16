@@ -573,25 +573,31 @@ def runCodeReview(Map params = [:]) {
                         --output      '${findingsFile}'
                 """
 
-                def summaryStr = sh(
-                    script: """python3 -c "
-                import json
-                try:
-                    with open('${findingsFile}') as f:
-                        d = json.load(f)
-                    s = d.get('summary', {})
-                    print(json.dumps({
-                        'critical': s.get('critical', 0),
-                        'high': s.get('high', 0),
-                        'medium': s.get('medium', 0),
-                        'low': s.get('low', 0),
-                        'total': s.get('total_findings', 0),
-                    }))
-                except Exception as e:
-                    print(json.dumps({'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'total': 0, 'error': str(e)}))
-                " 2>/dev/null""",
-                    returnStdout: true
-                ).trim()
+                def summaryStr = ''
+                try {
+                    summaryStr = sh(
+                        script: """python3 -c "
+                    import json
+                    try:
+                        with open('${findingsFile}') as f:
+                            d = json.load(f)
+                        s = d.get('summary', {})
+                        print(json.dumps({
+                            'critical': s.get('critical', 0),
+                            'high': s.get('high', 0),
+                            'medium': s.get('medium', 0),
+                            'low': s.get('low', 0),
+                            'total': s.get('total_findings', 0),
+                        }))
+                    except Exception as e:
+                        print(json.dumps({'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'total': 0, 'error': str(e)}))
+                    """",
+                        returnStdout: true
+                    ).trim()
+                } catch (err) {
+                    echo "WARNING: findings parsing failed (${err.message}), using defaults"
+                    summaryStr = '{"critical":0,"high":0,"medium":0,"low":0,"total":0}'
+                }
 
                 def parsed = readJSON text: summaryStr
                 env.FINDINGS_CRIT = parsed.critical.toString()
@@ -601,7 +607,7 @@ def runCodeReview(Map params = [:]) {
                 env.FINDINGS_TOTAL = parsed.total.toString()
 
                 echo "Findings: ${env.FINDINGS_CRIT} CRITICAL · ${env.FINDINGS_HIGH} HIGH · ${env.FINDINGS_MED} MEDIUM · ${env.FINDINGS_LOW} LOW"
-                archiveArtifacts artifacts: 'code-review/findings.json', allowEmptyArchive: true
+                archiveArtifacts artifacts: "${findingsFile}", allowEmptyArchive: true
             }
         }
     }
