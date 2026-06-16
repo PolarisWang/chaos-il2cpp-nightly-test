@@ -574,7 +574,7 @@ def runCodeReview(Map params = [:]) {
                     ).trim()
                 } catch (err) {
                     echo "WARNING: findings parsing failed (${err.message}), using defaults"
-                    summaryStr = '{"critical":0,"high":0,"medium":0,"low":0,"total":0}'
+                    summaryStr = '{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0}'
                 }
 
                 def parsed = readJSON text: summaryStr
@@ -596,10 +596,11 @@ def runCodeReview(Map params = [:]) {
                     echo "Skipped, no notification needed"
                     return
                 }
-                def critCount = env.FINDINGS_CRIT.toInteger()
-                def highCount = env.FINDINGS_HIGH.toInteger()
-                def medCount  = env.FINDINGS_MED.toInteger()
-                def totalFindings = env.FINDINGS_TOTAL.toInteger()
+                def safeInt = { s -> (s != null && s != 'null' && s != '') ? s.toInteger() : 0 }
+                def critCount = safeInt(env.FINDINGS_CRIT)
+                def highCount = safeInt(env.FINDINGS_HIGH)
+                def medCount  = safeInt(env.FINDINGS_MED)
+                def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
                 def detail = sh(
                     script: """python3 -c "
