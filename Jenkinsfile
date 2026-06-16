@@ -87,7 +87,8 @@ pipeline {
             agent { label 'linux-x64' }
             steps {
                 script {
-                    sh """#!/bin/bash
+sh """
+#!/bin/bash
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
@@ -126,7 +127,8 @@ pipeline {
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-arm64' }
             steps {
-                sh """#!/bin/bash
+                sh """
+#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -149,7 +151,8 @@ pipeline {
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'android-arm64' }
             steps {
-                sh """#!/bin/bash
+                sh """
+#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
                     echo "=== [android] Verify ==="
@@ -222,7 +225,8 @@ pipeline {
                     }
                     def baselineFlag = fileExists(prevFile) ? "--baseline ${prevFile}" : ""
 
-                    sh """#!/bin/bash
+                    sh """
+#!/bin/bash
                         set -euo pipefail
                         echo "=== Generate Nightly Report ==="
                         python3 "\${WORKSPACE}/scripts/generate-nightly-report.py" \
@@ -291,7 +295,8 @@ pipeline {
 
 def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
     try {
-        sh """#!/bin/bash
+        sh """
+#!/bin/bash
             set -euo pipefail
             mkdir -p "${artifactsDir}"
             sonar-scanner \
@@ -467,7 +472,8 @@ def runCodeReview(Map params = [:]) {
             sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
             echo "Code review workspace: ${workspaceDir}"
             // Download required scripts from GitHub (public repo)
-            sh """#!/bin/bash
+            sh """
+#!/bin/bash
                 if [[ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]]; then
                     curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
@@ -504,7 +510,8 @@ def runCodeReview(Map params = [:]) {
     stage('Code Review: Checkout') {
         node('linux-x64') {
             // Fresh shallow clone from local repo (fast, avoids polluting shared repo)
-            sh """#!/bin/bash
+            sh """
+#!/bin/bash
                 set -euo pipefail
 
                 # Remove old clone if present
@@ -600,7 +607,8 @@ def runCodeReview(Map params = [:]) {
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
                 def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
 
-                sh """#!/bin/bash
+                sh """
+#!/bin/bash
 python3 -c "
 import json, os, urllib.request
 
@@ -758,7 +766,8 @@ print('ok')
                     echo "Skipped, no state update needed"
                     return
                 }
-                sh """#!/bin/bash
+                sh """
+#!/bin/bash
                     TMPFILE="${stateFile}.tmp"
 python3 << 'PYEOF'
 import json, datetime
