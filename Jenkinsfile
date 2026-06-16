@@ -602,7 +602,7 @@ def runCodeReview(Map params = [:]) {
 
                 sh """#!/bin/bash
 python3 -c "
-import json, os
+import json, os, urllib.request
 
 try:
     with open('${findingsFile}') as f:
@@ -682,15 +682,59 @@ msg = chr(10).join(lines)
 
 with open('${workspaceDir}/feishu_card_msg.txt', 'w') as f:
     f.write(msg)
+
+# Build and send Feishu card directly from Python
+webhook = os.environ.get('FEISHU_WEBHOOK_URL', '')
+card_color = '${colorTag}'
+
+card = {
+    'msg_type': 'interactive',
+    'card': {
+        'header': {
+            'title': {'tag': 'plain_text', 'content': '${feishuTitle}'},
+            'template': card_color
+        },
+        'elements': [
+            {'tag': 'div', 'text': {'tag': 'lark_md', 'content': msg}},
+            {'tag': 'hr'},
+            {
+                'tag': 'action',
+                'actions': [
+                    {
+                        'tag': 'button',
+                        'text': {'tag': 'plain_text', 'content': '🔧 查看完整报告'},
+                        'url': '${env.BUILD_URL}',
+                        'type': 'default'
+                    }
+                ]
+            },
+            {'tag': 'hr'},
+            {
+                'tag': 'note',
+                'elements': [
+                    {'tag': 'plain_text', 'content': 'chaos-il2cpp Code Review · ${DATE_TAG}'}
+                ]
+            }
+        ]
+    }
+}
+
+payload = json.dumps(card, ensure_ascii=False).encode('utf-8')
+if webhook:
+    req = urllib.request.Request(
+        webhook, data=payload,
+        headers={'Content-Type': 'application/json'},
+        method='POST')
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+        print('Feishu card sent (HTTP ' + str(resp.status) + ')')
+    except Exception as e:
+        print('WARNING: Feishu webhook failed: ' + str(e))
+else:
+    print('WARNING: FEISHU_WEBHOOK_URL not set')
+
 print('ok')
 "
-MSG="\$(cat '${workspaceDir}/feishu_card_msg.txt')"
-bash '${SCRIPT_DIR}/notify-feishu.sh' \
-    --title      '${feishuTitle}' \
-    --message    "\${MSG}" \
-    --build-link '${env.BUILD_URL}' \
-    --color      '${colorTag}'
-                """
             }
         }
     }
