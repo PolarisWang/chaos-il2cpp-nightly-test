@@ -467,23 +467,23 @@ def runCodeReview(Map params = [:]) {
     def workspaceDir = "${env.WORKSPACE}/code-review"
     def boomingDir   = "${workspaceDir}/booming-il2cpp"  // Fresh clone each run
     def findingsFile = "${workspaceDir}/findings.json"
-    def SCRIPT_DIR   = "${env.WORKSPACE}/scripts"
+    def SCRIPT_DIR   = "${workspaceDir}/scripts"
 
     stage('Code Review: Init') {
         node('linux-x64') {
-            sh "mkdir -p '${workspaceDir}' '${env.WORKSPACE}/scripts'"
+            sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
             echo "Code review workspace: ${workspaceDir}"
             // Download required scripts from GitHub (public repo)
             sh """#!/bin/bash
-                if [[ ! -f '${env.WORKSPACE}/scripts/review-with-claude.sh' ]]; then
-                    curl -sL -o '${env.WORKSPACE}/scripts/review-with-claude.sh' \
+                if [[ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]]; then
+                    curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
-                    curl -sL -o '${env.WORKSPACE}/scripts/notify-feishu-text.sh' \
+                    curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
-                    chmod +x '${env.WORKSPACE}/scripts/'*.sh
-                    echo "Scripts downloaded"
+                    chmod +x '${SCRIPT_DIR}/'*.sh
+                    echo "Scripts downloaded to ${SCRIPT_DIR}"
                 else
-                    echo "Scripts already exist"
+                    echo "Scripts already exist at ${SCRIPT_DIR}"
                 fi
             """
         }
