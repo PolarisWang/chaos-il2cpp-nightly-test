@@ -664,10 +664,12 @@ def runCodeReview(Map params = [:]) {
 
                 def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
                 def title = "chaos-il2cpp Code Review — ${riskWord}"
+                def msgFile = "${workspaceDir}/feishu_msg.txt"
+                writeFile file: msgFile, text: detail
                 sh """
                     bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
                         --title    '${title}' \
-                        --message  '${detail}'
+                        --message  "\$(cat '${msgFile}')"
                 """
             }
         }
