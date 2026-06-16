@@ -596,10 +596,6 @@ def runCodeReview(Map params = [:]) {
                     echo "Skipped, no notification needed"
                     return
                 }
-                if (env.FINDINGS_CRIT.toInteger() == 0 && env.FINDINGS_HIGH.toInteger() == 0) {
-                    echo "No CRITICAL or HIGH findings, skipping notification"
-                    return
-                }
                 def critCount = env.FINDINGS_CRIT.toInteger()
                 def highCount = env.FINDINGS_HIGH.toInteger()
                 def medCount  = env.FINDINGS_MED.toInteger()
@@ -636,29 +632,37 @@ def runCodeReview(Map params = [:]) {
                     finding_lines.append(f'  ... +{len(findings) - 10} more')
                 findings_text = chr(10).join(finding_lines) if finding_lines else '  (no detailed findings parsed)'
 
-                title_icon = 'CRITICAL' if ${critCount} > 0 else 'HIGH'
+                if ${critCount} > 0:
+                    title_icon = 'CRITICAL'
+                elif ${highCount} > 0:
+                    title_icon = 'HIGH'
+                else:
+                    title_icon = 'INFO'
 
                 build_url = '${env.BUILD_URL}'
                 lines = [
-                    f'{title_icon} booming-il2cpp Code Review — ${critCount + highCount} high-risk findings',
+                    f'{title_icon} booming-il2cpp Code Review — ${totalFindings} findings',
                     '',
                     f'New commits ({len(commits)}):',
                     commits_text,
+                    f'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW',
                     '',
-                    f'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM',
-                    '',
-                    'Problem list:',
-                    findings_text,
-                    '',
-                    f'Full report: {build_url}',
                 ]
+                if findings:
+                    lines.append('Problem list:')
+                    lines.append(findings_text)
+                else:
+                    lines.append('Result: No issues found.')
+                lines.append('')
+                lines.append(f'Full report: {build_url}')
                 msg = chr(10).join(lines)
                 print(msg)
                 " 2>/dev/null""",
                     returnStdout: true
                 ).trim()
 
-                def title = "chaos-il2cpp Code Review — ${totalFindings} findings"
+                def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
+                def title = "chaos-il2cpp Code Review — ${riskWord}"
                 sh """
                     bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
                         --title    '${title}' \
