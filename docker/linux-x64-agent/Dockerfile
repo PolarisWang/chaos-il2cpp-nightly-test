@@ -15,7 +15,11 @@ RUN apt-get update -qq && \
         unzip \
         openjdk-21-jre-headless \
         libnuma1 \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code && claude --version
 
 # Install SonarScanner & Allure CLI
 COPY install-ci-tools.sh /tmp/install-ci-tools.sh

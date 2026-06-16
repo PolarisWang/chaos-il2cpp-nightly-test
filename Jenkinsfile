@@ -585,17 +585,8 @@ def runCodeReview(Map params = [:]) {
                 env.FINDINGS_TOTAL = parsed.total.toString()
 
                 echo "Findings: ${env.FINDINGS_CRIT} CRITICAL · ${env.FINDINGS_HIGH} HIGH · ${env.FINDINGS_MED} MEDIUM · ${env.FINDINGS_LOW} LOW"
-            }
-        }
-    }
 
-    stage('Code Review: Notify Feishu') {
-        node('linux-x64') {
-            script {
-                if (env.REVIEW_SKIPPED != 'false') {
-                    echo "Skipped, no notification needed"
-                    return
-                }
+                // Feishu notification — same node() block, no @2 workspace mismatch
                 def safeInt = { s -> (s != null && s != 'null' && s != '') ? s.toInteger() : 0 }
                 def critCount = safeInt(env.FINDINGS_CRIT)
                 def highCount = safeInt(env.FINDINGS_HIGH)
@@ -603,14 +594,15 @@ def runCodeReview(Map params = [:]) {
                 def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
                 def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
-                def title = "chaos-il2cpp Code Review — ${riskWord}"
-                sh """
+                def feishuTitle = "chaos-il2cpp Code Review — ${riskWord}"
+
+                sh """#!/bin/bash
 python3 -c "
 import json, os
-ws = os.environ['WORKSPACE']
-fp = ws + '/code-review/findings.json'
-with open(fp) as f:
+
+with open('${findingsFile}') as f:
     d = json.load(f)
+
 commits = d.get('commits', [])
 cl = []
 for c in commits[:5]:
@@ -620,6 +612,7 @@ for c in commits[:5]:
     cl.append('  * ' + s + ' ' + m)
     cl.append('    ' + u)
 ct = chr(10).join(cl) if cl else '  (see Jenkins for details)'
+
 findings = d.get('findings', [])
 fl = []
 si = {'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH   ', 'MEDIUM': 'MEDIUM ', 'LOW': 'LOW    '}
@@ -633,14 +626,22 @@ for fx in findings[:10]:
 if len(findings) > 10:
     fl.append('  ... +' + str(len(findings) - 10) + ' more')
 ft = chr(10).join(fl) if fl else '  (no detailed findings parsed)'
+
 if ${critCount} > 0:
     ti = 'CRITICAL'
 elif ${highCount} > 0:
     ti = 'HIGH'
 else:
     ti = 'INFO'
+
 bu = '${env.BUILD_URL}'
-ml = [ti + ' booming-il2cpp Code Review -- ${totalFindings} findings', '', 'New commits (' + str(len(commits)) + '):', ct, 'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW', '']
+ml = [
+    ti + ' booming-il2cpp Code Review -- ${totalFindings} findings',
+    '',
+    'New commits (' + str(len(commits)) + '):', ct,
+    'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW',
+    ''
+]
 if findings:
     ml.append('Problem list:')
     ml.append(ft)
@@ -649,14 +650,27 @@ else:
 ml.append('')
 ml.append('Full report: ' + bu)
 msg = chr(10).join(ml)
-with open(ws + '/code-review/feishu_msg.txt', 'w') as f:
+
+with open('${workspaceDir}/feishu_msg.txt', 'w') as f:
     f.write(msg)
 print('ok')
 "
 bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
-    --title    '${title}' \
+    --title    '${feishuTitle}' \
     --message  "\$(cat '${workspaceDir}/feishu_msg.txt')"
                 """
+            }
+        }
+    }
+
+    stage('Code Review: Notify Feishu') {
+        node('linux-x64') {
+            script {
+                if (env.REVIEW_SKIPPED != 'false') {
+                    echo "Skipped, no notification needed"
+                    return
+                }
+                echo "Notification already sent from Review stage (same node() block)"
             }
         }
     }
