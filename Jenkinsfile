@@ -605,65 +605,52 @@ def runCodeReview(Map params = [:]) {
                 def riskWord = totalFindings > 0 ? "${totalFindings} findings" : "clean"
                 def title = "chaos-il2cpp Code Review — ${riskWord}"
                 sh """
-python3 << 'PYEOF'
-import json
-
+python3 -c "
+import json, os
 with open('${findingsFile}') as f:
     d = json.load(f)
-
 commits = d.get('commits', [])
-commit_lines = []
+cl = []
 for c in commits[:5]:
-    sha = c.get('sha', '')[:7]
-    msg = c.get('message', '')
-    url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-    commit_lines.append(f'  * {sha} {msg}')
-    commit_lines.append(f'    {url}')
-commits_text = chr(10).join(commit_lines) if commit_lines else '  (see Jenkins for details)'
-
+    s = c.get('sha', '')[:7]
+    m = c.get('message', '')
+    u = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+    cl.append('  * ' + s + ' ' + m)
+    cl.append('    ' + u)
+ct = chr(10).join(cl) if cl else '  (see Jenkins for details)'
 findings = d.get('findings', [])
-finding_lines = []
-severity_icon = {'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH   ', 'MEDIUM': 'MEDIUM ', 'LOW': 'LOW    '}
-for f in findings[:10]:
-    sev = f.get('severity', 'LOW')
-    icon = severity_icon.get(sev, 'LOW')
-    fp = f.get('file', '')
-    ln = f.get('line', 0)
-    msg = f.get('message', '')
-    finding_lines.append(f'  {icon} | {fp}:{ln} -- {msg}')
+fl = []
+si = {'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH   ', 'MEDIUM': 'MEDIUM ', 'LOW': 'LOW    '}
+for fx in findings[:10]:
+    se = fx.get('severity', 'LOW')
+    ic = si.get(se, 'LOW')
+    fp = fx.get('file', '')
+    ln = fx.get('line', 0)
+    mx = fx.get('message', '')
+    fl.append('  ' + ic + ' | ' + fp + ':' + str(ln) + ' -- ' + mx)
 if len(findings) > 10:
-    finding_lines.append(f'  ... +{len(findings) - 10} more')
-findings_text = chr(10).join(finding_lines) if finding_lines else '  (no detailed findings parsed)'
-
+    fl.append('  ... +' + str(len(findings) - 10) + ' more')
+ft = chr(10).join(fl) if fl else '  (no detailed findings parsed)'
 if ${critCount} > 0:
-    title_icon = 'CRITICAL'
+    ti = 'CRITICAL'
 elif ${highCount} > 0:
-    title_icon = 'HIGH'
+    ti = 'HIGH'
 else:
-    title_icon = 'INFO'
-
-build_url = '${env.BUILD_URL}'
-msg_lines = [
-    f'{title_icon} booming-il2cpp Code Review -- ${totalFindings} findings',
-    '',
-    f'New commits ({len(commits)}):',
-    commits_text,
-    f'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW',
-    '',
-]
+    ti = 'INFO'
+bu = '${env.BUILD_URL}'
+ml = [ti + ' booming-il2cpp Code Review -- ${totalFindings} findings', '', 'New commits (' + str(len(commits)) + '):', ct, 'Risk overview: ${critCount} CRITICAL  ${highCount} HIGH  ${medCount} MEDIUM  ${env.FINDINGS_LOW} LOW', '']
 if findings:
-    msg_lines.append('Problem list:')
-    msg_lines.append(findings_text)
+    ml.append('Problem list:')
+    ml.append(ft)
 else:
-    msg_lines.append('Result: No issues found.')
-msg_lines.append('')
-msg_lines.append(f'Full report: {build_url}')
-msg = chr(10).join(msg_lines)
-
-# Write to file for next sh step
+    ml.append('Result: No issues found.')
+ml.append('')
+ml.append('Full report: ' + bu)
+msg = chr(10).join(ml)
 with open('${workspaceDir}/feishu_msg.txt', 'w') as f:
     f.write(msg)
-PYEOF
+print('ok')
+"
 bash '${SCRIPT_DIR}/notify-feishu-text.sh' \
     --title    '${title}' \
     --message  "\$(cat '${workspaceDir}/feishu_msg.txt')"
