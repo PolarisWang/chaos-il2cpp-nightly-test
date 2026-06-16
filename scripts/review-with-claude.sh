@@ -85,6 +85,12 @@ else
     DIFF_TRUNCATED=false
 fi
 
+# Sanitize diff for embedding in double-quoted shell string:
+# escape ", $, and ` to prevent shell interpretation
+DIFF="${DIFF//\"/\\\"}"
+DIFF="${DIFF//\$/\\\$}"
+DIFF="${DIFF//\`/\\\`}"
+
 # Build the skill prompt and call Claude
 CLAUDE_OUTPUT=$(claude --print -p "
 请 review 以下 git diff，输出 JSON 格式的审查结果。

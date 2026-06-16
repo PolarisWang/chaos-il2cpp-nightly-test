@@ -569,7 +569,7 @@ def runCodeReview(Map params = [:]) {
                 def summaryStr = ''
                 try {
                     summaryStr = sh(
-                        script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" 2>/dev/null || echo '{\"critical\":0,\"high\":0,\"medium\":0,\"low\":0,\"total_findings\":0}'",
+                        script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" || echo '{\"critical\":0,\"high\":0,\"medium\":0,\"low\":0,\"total_findings\":0}'",
                         returnStdout: true
                     ).trim()
                 } catch (err) {
@@ -600,8 +600,13 @@ def runCodeReview(Map params = [:]) {
 python3 -c "
 import json, os
 
-with open('${findingsFile}') as f:
-    d = json.load(f)
+try:
+    with open('${findingsFile}') as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+    d['commits'] = []
+    d['findings'] = []
 
 commits = d.get('commits', [])
 cl = []
