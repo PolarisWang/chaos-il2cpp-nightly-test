@@ -78,21 +78,22 @@ fi
 # Gather diff, truncate if too large
 DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" 2>/dev/null || true)
 DIFF_LINES=$(echo "$DIFF" | wc -l)
+DIFF_TRUNCATED=false
 if [[ "$DIFF_LINES" -gt "$MAX_DIFF_LINES" ]]; then
     DIFF=$(echo "$DIFF" | head -"$MAX_DIFF_LINES")
     DIFF_TRUNCATED=true
-else
-    DIFF_TRUNCATED=false
 fi
 
-# Sanitize diff for embedding in double-quoted shell string:
-# escape ", $, and ` to prevent shell interpretation
-DIFF="${DIFF//\"/\\\"}"
-DIFF="${DIFF//\$/\\\$}"
-DIFF="${DIFF//\`/\\\`}"
+# Write diff to temp file to avoid shell quoting issues
+DIFF_FILE=$(mktemp)
+trap "rm -f '$DIFF_FILE'" EXIT
+printf '%s\n' "$DIFF" > "$DIFF_FILE"
 
-# Build the skill prompt and call Claude
-CLAUDE_OUTPUT=$(claude --print -p "
+# Build prompt and pipe to claude --print via heredoc + temp file
+# Using quoted heredocs (<<'EOF') for fixed text to prevent any shell interpolation.
+# The diff is read from a temp file, completely avoiding quoting issues.
+CLAUDE_OUTPUT=$({
+    cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
 
 ## 仓库背景
@@ -203,38 +204,43 @@ CLAUDE_OUTPUT=$(claude --print -p "
 - **LOW**: 格式问题、注释遗留、小优化建议
 
 ## 变更范围
-
-从 ${FROM_COMMIT} 到 ${TO_COMMIT}
-提交列表:
-${COMMIT_LOG}
-
-## Diff
-
-\`\`\`diff
-${DIFF}
-\`\`\`
-$([ "$DIFF_TRUNCATED" = true ] && echo "\n\n**注意:** diff 超过 ${MAX_DIFF_LINES} 行，已截断。")
-
+PROMPT_HEADER
+    echo ""
+    echo "从 ${FROM_COMMIT} 到 ${TO_COMMIT}"
+    echo "提交列表:"
+    echo "${COMMIT_LOG}"
+    echo ""
+    echo '```diff'
+    cat "$DIFF_FILE"
+    echo '```'
+    echo ""
+    if [ "$DIFF_TRUNCATED" = true ]; then
+        echo ""
+        echo "**注意:** diff 超过 ${MAX_DIFF_LINES} 行，已截断。"
+        echo ""
+    fi
+    cat << 'PROMPT_FOOTER'
 ## 输出格式要求
 
 请严格输出以下 JSON 结构（不要包含其他说明文字，不要用 markdown 代码块包裹）:
 {
-  \"summary\": { \"critical\": 0, \"high\": 0, \"medium\": 0, \"low\": 0, \"total_findings\": 0 },
-  \"findings\": [
+  "summary": { "critical": 0, "high": 0, "medium": 0, "low": 0, "total_findings": 0 },
+  "findings": [
     {
-      \"severity\": \"CRITICAL\",
-      \"category\": \"layer_boundary\",
-      \"dimension\": 1,
-      \"file\": \"testing/foundation-dll/verification/some_script.py\",
-      \"line\": 85,
-      \"message\": \"Python层调用了 write_text 写入 .cpp 文件，违反四层边界\"
+      "severity": "CRITICAL",
+      "category": "layer_boundary",
+      "dimension": 1,
+      "file": "testing/foundation-dll/verification/some_script.py",
+      "line": 85,
+      "message": "Python层调用了 write_text 写入 .cpp 文件，违反四层边界"
     }
   ],
-  \"commits\": [
-    { \"sha\": \"abc1234\", \"message\": \"feat: add GC optimization\" }
+  "commits": [
+    { "sha": "abc1234", "message": "feat: add GC optimization" }
   ]
 }
-") || {
+PROMPT_FOOTER
+} | claude --print) || {
     echo "ERROR: claude --print failed" >&2
     exit 1
 }
