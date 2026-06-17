@@ -769,6 +769,10 @@ print('ok')
                 ]
                 writeJSON(file: stateFile, json: stateData, pretty: 2)
                 echo "State updated: ${stateFile}"
+
+                // Remove trigger lock so next commit detection can fire
+                sh "rm -f /var/lib/report-server/daily/cr-trigger.lock"
+                echo "Trigger lock removed"
             }
         }
     }

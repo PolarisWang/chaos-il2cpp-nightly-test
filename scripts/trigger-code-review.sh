@@ -1,20 +1,25 @@
 #!/bin/bash
 # trigger-code-review.sh — Sync booming-il2cpp and trigger Jenkins code review if new commits
 #
-# Runs every minute via host crontab. Does three things:
-#   1. git fetch + update-ref to sync local booming-il2cpp with GitHub
+# Runs every minute via host crontab. Does:
+#   1. git fetch + update-ref to sync local repo with GitHub
 #   2. Compare HEAD with last-reviewed-commit in state file
-#   3. If different, trigger Jenkins code-review job via API
+#   3. If different (and no active lock), create lock and trigger Jenkins
 #
-# This eliminates the Jenkins cron trigger entirely — Jenkins only runs on
-# actual new commits, producing zero noise when nothing has changed.
+# Lock mechanism: /var/lib/report-server/daily/cr-trigger.lock
+#   - Created before triggering Jenkins
+#   - Deleted by Jenkins after review completes (Update State stage)
+#   - Automatically expires after 30 minutes (prevents stuck state)
+# This ensures zero duplicate builds and zero noise.
 
 set -euo pipefail
 
 STATE_FILE="/var/lib/report-server/daily/last-reviewed-commit.json"
+LOCK_FILE="/var/lib/report-server/daily/cr-trigger.lock"
 BOOMING_DIR="/home/debian/agent/booming-il2cpp"
 JENKINS_URL="http://localhost:8080"
 JOB_NAME="chaos-il2cpp-code-review"
+LOCK_TIMEOUT=1800  # 30 minutes — lock expires after this
 
 # ── Step 1: Sync local repo with GitHub ──
 cd "$BOOMING_DIR"
@@ -43,30 +48,29 @@ if [ -n "$LAST_REVIEWED" ] && [ "$CURRENT_HEAD" = "$LAST_REVIEWED" ]; then
     exit 0
 fi
 
+# ── Step 3: Check lock file (prevents duplicate triggers) ──
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE") ))
+    if [ "$LOCK_AGE" -lt "$LOCK_TIMEOUT" ]; then
+        echo "Lock active ($((LOCK_AGE/60))m old), skipping trigger"
+        exit 0
+    fi
+    echo "Lock stale ($((LOCK_AGE/60))m old), removing"
+    rm -f "$LOCK_FILE"
+fi
+
 echo "New commits detected: ${LAST_REVIEWED:-none} -> $CURRENT_HEAD"
 
-# ── Step 3: Update state file immediately to prevent duplicate triggers ──
-# This is the KEY reliability measure: once we detect a difference, we mark
-# the commit as "pending review" in the state file. Jenkins will later
-# overwrite with actual findings, but the commit hash stays the same.
-# This prevents subsequent cron firings from triggering duplicate builds.
-python3 -c "
-import json
-with open('$STATE_FILE') as f:
-    state = json.load(f)
-state['last_reviewed_commit'] = '$CURRENT_HEAD'
-with open('$STATE_FILE', 'w') as f:
-    json.dump(state, f, indent=2)
-" 2>/dev/null || true
-echo "State file updated to $CURRENT_HEAD (pending review)"
+# ── Step 4: Create lock and trigger Jenkins ──
+touch "$LOCK_FILE"
 
-# ── Step 4: Trigger Jenkins build ──
 COOKIE_FILE=$(mktemp /tmp/jenkins-cookie.XXXXXX)
 trap "rm -f '$COOKIE_FILE'" EXIT
 
 CRUMB=$(curl -s -c "$COOKIE_FILE" "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['crumb'])" 2>/dev/null) || {
     echo "Failed to get Jenkins crumb"
+    rm -f "$LOCK_FILE"
     exit 0
 }
 
@@ -77,4 +81,10 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -d "BOOMING_REPO=/booming-il2cpp&BUILD_CONFIG=profile" \
     2>/dev/null)
 
-echo "Jenkins triggered: HTTP $HTTP_CODE ($(date '+%Y-%m-%d %H:%M:%S'))"
+if [ "$HTTP_CODE" != "201" ]; then
+    echo "Trigger failed: HTTP $HTTP_CODE"
+    rm -f "$LOCK_FILE"
+    exit 0
+fi
+
+echo "Jenkins triggered: HTTP $HTTP_CODE lock=cr-trigger.lock ($(date '+%Y-%m-%d %H:%M:%S'))"
