@@ -52,7 +52,7 @@ pipeline {
         // Dispatch — route to the correct pipeline based on job name
         // ─────────────────────────────────────────────────────
         stage('Dispatch') {
-            agent { label 'linux-x64' }
+            agent { label 'linux-x64-cr' }
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
@@ -286,13 +286,16 @@ sh """
         }
 
         always {
-            node('linux-x64') {
-                archiveArtifacts artifacts: "artifacts/**/*",
-                               allowEmptyArchive: true,
-                               fingerprint: true
-                cleanWs notFailBuild: true, cleanWhenAborted: true,
-                        cleanWhenFailure: true, cleanWhenSuccess: true,
-                        cleanWhenUnstable: true
+            script {
+                def nodeLabel = env.JOB_NAME?.contains('code-review') ? 'linux-x64-cr' : 'linux-x64'
+                node(nodeLabel) {
+                    archiveArtifacts artifacts: "artifacts/**/*",
+                                   allowEmptyArchive: true,
+                                   fingerprint: true
+                    cleanWs notFailBuild: true, cleanWhenAborted: true,
+                            cleanWhenFailure: true, cleanWhenSuccess: true,
+                            cleanWhenUnstable: true
+                }
             }
         }
     }
