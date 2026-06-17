@@ -466,136 +466,91 @@ def runCodeReview(Map params = [:]) {
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
 
-    stage('Code Review: Init') {
-        node('linux-x64') {
-            sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
-            echo "Code review workspace: ${workspaceDir}"
-            // Download required scripts from GitHub (public repo)
-            sh """
-set -euo pipefail
-                if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
-                    curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
-                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
-                    curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
-                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
-                    curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
-                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
-                    chmod +x '${SCRIPT_DIR}/'*.sh
-                    echo "Scripts downloaded to ${SCRIPT_DIR}"
-                else
-                    echo "Scripts already exist at ${SCRIPT_DIR}"
-                fi
-            """
-        }
-    }
-
-    stage('Code Review: Fetch State') {
+    stage('Code Review: Check') {
         node('linux-x64') {
             script {
+                // Init
+                sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
+                echo "Code review workspace: ${workspaceDir}"
+                sh """
+                    set -euo pipefail
+                    if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
+                        curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
+                        curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
+                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
+                        curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
+                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
+                        chmod +x '${SCRIPT_DIR}/'*.sh
+                        echo "Scripts downloaded to ${SCRIPT_DIR}"
+                    else
+                        echo "Scripts already exist at ${SCRIPT_DIR}"
+                    fi
+                """
+
+                // Fetch State
                 env.LAST_REVIEWED_COMMIT = ''
                 env.REVIEW_SKIPPED = 'false'
-
-                // Read state file
                 try {
                     def stateStr = sh(script: "cat '${stateFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
                     def state = readJSON text: stateStr
                     env.LAST_REVIEWED_COMMIT = state.last_reviewed_commit ?: ''
-                    echo "Last reviewed commit: ${env.LAST_REVIEWED_COMMIT ?: '(none — first run)'}"
+                    echo "Last reviewed commit: ${env.LAST_REVIEWED_COMMIT ?: '(none - first run)'}"
                 } catch (err) {
-                    echo "State file not found or invalid (${err.message}), treating as first run"
-                    return
+                    echo "State file not found or invalid, treating as first run"
                 }
 
-                if (!env.LAST_REVIEWED_COMMIT) {
-                    echo "No last reviewed commit — will run full review"
-                    return
+                // Quick skip check: compare local HEAD vs last reviewed
+                if (env.LAST_REVIEWED_COMMIT) {
+                    def localHead = sh(
+                        script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
+                        returnStdout: true
+                    ).trim()
+                    if (localHead && localHead == env.LAST_REVIEWED_COMMIT) {
+                        echo "No new commits — skipping"
+                        env.REVIEW_SKIPPED = 'true'
+                        currentBuild.result = 'SUCCESS'
+                    }
                 }
 
-                // Check local booming-il2cpp HEAD — no network needed
-                def localHead = sh(
-                    script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
-                    returnStdout: true
-                ).trim()
-
-                if (!localHead) {
-                    echo "WARNING: could not read HEAD from ${repoUrl}, proceeding with clone"
-                    return
-                }
-
-                echo "Local HEAD: ${localHead}"
-                if (localHead == env.LAST_REVIEWED_COMMIT) {
-                    echo "No new commits in booming-il2cpp since last review — skipping"
-                    env.REVIEW_SKIPPED = 'true'
-                    currentBuild.result = 'SUCCESS'
-                } else {
-                    echo "New commits detected: ${env.LAST_REVIEWED_COMMIT}..${localHead}"
-                }
-            }
-        }
-    }
-
-    stage('Code Review: Checkout') {
-        node('linux-x64') {
-            script {
                 if (env.REVIEW_SKIPPED == 'true') {
-                    echo "Skipped, no checkout needed"
                     return
                 }
-            }
-            // Fresh shallow clone from local repo (fast, avoids polluting shared repo)
-            sh """
-                set -euo pipefail
 
-                # Remove old clone if present
-                rm -rf '${workspaceDir}/booming-il2cpp'
-
-                # Fresh shallow clone from local upstream
-                git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
-                cd '${workspaceDir}/booming-il2cpp'
-
-                # Fetch latest from origin
-                git fetch origin 2>&1 || echo "WARNING: fetch failed, using local HEAD"
-                git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
-                echo "Now at: \$(git log --oneline -1)"
-            """
-            script {
+                // Checkout
+                sh """
+                    set -euo pipefail
+                    rm -rf '${workspaceDir}/booming-il2cpp'
+                    git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
+                    cd '${workspaceDir}/booming-il2cpp'
+                    git fetch origin 2>&1 || echo 'WARNING: fetch failed'
+                    git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
+                """
                 env.CURRENT_COMMIT = sh(
-                    script: "cd '${workspaceDir}/booming-il2cpp' && git rev-parse HEAD",
+                    script: "cd '${boomingDir}' && git rev-parse HEAD",
                     returnStdout: true
                 ).trim()
-            }
-            echo "Fresh clone: ${workspaceDir}/booming-il2cpp @ ${env.CURRENT_COMMIT}"
-        }
-    }
+                echo "Cloned @ ${env.CURRENT_COMMIT}"
 
-    stage('Code Review: Compute Diff') {
-        node('linux-x64') {
-            script {
-                if (env.REVIEW_SKIPPED == 'true') {
-                    echo "Skipped"
-                    return
-                }
+                // Compute Diff
                 def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
                 echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
-
                 def commitCount = sh(
                     script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
                     returnStdout: true
                 ).trim()
-
                 if (commitCount == '0') {
                     currentBuild.result = 'SUCCESS'
-                    echo "No new commits since last review (${fromCommit}) — skipping"
+                    echo "No new commits since last review — skipping"
                     env.REVIEW_SKIPPED = 'true'
-                } else {
-                    env.REVIEW_SKIPPED = 'false'
-                    env.REVIEW_FROM = fromCommit
-                    echo "New commits found: ${commitCount}"
+                    return
                 }
+                env.REVIEW_SKIPPED = 'false'
+                env.REVIEW_FROM = fromCommit
+                echo "New commits: ${commitCount}"
             }
         }
     }
-
     stage('Code Review: Review with Claude') {
         node('linux-x64') {
             script {
