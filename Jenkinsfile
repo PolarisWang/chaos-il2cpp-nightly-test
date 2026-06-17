@@ -463,94 +463,95 @@ def runCodeReview(Map params = [:]) {
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
 
+    // NOTE: no node() blocks inside — runCodeReview is already called from
+    // inside a node('linux-x64') in the Dispatch stage. Nested node() calls
+    // consume extra executors and cause deadlock (zombie executor state).
+
     stage('Code Review: Check') {
-        node('linux-x64') {
-            script {
-                // Init
-                sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
-                echo "Code review workspace: ${workspaceDir}"
-                sh """
-                    set -euo pipefail
-                    if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
-                        curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
-                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
-                        curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
-                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
-                        curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
-                            'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
-                        chmod +x '${SCRIPT_DIR}/'*.sh
-                        echo "Scripts downloaded to ${SCRIPT_DIR}"
-                    else
-                        echo "Scripts already exist at ${SCRIPT_DIR}"
-                    fi
-                """
+        script {
+            // Init
+            sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
+            echo "Code review workspace: ${workspaceDir}"
+            sh """
+                set -euo pipefail
+                if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
+                    curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
+                    curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
+                    curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
+                    chmod +x '${SCRIPT_DIR}/'*.sh
+                    echo "Scripts downloaded to ${SCRIPT_DIR}"
+                else
+                    echo "Scripts already exist at ${SCRIPT_DIR}"
+                fi
+            """
 
-                // Fetch State
-                env.LAST_REVIEWED_COMMIT = ''
-                env.REVIEW_SKIPPED = 'false'
-                try {
-                    def stateStr = sh(script: "cat '${stateFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
-                    def state = readJSON text: stateStr
-                    env.LAST_REVIEWED_COMMIT = state.last_reviewed_commit ?: ''
-                    echo "Last reviewed commit: ${env.LAST_REVIEWED_COMMIT ?: '(none - first run)'}"
-                } catch (err) {
-                    echo "State file not found or invalid, treating as first run"
-                }
-
-                // Quick skip check: compare local HEAD vs last reviewed
-                if (env.LAST_REVIEWED_COMMIT) {
-                    def localHead = sh(
-                        script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
-                        returnStdout: true
-                    ).trim()
-                    if (localHead && localHead == env.LAST_REVIEWED_COMMIT) {
-                        echo "No new commits — skipping"
-                        env.REVIEW_SKIPPED = 'true'
-                        currentBuild.result = 'SUCCESS'
-                    }
-                }
-
-                if (env.REVIEW_SKIPPED == 'true') {
-                    return
-                }
-
-                // Checkout
-                sh """
-                    set -euo pipefail
-                    rm -rf '${workspaceDir}/booming-il2cpp'
-                    git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
-                    cd '${workspaceDir}/booming-il2cpp'
-                    git fetch origin 2>&1 || echo 'WARNING: fetch failed'
-                    git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
-                """
-                env.CURRENT_COMMIT = sh(
-                    script: "cd '${boomingDir}' && git rev-parse HEAD",
-                    returnStdout: true
-                ).trim()
-                echo "Cloned @ ${env.CURRENT_COMMIT}"
-
-                // Compute Diff
-                def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
-                echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
-                def commitCount = sh(
-                    script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
-                    returnStdout: true
-                ).trim()
-                if (commitCount == '0') {
-                    currentBuild.result = 'SUCCESS'
-                    echo "No new commits since last review — skipping"
-                    env.REVIEW_SKIPPED = 'true'
-                    return
-                }
-                env.REVIEW_SKIPPED = 'false'
-                env.REVIEW_FROM = fromCommit
-                echo "New commits: ${commitCount}"
+            // Fetch State
+            env.LAST_REVIEWED_COMMIT = ''
+            env.REVIEW_SKIPPED = 'false'
+            try {
+                def stateStr = sh(script: "cat '${stateFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
+                def state = readJSON text: stateStr
+                env.LAST_REVIEWED_COMMIT = state.last_reviewed_commit ?: ''
+                echo "Last reviewed commit: ${env.LAST_REVIEWED_COMMIT ?: '(none - first run)'}"
+            } catch (err) {
+                echo "State file not found or invalid, treating as first run"
             }
+
+            // Quick skip check: compare local HEAD vs last reviewed
+            if (env.LAST_REVIEWED_COMMIT) {
+                def localHead = sh(
+                    script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
+                    returnStdout: true
+                ).trim()
+                if (localHead && localHead == env.LAST_REVIEWED_COMMIT) {
+                    echo "No new commits — skipping"
+                    env.REVIEW_SKIPPED = 'true'
+                    currentBuild.result = 'SUCCESS'
+                }
+            }
+
+            if (env.REVIEW_SKIPPED == 'true') {
+                return
+            }
+
+            // Checkout
+            sh """
+                set -euo pipefail
+                rm -rf '${workspaceDir}/booming-il2cpp'
+                git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
+                cd '${workspaceDir}/booming-il2cpp'
+                git fetch origin 2>&1 || echo 'WARNING: fetch failed'
+                git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
+            """
+            env.CURRENT_COMMIT = sh(
+                script: "cd '${boomingDir}' && git rev-parse HEAD",
+                returnStdout: true
+            ).trim()
+            echo "Cloned @ ${env.CURRENT_COMMIT}"
+
+            // Compute Diff
+            def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
+            echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
+            def commitCount = sh(
+                script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
+                returnStdout: true
+            ).trim()
+            if (commitCount == '0') {
+                currentBuild.result = 'SUCCESS'
+                echo "No new commits since last review — skipping"
+                env.REVIEW_SKIPPED = 'true'
+                return
+            }
+            env.REVIEW_SKIPPED = 'false'
+            env.REVIEW_FROM = fromCommit
+            echo "New commits: ${commitCount}"
         }
     }
     stage('Code Review: Review with Claude') {
-        node('linux-x64') {
-            script {
+        script {
                 if (env.REVIEW_SKIPPED != 'false') {
                     echo "Review skipped, no Claude invocation needed"
                     return
@@ -733,29 +734,25 @@ print('ok')
 "
 """
             }
-        }
     }
 
     stage('Code Review: Notify Feishu') {
-        node('linux-x64') {
-            script {
-                if (env.REVIEW_SKIPPED != 'false') {
-                    echo "Skipped, no notification needed"
-                    return
-                }
-                echo "Notification already sent from Review stage (same node() block)"
+        script {
+            if (env.REVIEW_SKIPPED != 'false') {
+                echo "Skipped, no notification needed"
+                return
             }
+            echo "Notification already sent from Review stage"
         }
     }
 
     stage('Code Review: Update State') {
-        node('linux-x64') {
-            script {
-                if (env.REVIEW_SKIPPED != 'false') {
-                    echo "Skipped, no state update needed"
-                    return
-                }
-                def stateData = [
+        script {
+            if (env.REVIEW_SKIPPED != 'false') {
+                echo "Skipped, no state update needed"
+                return
+            }
+            def stateData = [
                     repo: '/booming-il2cpp',
                     branch: branch,
                     last_reviewed_commit: env.CURRENT_COMMIT,
@@ -774,6 +771,5 @@ print('ok')
                 sh "rm -f /var/lib/report-server/daily/cr-trigger.lock"
                 echo "Trigger lock removed"
             }
-        }
     }
 }
