@@ -76,6 +76,18 @@ pipeline {
             steps {
                 script {
                     ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
+                    // Download helper scripts from GitHub
+                    sh """
+                        set -eu
+                        mkdir -p "\${WORKSPACE}/scripts"
+                        cd "\${WORKSPACE}/scripts"
+                        for script in collect-all-results.sh generate-nightly-report.py notify-feishu.sh notify-feishu-text.sh; do
+                            [ -f "\$script" ] && continue
+                            curl -sL -o "\$script" "https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/\$script" || echo "WARNING: failed to download \$script"
+                        done
+                        chmod +x *.sh 2>/dev/null || true
+                        ls -la
+                    """
                 }
             }
         }
@@ -98,7 +110,7 @@ sh """
                         # Iterate over every DLL that has chunks
                         for dll_dir in */; do
                             dll_name=\$(basename "\$dll_dir")
-                            [[ -d "\${dll_dir}chunks" ]] || continue
+                            [ -d "\${dll_dir}chunks" ] || continue
 
                             echo "========== [x64] Processing \${dll_name} =========="
                             python3 -m verification \
