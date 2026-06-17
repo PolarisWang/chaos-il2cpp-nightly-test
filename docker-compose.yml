@@ -131,6 +131,41 @@ services:
     restart: unless-stopped
 
   # ================================================================
+  # Code Review Agent (separate from nightly to avoid executor starvation)
+  # ================================================================
+  linux-x64-cr-agent:
+    image: chaos-agent-linux-x64:latest
+    container_name: chaos-agent-cr
+    environment:
+      JENKINS_MASTER_URL: http://chaos-master:8080
+      JENKINS_AGENT_NAME: linux-x64-cr
+      JENKINS_AGENT_SECRET: faadeac8a918b32089e6fb4351078e199ead7ca0334d5ff41f51c8fa4f2a2204
+      AGENT_LABELS: linux-x64-cr code-review
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+      MINIO_ENDPOINT: http://chaos-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}
+      CLAUDE_CODE_EFFORT: max
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      <<: *external-urls
+    volumes:
+      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /var/lib/report-server/daily:/var/lib/report-server/daily
+      - /home/jenkins/cr:/home/jenkins
+    networks:
+      - jenkins
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  # ================================================================
   # Report Server (Nginx + Allure + Daily Reports)
   # ================================================================
   report-server:

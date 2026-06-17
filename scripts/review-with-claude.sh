@@ -18,7 +18,7 @@ REPO_DIR=""
 FROM_COMMIT=""
 TO_COMMIT=""
 OUTPUT_FILE=""
-MAX_DIFF_LINES=50000
+MAX_DIFF_LINES=8000
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
