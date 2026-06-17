@@ -86,13 +86,16 @@ fi
 
 # Write diff to temp file to avoid shell quoting issues
 DIFF_FILE=$(mktemp)
-trap "rm -f '$DIFF_FILE'" EXIT
+PROMPT_FILE=$(mktemp)
+trap "rm -f '$PROMPT_FILE' '$DIFF_FILE'" EXIT
 printf '%s\n' "$DIFF" > "$DIFF_FILE"
 
-# Build prompt and pipe to claude --print via heredoc + temp file
-# Using quoted heredocs (<<'EOF') for fixed text to prevent any shell interpolation.
-# The diff is read from a temp file, completely avoiding quoting issues.
-CLAUDE_OUTPUT=$({
+# Build prompt file and pass to claude --print via stdin redirection
+# Using input redirection (<) instead of a pipe to avoid SIGPIPE (141)
+# when claude closes the pipe after consuming the prompt but the
+# producer side hasn't finished writing.
+
+{
     cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
 **重要：所有审查消息（message 字段）必须使用中文，不得使用英文。**
@@ -241,7 +244,10 @@ PROMPT_HEADER
   ]
 }
 PROMPT_FOOTER
-} | claude --print) || {
+} > "$PROMPT_FILE"
+
+# Pass prompt via stdin redirection (not pipe) to avoid SIGPIPE with pipefail
+CLAUDE_OUTPUT=$(claude --print < "$PROMPT_FILE") || {
     echo "ERROR: claude --print failed" >&2
     exit 1
 }
