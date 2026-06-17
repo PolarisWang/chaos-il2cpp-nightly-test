@@ -56,6 +56,10 @@ pipeline {
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
+                        // Set cron trigger for code-review job only (every 5 min)
+                        properties([
+                            pipelineTriggers([cron('H/5 * * * *')])
+                        ])
                         runCodeReview(
                             repoUrl: '/booming-il2cpp',
                             branch: params.BOOMING_BRANCH ?: 'main'
@@ -461,6 +465,7 @@ def runCodeReview(Map params = [:]) {
     def boomingDir   = "${workspaceDir}/booming-il2cpp"  // Fresh clone each run
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
+    def githubRepo  = 'https://github.com/PolarisWang/booming-il2cpp.git'
 
     stage('Code Review: Init') {
         node('linux-x64') {
@@ -489,6 +494,9 @@ set -euo pipefail
         node('linux-x64') {
             script {
                 env.LAST_REVIEWED_COMMIT = ''
+                env.REVIEW_SKIPPED = 'false'
+
+                // Read state file
                 try {
                     def stateStr = sh(script: "cat '${stateFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
                     def state = readJSON text: stateStr
@@ -496,7 +504,32 @@ set -euo pipefail
                     echo "Last reviewed commit: ${env.LAST_REVIEWED_COMMIT ?: '(none — first run)'}"
                 } catch (err) {
                     echo "State file not found or invalid (${err.message}), treating as first run"
-                    env.LAST_REVIEWED_COMMIT = ''
+                    return
+                }
+
+                if (!env.LAST_REVIEWED_COMMIT) {
+                    echo "No last reviewed commit — will run full review"
+                    return
+                }
+
+                // Lightweight remote HEAD check — no clone needed
+                def remoteHead = sh(
+                    script: "git ls-remote '${githubRepo}' HEAD 2>/dev/null | awk '{print \$1}' || echo ''",
+                    returnStdout: true
+                ).trim()
+
+                if (!remoteHead) {
+                    echo "WARNING: git ls-remote failed (network?), proceeding with clone"
+                    return
+                }
+
+                echo "Remote HEAD: ${remoteHead}"
+                if (remoteHead == env.LAST_REVIEWED_COMMIT) {
+                    echo "No new commits on GitHub since last review — skipping"
+                    env.REVIEW_SKIPPED = 'true'
+                    currentBuild.result = 'SUCCESS'
+                } else {
+                    echo "New commits detected: ${env.LAST_REVIEWED_COMMIT}..${remoteHead}"
                 }
             }
         }
@@ -504,6 +537,12 @@ set -euo pipefail
 
     stage('Code Review: Checkout') {
         node('linux-x64') {
+            script {
+                if (env.REVIEW_SKIPPED == 'true') {
+                    echo "Skipped, no checkout needed"
+                    return
+                }
+            }
             // Fresh shallow clone from local repo (fast, avoids polluting shared repo)
             sh """
                 set -euo pipefail
@@ -533,6 +572,10 @@ set -euo pipefail
     stage('Code Review: Compute Diff') {
         node('linux-x64') {
             script {
+                if (env.REVIEW_SKIPPED == 'true') {
+                    echo "Skipped"
+                    return
+                }
                 def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
                 echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
 
