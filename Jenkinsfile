@@ -491,11 +491,11 @@ def runCodeReview(Map params = [:]) {
             sh """
                 set -euo pipefail
                 if [ ! -f '${SCRIPT_DIR}/review-with-claude.sh' ]; then
-                    curl -sL -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                    curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
-                    curl -sL -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
+                    curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
-                    curl -sL -o '${SCRIPT_DIR}/notify-feishu.sh' \
+                    curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/notify-feishu.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
                     chmod +x '${SCRIPT_DIR}/'*.sh
                     echo "Scripts downloaded to ${SCRIPT_DIR}"
