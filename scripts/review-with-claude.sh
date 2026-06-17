@@ -245,11 +245,29 @@ PROMPT_FOOTER
     exit 1
 }
 
-# Write Claude output to findings file
-echo "$CLAUDE_OUTPUT" > "$OUTPUT_FILE"
+# Extract JSON from Claude output (strips markdown fences and leading text)
+CLAUDE_JSON=$(echo "$CLAUDE_OUTPUT" | python3 -c "
+import sys, re
+content = sys.stdin.read()
+# Try markdown code fence first (\`\`\`json ... \`\`\`)
+m = re.search(r'\\`\\`\\`(?:json)?\\s*\\n(.*?)\\n\\`\\`\\`', content, re.DOTALL)
+if m:
+    print(m.group(1).strip())
+else:
+    # Fallback: find first { and last }
+    start = content.find('{')
+    end = content.rfind('}')
+    if start >= 0 and end > start:
+        print(content[start:end+1])
+    else:
+        sys.exit(1)
+" 2>/dev/null) || CLAUDE_JSON='{"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}'
+
+# Write clean JSON to findings file
+echo "$CLAUDE_JSON" > "$OUTPUT_FILE"
 
 # Parse summary for stdout reporting
-CRIT=$(echo "$CLAUDE_OUTPUT" | python3 -c "
+CRIT=$(echo "$CLAUDE_JSON" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
