@@ -465,7 +465,6 @@ def runCodeReview(Map params = [:]) {
     def boomingDir   = "${workspaceDir}/booming-il2cpp"  // Fresh clone each run
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
-    def githubRepo  = 'https://github.com/PolarisWang/booming-il2cpp.git'
 
     stage('Code Review: Init') {
         node('linux-x64') {
@@ -512,24 +511,24 @@ set -euo pipefail
                     return
                 }
 
-                // Lightweight remote HEAD check — no clone needed
-                def remoteHead = sh(
-                    script: "git ls-remote '${githubRepo}' HEAD 2>/dev/null | awk '{print \$1}' || echo ''",
+                // Check local booming-il2cpp HEAD — no network needed
+                def localHead = sh(
+                    script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
                     returnStdout: true
                 ).trim()
 
-                if (!remoteHead) {
-                    echo "WARNING: git ls-remote failed (network?), proceeding with clone"
+                if (!localHead) {
+                    echo "WARNING: could not read HEAD from ${repoUrl}, proceeding with clone"
                     return
                 }
 
-                echo "Remote HEAD: ${remoteHead}"
-                if (remoteHead == env.LAST_REVIEWED_COMMIT) {
-                    echo "No new commits on GitHub since last review — skipping"
+                echo "Local HEAD: ${localHead}"
+                if (localHead == env.LAST_REVIEWED_COMMIT) {
+                    echo "No new commits in booming-il2cpp since last review — skipping"
                     env.REVIEW_SKIPPED = 'true'
                     currentBuild.result = 'SUCCESS'
                 } else {
-                    echo "New commits detected: ${env.LAST_REVIEWED_COMMIT}..${remoteHead}"
+                    echo "New commits detected: ${env.LAST_REVIEWED_COMMIT}..${localHead}"
                 }
             }
         }
