@@ -614,7 +614,7 @@ try:
          from_commit + '..' + to_commit],
         capture_output=True, text=True, timeout=30
     )
-    for line in result.stdout.strip().split('\n'):
+    for line in result.stdout.strip().split('\\n'):
         if '|||' in line:
             sha, msg = line.split('|||', 1)
             commits.append({'sha': sha[:40], 'message': msg.strip()})
