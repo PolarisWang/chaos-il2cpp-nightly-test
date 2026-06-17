@@ -595,21 +595,38 @@ def runCodeReview(Map params = [:]) {
                 def colorTag = critCount > 0 || highCount > 0 ? 'red' : (medCount > 0 ? 'blue' : 'green')
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
                 def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
+                def JENKINS_EXT_URL = env.JENKINS_URL ?: 'http://10.10.1.173:8080'
 
                 sh """
 set -euo pipefail
 python3 -c "
-import json, os, urllib.request
+import json, os, urllib.request, subprocess
 
+
+# Extract commits from git log (not findings JSON — Claude may omit them)
+booming_dir = '${boomingDir}'
+from_commit = '${env.REVIEW_FROM}'
+to_commit = '${env.CURRENT_COMMIT}'
+commits = []
+try:
+    result = subprocess.run(
+        ['git', '-C', booming_dir, 'log', '--format=%H|||%s',
+         from_commit + '..' + to_commit],
+        capture_output=True, text=True, timeout=30
+    )
+    for line in result.stdout.strip().split('\n'):
+        if '|||' in line:
+            sha, msg = line.split('|||', 1)
+            commits.append({'sha': sha[:40], 'message': msg.strip()})
+except Exception:
+    pass
+
+# Also read findings JSON for finding details
 try:
     with open('${findingsFile}') as f:
         d = json.load(f)
 except Exception:
     d = {}
-    d['commits'] = []
-    d['findings'] = []
-
-commits = d.get('commits', [])
 flist = d.get('findings', [])
 
 # Build commit list with emoji + links
@@ -639,7 +656,7 @@ if len(flist) > 10:
     flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
 ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
-bu = '${env.BUILD_URL}'
+bu = '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/'
 
 # Build risk overview line with emoji icons
 risk_line = ''
@@ -700,7 +717,7 @@ card = {
                     {
                         'tag': 'button',
                         'text': {'tag': 'plain_text', 'content': '🔧 查看完整报告'},
-                        'url': '${env.BUILD_URL}',
+                        'url': '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/',
                         'type': 'default'
                     }
                 ]
