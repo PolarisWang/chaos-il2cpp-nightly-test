@@ -564,7 +564,13 @@ def runCodeReview(Map params = [:]) {
             echo "Repo synced @ ${env.CURRENT_COMMIT}"
 
             // Compute Diff
-            def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
+            def fromCommit = env.LAST_REVIEWED_COMMIT
+            if (!fromCommit) {
+                fromCommit = sh(
+                    script: "cd '${boomingDir}' && git rev-list --max-parents=0 HEAD 2>/dev/null || echo ''",
+                    returnStdout: true
+                ).trim()
+            }
             echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
             def commitCount = sh(
                 script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
