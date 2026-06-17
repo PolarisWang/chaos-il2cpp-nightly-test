@@ -56,10 +56,7 @@ pipeline {
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
-                        // Set cron trigger for code-review job only (every 5 min)
-                        properties([
-                            pipelineTriggers([cron('H/5 * * * *')])
-                        ])
+                        // No cron trigger — host trigger-code-review.sh checks and triggers via API
                         runCodeReview(
                             repoUrl: '/booming-il2cpp',
                             branch: params.BOOMING_BRANCH ?: 'main'
