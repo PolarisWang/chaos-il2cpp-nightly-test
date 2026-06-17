@@ -539,13 +539,13 @@ def runCodeReview(Map params = [:]) {
                 if [ -d '${repoCache}/.git' ]; then
                     cd '${repoCache}'
                     git remote set-url origin '${repoUrl}' 2>/dev/null || true
-                    git fetch --depth 5 origin '${branch}' 2>&1 || {
+                    git fetch --depth 200 origin '${branch}' 2>&1 || {
                         echo 'WARNING: fetch failed, re-initializing cache'
                         cd / && rm -rf '${repoCache}'
                         git init '${repoCache}'
                         cd '${repoCache}'
                         git remote add origin '${repoUrl}'
-                        git fetch --depth 5 origin '${branch}' 2>&1
+                        git fetch --depth 200 origin '${branch}' 2>&1
                     }
                     git checkout FETCH_HEAD 2>&1
                 else
