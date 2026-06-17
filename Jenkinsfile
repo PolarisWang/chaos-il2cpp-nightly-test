@@ -322,9 +322,9 @@ def sendNightlyNotification(Map params) {
         return
     }
 
-    // External URLs from container environment (set in docker-compose.yml)
-    def JENKINS_EXT_URL = env.JENKINS_URL ?: 'http://10.10.1.173:8080'
-    def REPORT_EXT_URL  = env.REPORT_URL  ?: 'http://10.10.1.173:8081'
+    // External URLs — hardcoded to internal IP for container-external access
+    def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
+    def REPORT_EXT_URL  = 'http://10.10.1.173:8081'
 
     def color = status == 'SUCCESS' ? 'green' : 'red'
     def icon  = status == 'SUCCESS' ? '✅' : '❌'
@@ -595,7 +595,7 @@ def runCodeReview(Map params = [:]) {
                 def colorTag = critCount > 0 || highCount > 0 ? 'red' : (medCount > 0 ? 'blue' : 'green')
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
                 def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
-                def JENKINS_EXT_URL = env.JENKINS_URL ?: 'http://10.10.1.173:8080'
+                def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
 
                 sh """
 set -euo pipefail
@@ -635,8 +635,7 @@ for c in commits[:5]:
     sha = c.get('sha', '')[:7]
     msg = c.get('message', '')
     url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-    cl.append('  • [' + sha + '] ' + msg)
-    cl.append('    ' + url)
+    cl.append('  • [[' + sha + '] ' + msg + '](' + url + ')')
 ct = chr(10).join(cl) if cl else '  （无新提交）'
 
 # Build findings list with emoji per severity
