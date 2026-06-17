@@ -471,7 +471,8 @@ def runCodeReview(Map params = [:]) {
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
-    def boomingDir   = "${workspaceDir}/booming-il2cpp"  // Fresh clone each run
+    def repoCache    = "/home/jenkins/booming-il2cpp-cache"        // Persist across builds
+    def boomingDir   = repoCache                                   // Use cached repo
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
 
@@ -529,20 +530,35 @@ def runCodeReview(Map params = [:]) {
                 return
             }
 
-            // Checkout
+            // Checkout — incremental fetch instead of full clone
             sh """
                 set -euo pipefail
-                rm -rf '${workspaceDir}/booming-il2cpp'
-                git clone --depth 50 '${repoUrl}' '${workspaceDir}/booming-il2cpp' 2>&1
-                cd '${workspaceDir}/booming-il2cpp'
-                git fetch origin 2>&1 || echo 'WARNING: fetch failed'
-                git checkout '${branch}' 2>&1 || git checkout FETCH_HEAD 2>&1 || true
+                if [ -d '${repoCache}/.git' ]; then
+                    cd '${repoCache}'
+                    git remote set-url origin '${repoUrl}' 2>/dev/null || true
+                    git fetch --depth 5 origin '${branch}' 2>&1 || {
+                        echo 'WARNING: fetch failed, re-initializing cache'
+                        cd / && rm -rf '${repoCache}'
+                        git init '${repoCache}'
+                        cd '${repoCache}'
+                        git remote add origin '${repoUrl}'
+                        git fetch --depth 5 origin '${branch}' 2>&1
+                    }
+                    git checkout FETCH_HEAD 2>&1
+                else
+                    rm -rf '${repoCache}'
+                    git init '${repoCache}'
+                    cd '${repoCache}'
+                    git remote add origin '${repoUrl}'
+                    git fetch --depth 5 origin '${branch}' 2>&1
+                    git checkout FETCH_HEAD 2>&1
+                fi
             """
             env.CURRENT_COMMIT = sh(
                 script: "cd '${boomingDir}' && git rev-parse HEAD",
                 returnStdout: true
             ).trim()
-            echo "Cloned @ ${env.CURRENT_COMMIT}"
+            echo "Repo synced @ ${env.CURRENT_COMMIT}"
 
             // Compute Diff
             def fromCommit = env.LAST_REVIEWED_COMMIT ?: "${env.CURRENT_COMMIT}~5"
