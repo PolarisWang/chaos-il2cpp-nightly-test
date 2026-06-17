@@ -12,7 +12,7 @@
 #   - Writes findings JSON to --output path
 #   - Prints summary line to stdout for pipeline consumption
 
-set -euo pipefail
+set -eu
 
 REPO_DIR=""
 FROM_COMMIT=""
