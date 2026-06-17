@@ -45,16 +45,43 @@ fi
 
 echo "New commits detected: ${LAST_REVIEWED:-none} -> $CURRENT_HEAD"
 
-# ── Step 3: Trigger Jenkins build ──
+# ── Step 3: Check if Jenkins already has a build queued or running ──
 COOKIE_FILE=$(mktemp /tmp/jenkins-cookie.XXXXXX)
 trap "rm -f '$COOKIE_FILE'" EXIT
 
+# Get crumb for authenticated API calls
 CRUMB=$(curl -s -c "$COOKIE_FILE" "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['crumb'])" 2>/dev/null) || {
     echo "Failed to get Jenkins crumb"
     exit 0
 }
 
+# Check if last build is still running (result = null means running)
+LAST_RESULT=$(curl -s -b "$COOKIE_FILE" -H "Jenkins-Crumb: $CRUMB" \
+    "$JENKINS_URL/job/$JOB_NAME/lastBuild/api/json" 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result') or 'RUNNING')" 2>/dev/null || echo "UNKNOWN")
+
+if [ "$LAST_RESULT" = "RUNNING" ]; then
+    echo "Last build still running, skipping trigger"
+    exit 0
+fi
+
+# Check queue for pending code-review items
+QUEUE_COUNT=$(curl -s -b "$COOKIE_FILE" -H "Jenkins-Crumb: $CRUMB" \
+    "$JENKINS_URL/queue/api/json?tree=items[task[name]]" 2>/dev/null \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+cr=[i for i in d.get('items',[]) if '$JOB_NAME' in str(i)]
+print(len(cr))
+" 2>/dev/null || echo "0")
+
+if [ "$QUEUE_COUNT" -gt 0 ]; then
+    echo "Build already queued ($QUEUE_COUNT pending), skipping trigger"
+    exit 0
+fi
+
+# ── Step 4: Trigger Jenkins build ──
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -b "$COOKIE_FILE" \
     -H "Jenkins-Crumb: $CRUMB" \
