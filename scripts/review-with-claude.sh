@@ -95,6 +95,7 @@ printf '%s\n' "$DIFF" > "$DIFF_FILE"
 CLAUDE_OUTPUT=$({
     cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
+**重要：所有审查消息（message 字段）必须使用中文，不得使用英文。**
 
 ## 仓库背景
 

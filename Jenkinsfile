@@ -661,7 +661,9 @@ for fx in flist[:10]:
     fp = fx.get('file', '')
     ln = fx.get('line', 0)
     msg = fx.get('message', '')
-    flines.append('  ' + icon + ' **[' + label + ']** ' + fp + ':' + str(ln))
+    fname = fp.split('/')[-1] if '/' in fp else fp
+    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/${env.CURRENT_COMMIT}/' + fp + '#L' + str(ln)
+    flines.append('  ' + icon + ' **[' + label + ']** [' + fname + ':' + str(ln) + '](' + furl + ')')
     flines.append('  > ' + msg)
 if len(flist) > 10:
     flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
