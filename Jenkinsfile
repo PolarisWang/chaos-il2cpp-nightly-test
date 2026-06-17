@@ -674,13 +674,13 @@ for fx in flist[:10]:
     sev = fx.get('severity', 'LOW')
     icon = severity_icons.get(sev, '⚪')
     label = severity_labels.get(sev, '低危')
+    cat  = fx.get('category', '')
     fp = fx.get('file', '')
     ln = fx.get('line', 0)
     msg = fx.get('message', '')
     fname = fp.split('/')[-1] if '/' in fp else fp
     furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/${env.CURRENT_COMMIT}/' + fp + '#L' + str(ln)
-    flines.append('  ' + icon + ' **[' + label + ']** [' + fname + ':' + str(ln) + '](' + furl + ')')
-    flines.append('  > ' + msg)
+    flines.append('  ' + icon + ' **' + label + '** [' + cat + '] [' + fname + ':' + str(ln) + '](' + furl + ') ' + msg)
 if len(flist) > 10:
     flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
 ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
