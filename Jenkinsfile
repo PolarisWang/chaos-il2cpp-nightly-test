@@ -592,7 +592,7 @@ def runCodeReview(Map params = [:]) {
                 env.FINDINGS_HIGH = parsed.high.toString()
                 env.FINDINGS_MED  = parsed.medium.toString()
                 env.FINDINGS_LOW  = parsed.low.toString()
-                env.FINDINGS_TOTAL = parsed.total.toString()
+                env.FINDINGS_TOTAL = parsed.total_findings.toString()
 
                 echo "Findings: ${env.FINDINGS_CRIT} CRITICAL · ${env.FINDINGS_HIGH} HIGH · ${env.FINDINGS_MED} MEDIUM · ${env.FINDINGS_LOW} LOW"
 
