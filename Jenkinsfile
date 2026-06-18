@@ -27,6 +27,13 @@ def FAILED_PLATFORMS = []
 pipeline {
     agent none
 
+    triggers {
+        cron('''
+            0 3 * * *
+            15 12 * * *
+        ''')
+    }
+
     options {
         buildDiscarder(logRotator(numToKeepStr: '30'))
         timeout(time: 6, unit: 'HOURS')
