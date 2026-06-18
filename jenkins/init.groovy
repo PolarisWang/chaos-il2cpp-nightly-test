@@ -14,6 +14,7 @@ def agents = [
     [name:"linux-x64",     labels:"linux x64 native",     executors:2],
     [name:"linux-arm64",   labels:"linux arm64 qemu",     executors:1],
     [name:"android-arm64", labels:"android arm64 ndk",    executors:1],
+    [name:"linux-x64-cr",  labels:"linux-x64-cr code-review", executors:1],
 ]
 
 def nodesDir = new File(Jenkins.instance.getRootDir(), "nodes")
