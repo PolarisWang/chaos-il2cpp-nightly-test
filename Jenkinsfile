@@ -52,6 +52,7 @@ pipeline {
         RUN_TAG  = "${RUN_TAG}"
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
+        FEISHU_WEBHOOK_URL = "${env.FEISHU_WEBHOOK_URL ?: 'https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff'}"
     }
 
     stages {
