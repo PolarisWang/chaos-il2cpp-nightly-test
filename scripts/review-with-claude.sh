@@ -226,6 +226,10 @@ PROMPT_HEADER
     cat << 'PROMPT_FOOTER'
 ## 输出格式要求
 
+每条 finding 必须包含:
+- **fix**: 精确修复方案（言简意赅，一行）
+- **verify**: 修复后的验证目标（言简意赅，一行）
+
 请严格输出以下 JSON 结构（不要包含其他说明文字，不要用 markdown 代码块包裹）:
 {
   "summary": { "critical": 0, "high": 0, "medium": 0, "low": 0, "total_findings": 0 },
@@ -236,7 +240,9 @@ PROMPT_HEADER
       "dimension": 1,
       "file": "testing/foundation-dll/verification/some_script.py",
       "line": 85,
-      "message": "Python层调用了 write_text 写入 .cpp 文件，违反四层边界"
+      "message": "Python层调用了 write_text 写入 .cpp 文件，违反四层边界",
+      "fix": "将 write_text 移到 TPG 层对应的脚本中处理",
+      "verify": "CPP 文件不再由 Python 脚本生成，四层边界检查通过"
     }
   ],
   "commits": [
