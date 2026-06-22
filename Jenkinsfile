@@ -456,27 +456,72 @@ except Exception:
     }
 
 
-    // Write message to a file using base64 to avoid all quoting issues
-    def msgFile = "${env.WORKSPACE}/.notify-msg-${BUILD_NUMBER}.txt"
-    def msgStr = message.toString()
-    def msgB64 = java.util.Base64.encoder.encodeToString(msgStr.bytes)
-    def notifyExit = sh(script: "echo '${msgB64}' | base64 -d > '${msgFile}'", returnStatus: true)
-    if (notifyExit != 0) {
-        echo "WARNING: writing notification message file returned exit ${notifyExit}"
-    }
+    // Pass variables via env to avoid Groovy shell quoting issues
+    env.NOTIFY_TITLE = title
+    env.NOTIFY_MSG = message
+    env.NOTIFY_COLOR = color
+    env.NOTIFY_REPORT_LINK = reportLink
+    env.NOTIFY_BUILD_LINK = buildLink
+    def notifyExit = sh(script: '''
+python3 << 'PYEOF'
+import json, subprocess, os, sys
 
-    notifyExit = sh(script: """
-        scripts/notify-feishu.sh \
-            --title       '${title}' \
-            --message-file '${msgFile}' \
-            --report-link '${reportLink}' \
-            --build-link  '${buildLink}' \
-            --color       '${color}'
-    """, returnStatus: true)
+webhook = os.environ.get("FEISHU_WEBHOOK_URL", "")
+title = os.environ.get("NOTIFY_TITLE", "")
+message = os.environ.get("NOTIFY_MSG", "")
+color = os.environ.get("NOTIFY_COLOR", "green")
+reportLink = os.environ.get("NOTIFY_REPORT_LINK", "")
+buildLink = os.environ.get("NOTIFY_BUILD_LINK", "")
+
+if not webhook:
+    print("WARNING: FEISHU_WEBHOOK_URL not set. Skipping notification.")
+    sys.exit(0)
+
+payload = {
+    "msg_type": "interactive",
+    "card": {
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": color if color in ("red","blue","green") else "green"
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": message}},
+            {"tag": "hr"}
+        ]
+    }
+}
+
+actions = []
+if reportLink:
+    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "\U0001f4ca \u67e5\u770b\u62a5\u544a"}, "url": reportLink, "type": "default"})
+if buildLink:
+    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "\U0001f527 Jenkins Build"}, "url": buildLink, "type": "default"})
+if actions:
+    payload["card"]["elements"].append({"tag": "action", "actions": actions})
+    payload["card"]["elements"].append({"tag": "hr"})
+
+payload["card"]["elements"].append({
+    "tag": "note",
+    "elements": [{"tag": "plain_text", "content": "chaos-il2cpp CI"}]
+})
+
+data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+req = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+    "-X", "POST", webhook,
+    "-H", "Content-Type: application/json",
+    "--data-binary", "@-"],
+    input=data, capture_output=True)
+http_code = req.stdout.decode().strip()
+if http_code and http_code.isdigit() and 200 <= int(http_code) < 300:
+    print(f"Feishu notification sent (HTTP {http_code})")
+else:
+    print(f"WARNING: Feishu webhook returned HTTP {http_code}")
+    sys.exit(1)
+PYEOF
+    ''', returnStatus: true)
     if (notifyExit != 0) {
         echo "WARNING: notification script returned exit ${notifyExit}"
     }
-
 }
 
 // ============================================================
