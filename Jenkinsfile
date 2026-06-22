@@ -458,7 +458,11 @@ except Exception:
 
     // Write message to a file to avoid shell quoting issues with multiline content
     def msgFile = "${env.WORKSPACE}/.notify-msg-${BUILD_NUMBER}.txt"
-    writeFile(file: msgFile, text: message)
+    sh """
+        cat > '${msgFile}' << 'NOTIFYEOF'
+${message}
+NOTIFYEOF
+    """
 
     sh """
         scripts/notify-feishu.sh \\
