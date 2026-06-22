@@ -22,6 +22,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --title)       TITLE="$2";       shift 2 ;;
         --message)     MESSAGE="$2";     shift 2 ;;
+        --message-file) MESSAGE=$(cat "$2"); shift 2 ;;
         --report-link) REPORT_LINK="$2"; shift 2 ;;
         --build-link)  BUILD_LINK="$2";  shift 2 ;;
         --color)       COLOR="$2";       shift 2 ;;

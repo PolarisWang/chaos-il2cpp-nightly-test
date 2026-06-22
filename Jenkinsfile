@@ -456,14 +456,18 @@ except Exception:
 **状态:** ${status}"""
     }
 
+    // Write message to a file to avoid shell quoting issues with multiline content
+    def msgFile = "${env.WORKSPACE}/.notify-msg-${BUILD_NUMBER}.txt"
+    writeFile(file: msgFile, text: message)
+
     sh """
         scripts/notify-feishu.sh \\
             --title       '${title}' \\
-            --message     '${message}' \\
+            --message-file '${msgFile}' \\
             --report-link '${reportLink}' \\
             --build-link  '${buildLink}' \\
             --color       '${color}'
-    """
+    """ || echo "WARNING: notification script had non-zero exit"
 }
 
 // ============================================================
