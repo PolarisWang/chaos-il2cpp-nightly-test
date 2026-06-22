@@ -89,7 +89,7 @@ pipeline {
                         set -eu
                         mkdir -p "\${WORKSPACE}/scripts"
                         cd "\${WORKSPACE}/scripts"
-                        for script in collect-all-results.sh generate-nightly-report.py notify-feishu.sh notify-feishu-text.sh; do
+                        for script in publish-nightly-results.py generate-nightly-report.py notify-feishu.sh notify-feishu-text.sh; do
                             [ -f "\$script" ] && continue
                             curl -sL -o "\$script" "https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/\$script" || echo "WARNING: failed to download \$script"
                         done
@@ -123,10 +123,17 @@ sh """
                             --stage-timeout 600 \
                             2>&1 || echo "WARNING: nightly_runner had failures"
 
-                        echo "=== [x64] Collect Results ==="
-                        bash "\${WORKSPACE}/scripts/collect-all-results.sh" \
+                        echo "=== [x64] Publish Results ==="
+                        python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
+                            --report-dir "${ARTIFACTS_DIR}/nightly-run/latest" \
                             --foundation-dir "${BOOMING_DIR}/testing/foundation-dll" \
-                            --output-dir "${ARTIFACTS_DIR}"
+                            --output-dir "${ARTIFACTS_DIR}" \
+                            --date-tag "${DATE_TAG}" \
+                            --run-tag "${RUN_TAG}" \
+                            --build-number "\${BUILD_NUMBER}" \
+                            --skip-ingest \
+                            --skip-minio \
+                            2>&1 || echo "WARNING: publish-nightly-results had failures"
 
                         echo "=== [x64] Pipeline Complete ==="
                     """
