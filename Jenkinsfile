@@ -90,7 +90,6 @@ pipeline {
                         mkdir -p "\${WORKSPACE}/scripts"
                         cd "\${WORKSPACE}/scripts"
                         for script in publish-nightly-results.py generate-nightly-report.py notify-feishu.sh notify-feishu-text.sh; do
-                            [ -f "\$script" ] && continue
                             curl -sL -o "\$script" "https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/\$script" || echo "WARNING: failed to download \$script"
                         done
                         chmod +x *.sh 2>/dev/null || true
