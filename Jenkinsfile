@@ -458,8 +458,8 @@ except Exception:
 
     // Write message to a file using base64 to avoid all quoting issues
     def msgFile = "${env.WORKSPACE}/.notify-msg-${BUILD_NUMBER}.txt"
-    def msgBytes = message.getBytes("UTF-8")
-    def msgB64 = msgBytes.encodeBase64().toString()
+    def msgStr = message.toString()
+    def msgB64 = msgStr.bytes.encodeBase64().toString()
     def notifyExit = sh(script: "echo '${msgB64}' | base64 -d > '${msgFile}'", returnStatus: true)
     if (notifyExit != 0) {
         echo "WARNING: writing notification message file returned exit ${notifyExit}"
