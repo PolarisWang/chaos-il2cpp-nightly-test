@@ -89,10 +89,10 @@ pipeline {
                         set -eu
                         mkdir -p "\${WORKSPACE}/scripts"
                         cd "\${WORKSPACE}/scripts"
-                        for script in publish-nightly-results.py generate-nightly-report.py notify-feishu.sh notify-feishu-text.sh; do
+                        for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh; do
                             curl -sL -o "\$script" "https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/\$script" || echo "WARNING: failed to download \$script"
                         done
-                        chmod +x *.sh 2>/dev/null || true
+                        chmod +x *.sh *.py 2>/dev/null || true
                         ls -la
                     """
                 }
@@ -441,160 +441,66 @@ except Exception:
             }
         }
 
-        // Pass raw data via env vars — all ASCII-safe to avoid Chinese encoding corruption
-        env.NOTIFY_STATUS = status
-        env.NOTIFY_COLOR = color
-        env.NOTIFY_BUILD_NUM = "${BUILD_NUMBER}"
-        env.NOTIFY_DATE_TAG = DATE_TAG
-        env.NOTIFY_RUN_TAG = RUN_TAG
-        env.NOTIFY_BUILD_CONFIG = BUILD_CONFIG
-        env.NOTIFY_BUILD_LINK = buildLink
-        env.NOTIFY_REPORT_LINK = reportLink
-        env.NOTIFY_DATA_DLLS = "${dataDlls}"
-        env.NOTIFY_TOTAL_DLLS = "${totalDlls}"
-        env.NOTIFY_FACT_PASSED = "${factPassed}"
-        env.NOTIFY_FACT_TOTAL = "${factTotal}"
-        env.NOTIFY_FACT_PCT = factPct
-        env.NOTIFY_BMK_METHODS = "${bmkMethods}"
-        env.NOTIFY_HOT_PASSED = "${hotPassed}"
-        env.NOTIFY_HOT_TOTAL = "${hotTotal}"
-        env.NOTIFY_HOT_PCT = hotPct
-        env.NOTIFY_MEM_METHODS = "${memMethods}"
-        env.NOTIFY_MEM_ALLOC = memAllocStr
-        env.NOTIFY_MEM_GC = memGcStr
-        env.NOTIFY_FAIL_LINES = failLines
+        // Pass raw data via JSON file (all ASCII-safe, avoids encoding issues)
+        def notifyDir = "${env.WORKSPACE}/.notify"
+        def dataJson = groovy.json.JsonOutput.toJson([
+            status: status,
+            color: color,
+            build_num: "${BUILD_NUMBER}",
+            date_tag: DATE_TAG,
+            run_tag: RUN_TAG,
+            build_config: BUILD_CONFIG,
+            build_link: buildLink,
+            report_link: reportLink,
+            data_dlls: dataDlls,
+            total_dlls: totalDlls,
+            fact_passed: factPassed,
+            fact_total: factTotal,
+            fact_pct: factPct,
+            bmk_methods: bmkMethods,
+            hot_passed: hotPassed,
+            hot_total: hotTotal,
+            hot_pct: hotPct,
+            mem_methods: memMethods,
+            mem_alloc: memAllocStr,
+            mem_gc: memGcStr,
+            fail_lines: failLines,
+        ])
+        sh """mkdir -p '${notifyDir}' && cat > '${notifyDir}/notify-data.json' << 'JSONEOF'
+${dataJson}
+JSONEOF"""
     } catch (err) {
         echo "Failed to read nightly data for notification: ${err.message}"
-        // Set defaults — Python will build a minimal message
-        env.NOTIFY_STATUS = status
-        env.NOTIFY_COLOR = color
-        env.NOTIFY_BUILD_NUM = "${BUILD_NUMBER}"
-        env.NOTIFY_DATE_TAG = DATE_TAG
-        env.NOTIFY_RUN_TAG = RUN_TAG
-        env.NOTIFY_BUILD_CONFIG = BUILD_CONFIG
-        env.NOTIFY_BUILD_LINK = buildLink
-        env.NOTIFY_REPORT_LINK = reportLink
-        env.NOTIFY_DATA_DLLS = "0"
-        env.NOTIFY_TOTAL_DLLS = "0"
-        env.NOTIFY_FACT_PASSED = "0"
-        env.NOTIFY_FACT_TOTAL = "0"
-        env.NOTIFY_FACT_PCT = "N/A"
-        env.NOTIFY_BMK_METHODS = "0"
-        env.NOTIFY_HOT_PASSED = "0"
-        env.NOTIFY_HOT_TOTAL = "0"
-        env.NOTIFY_HOT_PCT = "N/A"
-        env.NOTIFY_MEM_METHODS = "0"
-        env.NOTIFY_MEM_ALLOC = "N/A"
-        env.NOTIFY_MEM_GC = "N/A"
-        env.NOTIFY_FAIL_LINES = ""
+        def notifyDir = "${env.WORKSPACE}/.notify"
+        def dataJson = groovy.json.JsonOutput.toJson([
+            status: status,
+            color: color,
+            build_num: "${BUILD_NUMBER}",
+            date_tag: DATE_TAG,
+            run_tag: RUN_TAG,
+            build_config: BUILD_CONFIG,
+            build_link: buildLink,
+            report_link: reportLink,
+            data_dlls: 0,
+            total_dlls: 0,
+            fact_passed: 0,
+            fact_total: 0,
+            fact_pct: "N/A",
+            bmk_methods: 0,
+            hot_passed: 0,
+            hot_total: 0,
+            hot_pct: "N/A",
+            mem_methods: 0,
+            mem_alloc: "N/A",
+            mem_gc: "N/A",
+            fail_lines: "",
+        ])
+        sh """mkdir -p '${notifyDir}' && cat > '${notifyDir}/notify-data.json' << 'JSONEOF'
+${dataJson}
+JSONEOF"""
     }
 
-    def notifyExit = sh(script: '''
-python3 << 'PYEOF'
-import json, os, sys
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
-
-webhook = os.environ.get("FEISHU_WEBHOOK_URL", "")
-if not webhook:
-    print("WARNING: FEISHU_WEBHOOK_URL not set. Skipping notification.")
-    sys.exit(0)
-
-# Read raw data from env vars (all ASCII-safe)
-status_val     = os.environ.get("NOTIFY_STATUS", "UNKNOWN")
-color_val      = os.environ.get("NOTIFY_COLOR", "green")
-build_num      = os.environ.get("NOTIFY_BUILD_NUM", "?")
-date_tag       = os.environ.get("NOTIFY_DATE_TAG", "")
-run_tag        = os.environ.get("NOTIFY_RUN_TAG", "run1")
-build_config   = os.environ.get("NOTIFY_BUILD_CONFIG", "")
-build_link_val = os.environ.get("NOTIFY_BUILD_LINK", "")
-report_link_val= os.environ.get("NOTIFY_REPORT_LINK", "")
-data_dlls      = os.environ.get("NOTIFY_DATA_DLLS", "0")
-total_dlls     = os.environ.get("NOTIFY_TOTAL_DLLS", "0")
-fact_passed    = os.environ.get("NOTIFY_FACT_PASSED", "0")
-fact_total     = os.environ.get("NOTIFY_FACT_TOTAL", "0")
-fact_pct       = os.environ.get("NOTIFY_FACT_PCT", "N/A")
-bmk_methods    = os.environ.get("NOTIFY_BMK_METHODS", "0")
-hot_passed     = os.environ.get("NOTIFY_HOT_PASSED", "0")
-hot_total      = os.environ.get("NOTIFY_HOT_TOTAL", "0")
-hot_pct        = os.environ.get("NOTIFY_HOT_PCT", "N/A")
-mem_methods    = os.environ.get("NOTIFY_MEM_METHODS", "0")
-mem_alloc      = os.environ.get("NOTIFY_MEM_ALLOC", "N/A")
-mem_gc         = os.environ.get("NOTIFY_MEM_GC", "N/A")
-fail_lines_raw = os.environ.get("NOTIFY_FAIL_LINES", "")
-
-# Build title with Chinese/emoji hardcoded in Python (UTF-8 native)
-if run_tag == "run2":
-    run_label = "午后"
-else:
-    run_label = "凌晨"
-icon = "✅" if status_val == "SUCCESS" else "❌"
-title = f"{icon} chaos-il2cpp Nightly #{build_num} — {date_tag} ({run_label})"
-
-# Build message with Chinese text hardcoded in Python
-msg_parts = [
-    f"**构建配置:** {build_config}",
-    f"**状态:** {status_val}",
-    "",
-    f"**覆盖范围:** {data_dlls}/{total_dlls} DLLs 有数据",
-    f"**正确率 (Fact):** {fact_passed}/{fact_total} ({fact_pct})",
-    f"**基准测试:** {bmk_methods} 方法",
-    f"**热更新:** {hot_passed}/{hot_total} ({hot_pct})",
-    f"**内存 Profile:** {mem_methods} 方法 · Nursery={mem_alloc} · GC={mem_gc}",
-]
-if fail_lines_raw:
-    if fail_lines_raw.startswith("__MANY__"):
-        count = fail_lines_raw.replace("__MANY__", "")
-        msg_parts.append(f"\n**失败详情:** {count} DLL(s) 有失败")
-    else:
-        detail = fail_lines_raw.replace("||", "\n")
-        msg_parts.append(f"\n**失败详情:**\n{detail}")
-
-message = "\n".join(msg_parts)
-
-payload = {
-    "msg_type": "interactive",
-    "card": {
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": color_val if color_val in ("red","blue","green") else "green"
-        },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": message}},
-            {"tag": "hr"}
-        ]
-    }
-}
-
-actions = []
-if report_link_val:
-    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "📊 查看报告"}, "url": report_link_val, "type": "default"})
-if build_link_val:
-    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "🔧 Jenkins Build"}, "url": build_link_val, "type": "default"})
-if actions:
-    payload["card"]["elements"].append({"tag": "action", "actions": actions})
-    payload["card"]["elements"].append({"tag": "hr"})
-
-payload["card"]["elements"].append({
-    "tag": "note",
-    "elements": [{"tag": "plain_text", "content": "chaos-il2cpp CI"}]
-})
-
-data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-req = Request(webhook, data=data, headers={"Content-Type": "application/json; charset=utf-8"})
-try:
-    resp = urlopen(req, timeout=30)
-    http_code = resp.status
-    print(f"Feishu notification sent (HTTP {http_code})")
-    resp.close()
-except HTTPError as e:
-    print(f"WARNING: Feishu webhook returned HTTP {e.code}")
-    sys.exit(1)
-except URLError as e:
-    print(f"WARNING: Feishu webhook error: {e.reason}")
-    sys.exit(1)
-PYEOF
-    ''', returnStatus: true)
+    def notifyExit = sh(script: "python3 '${env.WORKSPACE}/scripts/send-feishu.py' '${env.WORKSPACE}/.notify/notify-data.json'", returnStatus: true)
     if (notifyExit != 0) {
         echo "WARNING: notification script returned exit ${notifyExit}"
     }
