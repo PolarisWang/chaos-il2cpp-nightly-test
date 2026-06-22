@@ -464,7 +464,9 @@ except Exception:
     env.NOTIFY_BUILD_LINK = buildLink
     def notifyExit = sh(script: '''
 python3 << 'PYEOF'
-import json, subprocess, os, sys
+import json, os, sys
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 webhook = os.environ.get("FEISHU_WEBHOOK_URL", "")
 title = os.environ.get("NOTIFY_TITLE", "")
@@ -506,16 +508,17 @@ payload["card"]["elements"].append({
 })
 
 data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-req = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-    "-X", "POST", webhook,
-    "-H", "Content-Type: application/json",
-    "--data-binary", "@-"],
-    input=data, capture_output=True)
-http_code = req.stdout.decode().strip()
-if http_code and http_code.isdigit() and 200 <= int(http_code) < 300:
+req = Request(webhook, data=data, headers={"Content-Type": "application/json; charset=utf-8"})
+try:
+    resp = urlopen(req, timeout=30)
+    http_code = resp.status
     print(f"Feishu notification sent (HTTP {http_code})")
-else:
-    print(f"WARNING: Feishu webhook returned HTTP {http_code}")
+    resp.close()
+except HTTPError as e:
+    print(f"WARNING: Feishu webhook returned HTTP {e.code}")
+    sys.exit(1)
+except URLError as e:
+    print(f"WARNING: Feishu webhook error: {e.reason}")
     sys.exit(1)
 PYEOF
     ''', returnStatus: true)
