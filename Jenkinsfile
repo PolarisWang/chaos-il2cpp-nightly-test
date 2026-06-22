@@ -493,9 +493,9 @@ payload = {
 
 actions = []
 if reportLink:
-    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "\U0001f4ca \u67e5\u770b\u62a5\u544a"}, "url": reportLink, "type": "default"})
+    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "📊 查看报告"}, "url": reportLink, "type": "default"})
 if buildLink:
-    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "\U0001f527 Jenkins Build"}, "url": buildLink, "type": "default"})
+    actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "🔧 Jenkins Build"}, "url": buildLink, "type": "default"})
 if actions:
     payload["card"]["elements"].append({"tag": "action", "actions": actions})
     payload["card"]["elements"].append({"tag": "hr"})
