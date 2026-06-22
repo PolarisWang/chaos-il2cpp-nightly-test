@@ -113,21 +113,15 @@ sh """
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
 
-                        echo "=== [x64] Full Pipeline \u2014 all DLLs ==="
+                        echo "=== [x64] Full Pipeline \u2014 nightly_runner (parallel) ==="
 
-                        # Iterate over every DLL that has chunks
-                        for dll_dir in */; do
-                            dll_name=\$(basename "\$dll_dir")
-                            [ -d "\${dll_dir}chunks" ] || continue
-
-                            echo "========== [x64] Processing \${dll_name} =========="
-                            python3 -m verification \
-                                --assembly "\${dll_name}" \
-                                --all-chunks \
-                                --stages build,fact,benchmark,hotupdate,profile,coverage-audit,aggregate,reporting \
-                                --native-config "${BUILD_CONFIG}" \
-                                2>&1 || echo "WARNING: \${dll_name} pipeline had failures"
-                        done
+                        python3 -m verification.nightly_runner.main \
+                            --report-dir "${ARTIFACTS_DIR}/nightly-run" \
+                            --max-workers 4 \
+                            --bench-workers 2 \
+                            --native-config "${BUILD_CONFIG}" \
+                            --stage-timeout 600 \
+                            2>&1 || echo "WARNING: nightly_runner had failures"
 
                         echo "=== [x64] Collect Results ==="
                         bash "\${WORKSPACE}/scripts/collect-all-results.sh" \
@@ -148,6 +142,7 @@ sh """
             agent { label 'linux-arm64' }
             steps {
                 sh """
+                    #!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -171,6 +166,7 @@ sh """
             agent { label 'android-arm64' }
             steps {
                 sh """
+                    #!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
                     echo "=== [android] Verify ==="
@@ -277,26 +273,16 @@ sh """
     }
 
     post {
-        failure {
-            script {
-                if (env.JOB_NAME?.contains('nightly')) {
-                    sendNightlyNotification(status: 'FAILURE', artifactsDir: ARTIFACTS_DIR)
-                }
-            }
-        }
-
-        success {
-            script {
-                if (env.JOB_NAME?.contains('nightly')) {
-                    sendNightlyNotification(status: 'SUCCESS', artifactsDir: ARTIFACTS_DIR)
-                }
-            }
-        }
-
         always {
             script {
                 def nodeLabel = env.JOB_NAME?.contains('code-review') ? 'linux-x64-cr' : 'linux-x64'
                 node(nodeLabel) {
+                    // Send notification based on build result (must be inside node for file access)
+                    if (env.JOB_NAME?.contains('nightly')) {
+                        def buildStatus = currentBuild.result ?: 'SUCCESS'
+                        sendNightlyNotification(status: buildStatus, artifactsDir: ARTIFACTS_DIR)
+                    }
+
                     archiveArtifacts artifacts: "artifacts/**/*",
                                    allowEmptyArchive: true,
                                    fingerprint: true
