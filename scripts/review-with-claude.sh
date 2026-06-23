@@ -4,6 +4,10 @@
 # Calls `claude --print` with a structured skill prompt that asks Claude
 # to analyze the diff between two commits for high-risk patterns.
 #
+# Smart filtering: excludes auto-generated files, vendored deps, binaries,
+# documentation, and other low-value files before computing the diff.
+# Token-aware truncation: dynamically fits the diff to the model context window.
+#
 # Usage:
 #   review-with-claude.sh --repo-dir <path> --from-commit <sha> --to-commit <sha> \
 #       --output <path> [--max-diff-lines 50000]
@@ -75,13 +79,178 @@ if [[ "$COMMIT_COUNT" -eq 0 ]]; then
     exit 0
 fi
 
-# Gather diff, truncate if too large
-DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" 2>/dev/null || true)
+# ──────────────────────────────────────────────
+# File-level smart filtering (A)
+# Exclude low-value / generated / binary files
+# ──────────────────────────────────────────────
+CHANGED_FILES_LIST=$(git diff --name-status "${FROM_COMMIT}".."${TO_COMMIT}" 2>/dev/null || true)
+
+if [[ -z "$CHANGED_FILES_LIST" ]]; then
+    echo "WARNING: git diff --name-status returned empty" >&2
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    exit 0
+fi
+
+FILTERED_PATHS_FILE=$(mktemp)
+echo "$CHANGED_FILES_LIST" | python3 -c '
+import sys
+
+EXTS_KEEP = (".cs", ".cpp", ".h", ".hpp", ".py", ".scriban", ".cmake", ".yaml", ".yml")
+
+def is_excluded(path):
+    """Return True if a file path should be excluded from code review."""
+    # Directory-based exclusions
+    if path.startswith("third_party/"):
+        return True
+    if "/generated/" in path:
+        return True
+    if path.startswith(".hephaestus-cache/"):
+        return True
+    if path.startswith("test/snapshots/"):
+        return True
+    if path.startswith("wiki/"):
+        return True
+
+    basename = path.split("/")[-1] if "/" in path else path
+
+    # Filename-based exclusions
+    if basename == "CombinedSubjects.cs":
+        return True
+    if basename.endswith(".deps.json"):
+        return True
+    if ".generated." in basename:
+        return True
+    if "/obj/" in path and basename.endswith(".g.cs"):
+        return True
+
+    # Extension-based exclusions
+    for ext in (".md", ".html", ".txt", ".dll", ".pdb", ".exe", ".lib",
+                ".svg", ".png", ".jpg", ".jpeg", ".jdata", ".jsonl"):
+        if path.endswith(ext):
+            return True
+
+    # Only keep known source/build extensions
+    if any(basename.endswith(e) for e in EXTS_KEEP):
+        return False
+    return True  # exclude everything else
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split("\t")
+    # Rename/copy: status\told_path\tnew_path — take new_path
+    if len(parts) >= 3:
+        new_path = parts[2]
+        if not is_excluded(new_path):
+            print(new_path)
+    elif len(parts) >= 2:
+        path = parts[1]
+        if not is_excluded(path):
+            print(path)
+' > "$FILTERED_PATHS_FILE" 2>/dev/null || true
+
+FILTERED_COUNT=$(wc -l < "$FILTERED_PATHS_FILE" | tr -d ' ')
+
+# Capture file names before potentially deleting the file
+FILTERED_FILE_NAMES=""
+if [[ "$FILTERED_COUNT" -gt 0 ]]; then
+    FILTERED_FILE_NAMES=$(cat "$FILTERED_PATHS_FILE" 2>/dev/null || true)
+fi
+
+if [[ "$FILTERED_COUNT" -eq 0 ]]; then
+    echo "WARNING: All files excluded by noise filters (no reviewable changes)" >&2
+    rm -f "$FILTERED_PATHS_FILE"
+    echo "Reviewed 0 reviewable files"
+    echo "Findings: 0"
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    exit 0
+fi
+
+echo "Filtered ${FILTERED_COUNT} reviewable files (out of $(echo "$CHANGED_FILES_LIST" | grep -c . || true) total changed)"
+
+# ──────────────────────────────────────────────
+# Compute diff only for the filtered file set
+# ──────────────────────────────────────────────
+DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" --pathspec-from-file="$FILTERED_PATHS_FILE" 2>/dev/null || true)
+
+# Fallback if --pathspec-from-file failed
+if [[ -z "$DIFF" && "$FILTERED_COUNT" -gt 0 ]]; then
+    DIFF_FILE_LIST=$(tr '\n' ' ' < "$FILTERED_PATHS_FILE" | sed 's/ $//')
+    DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- $DIFF_FILE_LIST 2>/dev/null || true)
+fi
+
+rm -f "$FILTERED_PATHS_FILE"
+
+# ──────────────────────────────────────────────
+# Token-aware dynamic truncation (C)
+# ──────────────────────────────────────────────
 DIFF_LINES=$(echo "$DIFF" | wc -l)
 DIFF_TRUNCATED=false
-if [[ "$DIFF_LINES" -gt "$MAX_DIFF_LINES" ]]; then
-    DIFF=$(echo "$DIFF" | head -"$MAX_DIFF_LINES")
-    DIFF_TRUNCATED=true
+ALL_TRUNCATED=false
+
+if [[ -n "$DIFF" && "$DIFF_LINES" -gt 0 ]]; then
+    TRUNCATION_RESULT=$(echo "$DIFF" | python3 -c '
+import sys
+
+# deepseek-v4-flash: 1,048,565 total tokens
+MAX_TOTAL_TOKENS = 1048565
+COMPLETION_TOKENS = 32000
+PROMPT_OVERHEAD_TOKENS = 2000  # instructions + commit log + formatting
+CHARS_PER_TOKEN = 4.0
+
+available = MAX_TOTAL_TOKENS - COMPLETION_TOKENS - PROMPT_OVERHEAD_TOKENS
+
+diff_text = sys.stdin.read()
+diff_lines = diff_text.split("\n")
+num_lines = len(diff_lines)
+if num_lines > 0 and diff_lines[-1] == "":
+    num_lines -= 1
+    diff_lines = diff_lines[:num_lines]
+
+if num_lines == 0:
+    print("FULL")
+    sys.exit(0)
+
+estimated_tokens = len(diff_text) / CHARS_PER_TOKEN
+
+if estimated_tokens <= available:
+    print("FULL")
+else:
+    # Binary search for max whole lines that fit
+    lo, hi = 0, num_lines
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        partial = "\n".join(diff_lines[:mid])
+        tokens = len(partial) / CHARS_PER_TOKEN
+        if tokens <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+
+    if lo <= 0:
+        print("ALL_TRUNCATED")
+    else:
+        print(f"TRUNCATED:{lo}")
+' 2>/dev/null || echo "FULL")
+
+    case "$TRUNCATION_RESULT" in
+        FULL)
+            ;;
+        ALL_TRUNCATED)
+            DIFF=""
+            DIFF_TRUNCATED=true
+            ALL_TRUNCATED=true
+            ;;
+        TRUNCATED:*)
+            ALLOWED_LINES="${TRUNCATION_RESULT#TRUNCATED:}"
+            if [[ "$ALLOWED_LINES" -lt "$DIFF_LINES" ]]; then
+                echo "Token-aware truncation: ${DIFF_LINES} -> ${ALLOWED_LINES} lines"
+                DIFF=$(echo "$DIFF" | head -"$ALLOWED_LINES")
+                DIFF_TRUNCATED=true
+            fi
+            ;;
+    esac
 fi
 
 # Write diff to temp file to avoid shell quoting issues
@@ -214,13 +383,31 @@ PROMPT_HEADER
     echo "提交列表:"
     echo "${COMMIT_LOG}"
     echo ""
-    echo '```diff'
-    cat "$DIFF_FILE"
-    echo '```'
-    echo ""
-    if [ "$DIFF_TRUNCATED" = true ]; then
+    if [ "$ALL_TRUNCATED" = true ]; then
+        echo "## 变更文件列表（diff 因体积过大未提供，仅列出文件名）"
         echo ""
-        echo "**注意:** diff 超过 ${MAX_DIFF_LINES} 行，已截断。"
+        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
+        echo ""
+        echo "**注意:** diff 内容超过模型上下文窗口，仅提供文件列表供参考。"
+        echo ""
+    elif [ -n "$DIFF" ]; then
+        echo "## 变更文件列表 (${FILTERED_COUNT} 个文件)"
+        echo ""
+        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
+        echo ""
+        echo '```diff'
+        cat "$DIFF_FILE"
+        echo '```'
+        echo ""
+        if [ "$DIFF_TRUNCATED" = true ]; then
+            echo ""
+            echo "**注意:** diff 超过模型上下文窗口限制，已截断。"
+            echo ""
+        fi
+    else
+        echo "## 变更文件列表"
+        echo ""
+        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
         echo ""
     fi
     cat << 'PROMPT_FOOTER'
