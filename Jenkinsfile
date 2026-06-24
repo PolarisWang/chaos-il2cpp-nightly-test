@@ -84,6 +84,20 @@ pipeline {
             steps {
                 script {
                     ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
+                    // Verify essential tools
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        if ! command -v dotnet &>/dev/null; then
+                            echo "FATAL: dotnet not found — install dotnet SDK 8.0+10.0 on this agent"
+                            exit 1
+                        fi
+                        echo "dotnet found: $(dotnet --version)"
+                        if ! command -v cmake &>/dev/null; then
+                            echo "WARNING: cmake not found — SDK presets build will fail, pipeline may fall back to inline codegen"
+                        else
+                            echo "cmake found: $(cmake --version | head -1)"
+                        fi
+                    '''
                     // Download helper scripts from GitHub
                     sh """
                         set -eu
@@ -147,8 +161,7 @@ sh """
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-arm64' }
             steps {
-                sh """
-                    #!/bin/bash
+                sh '''#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -160,7 +173,7 @@ sh """
                             FAILED_PLATFORMS+=("arm64-\${dll}")
                         }
                     done
-                """
+                '''
             }
         }
 
@@ -171,13 +184,12 @@ sh """
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'android-arm64' }
             steps {
-                sh """
-                    #!/bin/bash
+                sh '''#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
                     echo "=== [android] Verify ==="
                     python3 fix_all_failures.py --platform android 2>&1 || true
-                """
+                '''
             }
         }
 
