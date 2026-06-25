@@ -53,7 +53,6 @@ pipeline {
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"
-        PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
     }
 
     stages {
@@ -85,22 +84,19 @@ pipeline {
             steps {
                 script {
                     ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
-                    // Verify essential tools (dotnet PATH is set in environment block)
-                    sh '''#!/bin/bash
+                    // Find dotnet binary and add its directory to pipeline PATH
+                    def dotnetDir = sh(script: '''#!/bin/bash
                         set -euo pipefail
-                        if ! command -v dotnet &>/dev/null; then
-                            echo "FATAL: dotnet not found — install dotnet SDK 8.0+10.0 on this agent"
-                            exit 1
-                        fi
-                        echo "dotnet found: $(dotnet --version)"
-                        if ! command -v cmake &>/dev/null; then
-                            echo "WARNING: cmake not found — SDK presets build will fail, pipeline may fall back to inline codegen"
-                        else
-                            echo "cmake found: $(cmake --version | head -1)"
-                        fi
-                    '''
+                        for c in /usr/local/bin/dotnet /usr/share/dotnet/dotnet /usr/bin/dotnet; do
+                            if [ -x "$c" ]; then dirname "$c"; exit 0; fi
+                        done
+                        echo ""
+                    ''', returnStdout: true).trim()
+                    if (!dotnetDir) {
                         error("FATAL: dotnet not found — install dotnet SDK 8.0+10.0 on this agent")
                     }
+                    env.PATH = "${dotnetDir}:${env.PATH}"
+                    sh 'dotnet --version'
                     sh """
                         set -eu
                         mkdir -p "\${WORKSPACE}/scripts"
