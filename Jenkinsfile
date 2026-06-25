@@ -507,17 +507,15 @@ except Exception:
 }
 
 def sendFeishuCard(dataJson, webhook) {
-    def dataB64 = dataJson.bytes.encodeBase64().toString()
-    def webhookB64 = webhook.bytes.encodeBase64().toString()
     def notifyExit = sh(script: """python3 -c "
-import base64, json, os, sys
+import json, os, sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-data = json.loads(base64.b64decode('\${dataB64}').decode())
-webhook = base64.b64decode('\${webhookB64}').decode()
+data = json.loads('''\${dataJson}''')
+webhook_url = '''\${webhook}'''
 
-if not webhook:
+if not webhook_url:
     print('WARNING: FEISHU_WEBHOOK_URL not set')
     sys.exit(0)
 
@@ -587,7 +585,7 @@ payload = json.dumps({
     },
 }, ensure_ascii=False).encode('utf-8')
 
-req = Request(webhook, data=payload, headers={'Content-Type': 'application/json; charset=utf-8'})
+req = Request(webhook_url, data=payload, headers={'Content-Type': 'application/json; charset=utf-8'})
 try:
     resp = urlopen(req, timeout=30)
     print(f'Feishu notification sent (HTTP {resp.status})')
