@@ -17,7 +17,16 @@ RUN apt-get update -qq && \
         libnuma1 \
         nodejs \
         npm \
+        wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Install .NET SDK 10.0
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh && \
+    chmod +x /tmp/dotnet-install.sh && \
+    /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet && \
+    ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
+    rm /tmp/dotnet-install.sh && \
+    dotnet --version
 
 RUN npm install -g @anthropic-ai/claude-code && claude --version
 
