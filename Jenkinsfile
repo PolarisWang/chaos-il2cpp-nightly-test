@@ -453,8 +453,6 @@ except Exception:
             }
         }
 
-        // Pass raw data via JSON file (all ASCII-safe, avoids encoding issues)
-        def notifyDir = "${env.WORKSPACE}/.notify"
         def dataJson = groovy.json.JsonOutput.toJson([
             status: status,
             color: color,
@@ -478,12 +476,8 @@ except Exception:
             mem_gc: memGcStr,
             fail_lines: failLines,
         ])
-        sh """mkdir -p '${notifyDir}' && cat > '${notifyDir}/notify-data.json' << 'JSONEOF'
-${dataJson}
-JSONEOF"""
     } catch (err) {
         echo "Failed to read nightly data for notification: ${err.message}"
-        def notifyDir = "${env.WORKSPACE}/.notify"
         def dataJson = groovy.json.JsonOutput.toJson([
             status: status,
             color: color,
@@ -507,14 +501,104 @@ JSONEOF"""
             mem_gc: "N/A",
             fail_lines: "",
         ])
-        sh """mkdir -p '${notifyDir}' && cat > '${notifyDir}/notify-data.json' << 'JSONEOF'
-${dataJson}
-JSONEOF"""
     }
 
-    def notifyExit = sh(script: "python3 '${env.WORKSPACE}/scripts/send-feishu.py' '${env.WORKSPACE}/.notify/notify-data.json'", returnStatus: true)
+    // Inline Feishu notification via Python (avoids external script dependency)
+    def dataB64 = dataJson.bytes.encodeBase64().toString()
+    def webhookB64 = webhook.bytes.encodeBase64().toString()
+    def notifyExit = sh(script: """python3 -c "
+import base64, json, os, sys
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
+data = json.loads(base64.b64decode('${dataB64}').decode())
+webhook = base64.b64decode('${webhookB64}').decode()
+
+if not webhook:
+    print('WARNING: FEISHU_WEBHOOK_URL not set')
+    sys.exit(0)
+
+status = data.get('status', 'UNKNOWN')
+color = data.get('color', 'green')
+build_num = data.get('build_num', '?')
+date_tag = data.get('date_tag', '')
+run_tag = data.get('run_tag', 'run1')
+build_link = data.get('build_link', '')
+report_link = data.get('report_link', '')
+
+run_label = '午后' if run_tag == 'run2' else '凌晨'
+icon = '✅' if status == 'SUCCESS' else '❌'
+title = f'{icon} chaos-il2cpp Nightly #{build_num} \\u2014 {date_tag} ({run_label})'
+
+parts = [
+    f'**\\u6784\\u5efa\\u914d\\u7f6e:** {data.get(\"build_config\", \"\")}',
+    f'**\\u72b6\\u6001:** {status}',
+    '',
+    f'**\\u8986\\u76d6\\u8303\\u56f4:** {data.get(\"data_dlls\", 0)}/{data.get(\"total_dlls\", 0)} DLLs',
+    f'**\\u6b63\\u786e\\u7387:** {data.get(\"fact_passed\", 0)}/{data.get(\"fact_total\", 0)} ({data.get(\"fact_pct\", \"N/A\")})',
+    f'**\\u57fa\\u51c6\\u6d4b\\u8bd5:** {data.get(\"bmk_methods\", 0)} \\u65b9\\u6cd5',
+    f'**\\u70ed\\u66f4\\u65b0:** {data.get(\"hot_passed\", 0)}/{data.get(\"hot_total\", 0)} ({data.get(\"hot_pct\", \"N/A\")})',
+    f'**\\u5185\\u5b58Profile:** {data.get(\"mem_methods\", 0)} \\u65b9\\u6cd5',
+]
+fail_lines = data.get('fail_lines', '')
+if fail_lines:
+    if fail_lines.startswith('__MANY__'):
+        count = fail_lines.replace('__MANY__', '')
+        parts.append('')
+        parts.append(f'**\\u5931\\u8d25\\u8be6\\u60c5:** {count} DLL(s) \\u6709\\u5931\\u8d25')
+    else:
+        detail = fail_lines.replace('||', chr(10))
+        parts.append('')
+        parts.append('**\\u5931\\u8d25\\u8be6\\u60c5:**')
+        parts.append(detail)
+message = chr(10).join(parts)
+
+elements = [
+    {'tag': 'div', 'text': {'tag': 'lark_md', 'content': message}},
+    {'tag': 'hr'},
+]
+actions = []
+if report_link:
+    actions.append({
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\\U0001f4ca \\u67e5\\u770b\\u62a5\\u544a'},
+        'url': report_link, 'type': 'default',
+    })
+if build_link:
+    actions.append({
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\\U0001f527 Jenkins Build'},
+        'url': build_link, 'type': 'default',
+    })
+if actions:
+    elements.append({'tag': 'action', 'actions': actions})
+    elements.append({'tag': 'hr'})
+elements.append({
+    'tag': 'note',
+    'elements': [{'tag': 'plain_text', 'content': 'chaos-il2cpp CI'}],
+})
+
+payload = json.dumps({
+    'msg_type': 'interactive',
+    'card': {
+        'header': {'title': {'tag': 'plain_text', 'content': title}, 'template': color if color in ('red','blue','green') else 'green'},
+        'elements': elements,
+    },
+}, ensure_ascii=False).encode('utf-8')
+
+req = Request(webhook, data=payload, headers={'Content-Type': 'application/json; charset=utf-8'})
+try:
+    resp = urlopen(req, timeout=30)
+    print(f'Feishu notification sent (HTTP {resp.status})')
+    resp.close()
+except HTTPError as e:
+    print(f'WARNING: Feishu webhook returned HTTP {e.code}')
+    sys.exit(1)
+except URLError as e:
+    print(f'WARNING: Feishu webhook error: {e.reason}')
+    sys.exit(1)
+"
+""", returnStatus: true)
     if (notifyExit != 0) {
-        echo "WARNING: notification script returned exit ${notifyExit}"
+        echo "WARNING: inline notification failed with exit ${notifyExit}"
     }
 }
 
