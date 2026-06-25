@@ -507,18 +507,18 @@ except Exception:
 }
 
 def sendFeishuCard(dataJson, webhook) {
-    // Write data to temp file to avoid shell quoting issues
     sh "mkdir -p '${WORKSPACE}/.notify'"
     writeFile file: "${WORKSPACE}/.notify/feishu-data.json", text: dataJson
     writeFile file: "${WORKSPACE}/.notify/feishu-webhook.txt", text: webhook
-    def notifyExit = sh(script: """python3 -c "
+    writeFile file: "${WORKSPACE}/.notify/send-feishu-card.py", text: """#!/usr/bin/env python3
 import json, os, sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-with open('${WORKSPACE}/.notify/feishu-data.json') as f:
+data_dir = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(data_dir, 'feishu-data.json')) as f:
     data = json.load(f)
-with open('${WORKSPACE}/.notify/feishu-webhook.txt') as f:
+with open(os.path.join(data_dir, 'feishu-webhook.txt')) as f:
     webhook_url = f.read().strip()
 
 if not webhook_url:
@@ -535,28 +535,28 @@ report_link = data.get('report_link', '')
 
 run_label = '午后' if run_tag == 'run2' else '凌晨'
 icon = '✅' if status == 'SUCCESS' else '❌'
-title = f'{icon} chaos-il2cpp Nightly #{build_num} \\u2014 {date_tag} ({run_label})'
+title = f'{icon} chaos-il2cpp Nightly #{build_num} — {date_tag} ({run_label})'
 
 parts = [
-    f'**\\u6784\\u5efa\\u914d\\u7f6e:** {data.get(\"build_config\", \"\")}',
-    f'**\\u72b6\\u6001:** {status}',
+    f'**构建配置:** {data.get("build_config", "")}',
+    f'**状态:** {status}',
     '',
-    f'**\\u8986\\u76d6\\u8303\\u56f4:** {data.get(\"data_dlls\", 0)}/{data.get(\"total_dlls\", 0)} DLLs',
-    f'**\\u6b63\\u786e\\u7387:** {data.get(\"fact_passed\", 0)}/{data.get(\"fact_total\", 0)} ({data.get(\"fact_pct\", \"N/A\")})',
-    f'**\\u57fa\\u51c6\\u6d4b\\u8bd5:** {data.get(\"bmk_methods\", 0)} \\u65b9\\u6cd5',
-    f'**\\u70ed\\u66f4\\u65b0:** {data.get(\"hot_passed\", 0)}/{data.get(\"hot_total\", 0)} ({data.get(\"hot_pct\", \"N/A\")})',
-    f'**\\u5185\\u5b58Profile:** {data.get(\"mem_methods\", 0)} \\u65b9\\u6cd5',
+    f'**覆盖范围:** {data.get("data_dlls", 0)}/{data.get("total_dlls", 0)} DLLs',
+    f'**正确率:** {data.get("fact_passed", 0)}/{data.get("fact_total", 0)} ({data.get("fact_pct", "N/A")})',
+    f'**基准测试:** {data.get("bmk_methods", 0)} 方法',
+    f'**热更新:** {data.get("hot_passed", 0)}/{data.get("hot_total", 0)} ({data.get("hot_pct", "N/A")})',
+    f'**内存Profile:** {data.get("mem_methods", 0)} 方法',
 ]
 fail_lines = data.get('fail_lines', '')
 if fail_lines:
     if fail_lines.startswith('__MANY__'):
         count = fail_lines.replace('__MANY__', '')
         parts.append('')
-        parts.append(f'**\\u5931\\u8d25\\u8be6\\u60c5:** {count} DLL(s) \\u6709\\u5931\\u8d25')
+        parts.append(f'**失败详情:** {count} DLL(s) 有失败')
     else:
         detail = fail_lines.replace('||', chr(10))
         parts.append('')
-        parts.append('**\\u5931\\u8d25\\u8be6\\u60c5:**')
+        parts.append('**失败详情:**')
         parts.append(detail)
 message = chr(10).join(parts)
 
@@ -567,12 +567,12 @@ elements = [
 actions = []
 if report_link:
     actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\\U0001f4ca \\u67e5\\u770b\\u62a5\\u544a'},
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\U0001f4ca 查看报告'},
         'url': report_link, 'type': 'default',
     })
 if build_link:
     actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\\U0001f527 Jenkins Build'},
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\U0001f527 Jenkins Build'},
         'url': build_link, 'type': 'default',
     })
 if actions:
@@ -602,8 +602,8 @@ except HTTPError as e:
 except URLError as e:
     print(f'WARNING: Feishu webhook error: {e.reason}')
     sys.exit(1)
-"
-""", returnStatus: true)
+"""
+    def notifyExit = sh(script: "python3 '${WORKSPACE}/.notify/send-feishu-card.py'", returnStatus: true)
     if (notifyExit != 0) {
         echo "WARNING: inline notification failed with exit ${notifyExit}"
     }
