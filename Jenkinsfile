@@ -476,6 +476,7 @@ except Exception:
             mem_gc: memGcStr,
             fail_lines: failLines,
         ])
+        sendFeishuCard(dataJson, webhook)
     } catch (err) {
         echo "Failed to read nightly data for notification: ${err.message}"
         def dataJson = groovy.json.JsonOutput.toJson([
@@ -501,9 +502,10 @@ except Exception:
             mem_gc: "N/A",
             fail_lines: "",
         ])
+        sendFeishuCard(dataJson, webhook)
     }
 
-    // Inline Feishu notification via Python (avoids external script dependency)
+def sendFeishuCard(dataJson, webhook) {
     def dataB64 = dataJson.bytes.encodeBase64().toString()
     def webhookB64 = webhook.bytes.encodeBase64().toString()
     def notifyExit = sh(script: """python3 -c "
@@ -511,8 +513,8 @@ import base64, json, os, sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-data = json.loads(base64.b64decode('${dataB64}').decode())
-webhook = base64.b64decode('${webhookB64}').decode()
+data = json.loads(base64.b64decode('\${dataB64}').decode())
+webhook = base64.b64decode('\${webhookB64}').decode()
 
 if not webhook:
     print('WARNING: FEISHU_WEBHOOK_URL not set')
