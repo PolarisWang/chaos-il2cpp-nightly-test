@@ -53,6 +53,8 @@ pipeline {
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"
+        // Ensure dotnet is in PATH — the linux-x64 agent may not inherit /usr/local/bin
+        PATH = "/usr/local/bin:${env.PATH}"
     }
 
     stages {
@@ -84,7 +86,7 @@ pipeline {
             steps {
                 script {
                     ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
-                    // Verify essential tools
+                    // Verify essential tools (dotnet PATH is set in environment block)
                     sh '''#!/bin/bash
                         set -euo pipefail
                         if ! command -v dotnet &>/dev/null; then
@@ -98,7 +100,8 @@ pipeline {
                             echo "cmake found: $(cmake --version | head -1)"
                         fi
                     '''
-                    // Download helper scripts from GitHub
+                        error("FATAL: dotnet not found — install dotnet SDK 8.0+10.0 on this agent")
+                    }
                     sh """
                         set -eu
                         mkdir -p "\${WORKSPACE}/scripts"
