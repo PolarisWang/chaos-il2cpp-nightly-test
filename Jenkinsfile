@@ -507,13 +507,19 @@ except Exception:
 }
 
 def sendFeishuCard(dataJson, webhook) {
+    // Write data to temp file to avoid shell quoting issues
+    sh "mkdir -p '${WORKSPACE}/.notify'"
+    writeFile file: "${WORKSPACE}/.notify/feishu-data.json", text: dataJson
+    writeFile file: "${WORKSPACE}/.notify/feishu-webhook.txt", text: webhook
     def notifyExit = sh(script: """python3 -c "
 import json, os, sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-data = json.loads('''\${dataJson}''')
-webhook_url = '''\${webhook}'''
+with open('${WORKSPACE}/.notify/feishu-data.json') as f:
+    data = json.load(f)
+with open('${WORKSPACE}/.notify/feishu-webhook.txt') as f:
+    webhook_url = f.read().strip()
 
 if not webhook_url:
     print('WARNING: FEISHU_WEBHOOK_URL not set')
