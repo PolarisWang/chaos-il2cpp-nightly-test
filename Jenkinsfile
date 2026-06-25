@@ -504,6 +504,7 @@ except Exception:
         ])
         sendFeishuCard(dataJson, webhook)
     }
+}
 
 def sendFeishuCard(dataJson, webhook) {
     def dataB64 = dataJson.bytes.encodeBase64().toString()
