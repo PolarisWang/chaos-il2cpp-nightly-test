@@ -567,12 +567,12 @@ elements = [
 actions = []
 if report_link:
     actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\U0001f4ca 查看报告'},
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '📊 查看报告'},
         'url': report_link, 'type': 'default',
     })
 if build_link:
     actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '\U0001f527 Jenkins Build'},
+        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '🔧 Jenkins Build'},
         'url': build_link, 'type': 'default',
     })
 if actions:
