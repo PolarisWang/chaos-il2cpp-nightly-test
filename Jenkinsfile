@@ -53,8 +53,7 @@ pipeline {
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"
-        // Ensure dotnet is in PATH — the linux-x64 agent may not inherit /usr/local/bin
-        PATH = "/usr/local/bin:${env.PATH}"
+        PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
     }
 
     stages {
