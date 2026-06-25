@@ -453,57 +453,55 @@ except Exception:
             }
         }
 
-        def dataJson
-        try {
-            dataJson = groovy.json.JsonOutput.toJson([
-                status: status,
-                color: color,
-                build_num: "${BUILD_NUMBER}",
-                date_tag: DATE_TAG,
-                run_tag: RUN_TAG,
-                build_config: BUILD_CONFIG,
-                build_link: buildLink,
-                report_link: reportLink,
-                data_dlls: dataDlls,
-                total_dlls: totalDlls,
-                fact_passed: factPassed,
-                fact_total: factTotal,
-                fact_pct: factPct,
-                bmk_methods: bmkMethods,
-                hot_passed: hotPassed,
-                hot_total: hotTotal,
-                hot_pct: hotPct,
-                mem_methods: memMethods,
-                mem_alloc: memAllocStr,
-                mem_gc: memGcStr,
-                fail_lines: failLines,
-            ])
-        } catch (err) {
-            echo "Failed to read nightly data for notification: ${err.message}"
-            dataJson = groovy.json.JsonOutput.toJson([
-                status: status,
-                color: color,
-                build_num: "${BUILD_NUMBER}",
-                date_tag: DATE_TAG,
-                run_tag: RUN_TAG,
-                build_config: BUILD_CONFIG,
-                build_link: buildLink,
-                report_link: reportLink,
-                data_dlls: 0,
-                total_dlls: 0,
-                fact_passed: 0,
-                fact_total: 0,
-                fact_pct: "N/A",
-                bmk_methods: 0,
-                hot_passed: 0,
-                hot_total: 0,
-                hot_pct: "N/A",
-                mem_methods: 0,
-                mem_alloc: "N/A",
-                mem_gc: "N/A",
-                fail_lines: "",
-            ])
-        }
+        def dataJson = groovy.json.JsonOutput.toJson([
+            status: status,
+            color: color,
+            build_num: "${BUILD_NUMBER}",
+            date_tag: DATE_TAG,
+            run_tag: RUN_TAG,
+            build_config: BUILD_CONFIG,
+            build_link: buildLink,
+            report_link: reportLink,
+            data_dlls: dataDlls,
+            total_dlls: totalDlls,
+            fact_passed: factPassed,
+            fact_total: factTotal,
+            fact_pct: factPct,
+            bmk_methods: bmkMethods,
+            hot_passed: hotPassed,
+            hot_total: hotTotal,
+            hot_pct: hotPct,
+            mem_methods: memMethods,
+            mem_alloc: memAllocStr,
+            mem_gc: memGcStr,
+            fail_lines: failLines,
+        ])
+    } catch (err) {
+        echo "Failed to read nightly data for notification: ${err.message}"
+        def dataJson = groovy.json.JsonOutput.toJson([
+            status: status,
+            color: color,
+            build_num: "${BUILD_NUMBER}",
+            date_tag: DATE_TAG,
+            run_tag: RUN_TAG,
+            build_config: BUILD_CONFIG,
+            build_link: buildLink,
+            report_link: reportLink,
+            data_dlls: 0,
+            total_dlls: 0,
+            fact_passed: 0,
+            fact_total: 0,
+            fact_pct: "N/A",
+            bmk_methods: 0,
+            hot_passed: 0,
+            hot_total: 0,
+            hot_pct: "N/A",
+            mem_methods: 0,
+            mem_alloc: "N/A",
+            mem_gc: "N/A",
+            fail_lines: "",
+        ])
+    }
 
     // Inline Feishu notification via Python (avoids external script dependency)
     def dataB64 = dataJson.bytes.encodeBase64().toString()
