@@ -32,6 +32,10 @@ RUN /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
     dotnet --list-runtimes | grep "8\.0" && \
     rm /tmp/dotnet-install.sh
 
+# Pre-warm .NET SDK: run 'dotnet help' to initialize NuGet caches and /tmp/.dotnet/shm
+# so parallel dotnet build invocations don't race on first-time-use migrations.
+RUN dotnet help >/dev/null 2>&1 || true
+
 RUN npm install -g @anthropic-ai/claude-code && claude --version
 
 # Install SonarScanner & Allure CLI
