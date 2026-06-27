@@ -48,6 +48,7 @@ pipeline {
     }
 
     environment {
+        BOOMING_DIR = "${BOOMING_DIR}"
         DATE_TAG = "${DATE_TAG}"
         RUN_TAG  = "${RUN_TAG}"
         REPORT_API_URL = "http://report-api:8000"
@@ -159,19 +160,21 @@ sh """
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-arm64' }
             steps {
-                sh """#!/bin/bash
-                    set -euo pipefail
-                    cd "${BOOMING_DIR}/testing/foundation-dll"
+                script {
+                    sh """#!/bin/bash
+                        set -euo pipefail
+                        cd "${BOOMING_DIR}/testing/foundation-dll"
 
-                    echo "=== [arm64] Fact Smoke ==="
-                    for dll in System.Linq System.Collections System.Text.Json; do
-                        echo "--- \${dll} ---"
-                        python3 -m verification.chunk_pipeline --assembly "\${dll}" --stages fact 2>&1 || {
-                            echo "WARNING: \${dll} fact failed"
-                            FAILED_PLATFORMS+=("arm64-\${dll}")
-                        }
-                    done
-                """
+                        echo "=== [arm64] Fact Smoke ==="
+                        for dll in System.Linq System.Collections System.Text.Json; do
+                            echo "--- \${dll} ---"
+                            python3 -m verification.chunk_pipeline --assembly "\${dll}" --stages fact 2>&1 || {
+                                echo "WARNING: \${dll} fact failed"
+                                FAILED_PLATFORMS+=("arm64-\${dll}")
+                            }
+                        done
+                    """
+                }
             }
         }
 
