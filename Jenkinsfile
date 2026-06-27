@@ -320,7 +320,7 @@ sh """
 
 def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
     try {
-        sh """
+        sh """#!/bin/bash
             set -euo pipefail
             mkdir -p "${artifactsDir}"
             sonar-scanner \
@@ -332,6 +332,8 @@ def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
                 -D sonar.language=cs \
                 -D sonar.sourceEncoding=UTF-8 \
                 -D sonar.exclusions="**/build/**/*,**/native/build/**/*" \
+                -D sonar.login="${SONAR_LOGIN:-admin}" \
+                -D sonar.password="${SONAR_PASSWORD:-admin}" \
                 2>&1 | tee "${artifactsDir}/${platform}-sonar.log"
         """
     } catch (err) {
