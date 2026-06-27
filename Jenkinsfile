@@ -29,8 +29,8 @@ pipeline {
 
     triggers {
         cron('''
-            0 3 * * *
-            15 12 * * *
+            15 4 * * *
+            0 19 * * *
         ''')
     }
 
@@ -159,7 +159,7 @@ sh """
             when { expression { env.DISPATCHED != 'true' } }
             agent { label 'linux-arm64' }
             steps {
-                sh '''#!/bin/bash
+                sh """#!/bin/bash
                     set -euo pipefail
                     cd "${BOOMING_DIR}/testing/foundation-dll"
 
@@ -171,7 +171,7 @@ sh """
                             FAILED_PLATFORMS+=("arm64-\${dll}")
                         }
                     done
-                '''
+                """
             }
         }
 
