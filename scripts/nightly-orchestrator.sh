@@ -99,9 +99,9 @@ phase_clone() {
 
     echo "ERROR: Failed to clone after 3 attempts"
     # Fallback: use cached repo
-    if [[ -d "/booming-il2cpp" ]]; then
-        echo "FALLBACK: Using cached /booming-il2cpp"
-        CLONE_DIR="/booming-il2cpp"
+    if [[ -d "/home/debian/agent/booming-il2cpp" ]]; then
+        echo "FALLBACK: Using cached /home/debian/agent/booming-il2cpp"
+        CLONE_DIR="/home/debian/agent/booming-il2cpp"
         return 0
     fi
     exit 1

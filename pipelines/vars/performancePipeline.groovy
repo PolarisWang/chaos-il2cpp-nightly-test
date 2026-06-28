@@ -2,7 +2,7 @@ def call(config = [:]) {
     def platform   = config.platform  ?: 'linux-x64'
     def iterations = config.iterations?.toInteger() ?: 3
     def buildConfig = config.buildConfig ?: 'profile'
-    def boomingDir = config.boomingDir ?: '/booming-il2cpp'
+    def boomingDir = config.boomingDir ?: '/home/debian/agent/booming-il2cpp'
     def artifactsDir = "${WORKSPACE}/perf-${BUILD_NUMBER}"
 
     stage('Perf: Init') {

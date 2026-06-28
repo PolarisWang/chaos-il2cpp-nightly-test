@@ -78,7 +78,7 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -b "$COOKIE_FILE" \
     -H "Jenkins-Crumb: $CRUMB" \
     -X POST "$JENKINS_URL/job/$JOB_NAME/buildWithParameters" \
-    -d "BOOMING_REPO=/booming-il2cpp&BUILD_CONFIG=profile" \
+    -d "BOOMING_REPO=/home/debian/agent/booming-il2cpp&BUILD_CONFIG=profile" \
     2>/dev/null)
 
 if [ "$HTTP_CODE" != "201" ]; then

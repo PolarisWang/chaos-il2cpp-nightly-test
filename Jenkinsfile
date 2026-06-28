@@ -17,7 +17,7 @@
  *   5. Generate Allure + Nightly Report → Archive → Notify
  */
 
-def BOOMING_DIR   = params.BOOMING_REPO ?: '/booming-il2cpp'
+def BOOMING_DIR   = params.BOOMING_REPO ?: '/home/debian/agent/booming-il2cpp'
 def BUILD_CONFIG  = params.BUILD_CONFIG ?: 'profile'
 def ARTIFACTS_DIR = ""
 def DATE_TAG      = new Date().format('yyyyMMdd')
@@ -41,7 +41,7 @@ pipeline {
     }
 
     parameters {
-        string(name: 'BOOMING_REPO', defaultValue: '/booming-il2cpp',
+        string(name: 'BOOMING_REPO', defaultValue: '/home/debian/agent/booming-il2cpp',
                description: 'Path to booming-il2cpp repository')
         choice(name: 'BUILD_CONFIG', choices: ['profile', 'debug', 'ship'],
                description: 'Build configuration tier')
@@ -67,7 +67,7 @@ pipeline {
                     if (env.JOB_NAME?.contains('code-review')) {
                         // No cron trigger — host trigger-code-review.sh checks and triggers via API
                         runCodeReview(
-                            repoUrl: '/booming-il2cpp',
+                            repoUrl: '/home/debian/agent/booming-il2cpp',
                             branch: params.BOOMING_BRANCH ?: 'main'
                         )
                         env.DISPATCHED = 'true'
@@ -617,7 +617,7 @@ except URLError as e:
 // ============================================================
 
 def runCodeReview(Map params = [:]) {
-    def repoUrl    = params.repoUrl    ?: '/booming-il2cpp'
+    def repoUrl    = params.repoUrl    ?: '/home/debian/agent/booming-il2cpp'
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
@@ -953,7 +953,7 @@ print('ok')
                 return
             }
             def stateData = [
-                    repo: '/booming-il2cpp',
+                    repo: '/home/debian/agent/booming-il2cpp',
                     branch: branch,
                     last_reviewed_commit: env.CURRENT_COMMIT,
                     last_reviewed_at: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),

@@ -13,7 +13,7 @@ This script replaces collect-all-results.sh as the aggregation layer
 Usage:
     python3 publish-nightly-results.py \\
         --report-dir /workspace/artifacts/nightly-run/latest \\
-        --foundation-dir /booming-il2cpp/testing/foundation-dll \\
+        --foundation-dir /home/debian/agent/booming-il2cpp/testing/foundation-dll \\
         --output-dir /workspace/artifacts \\
         --date-tag 20260622 \\
         [--run-tag run1] \\

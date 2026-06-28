@@ -8,7 +8,7 @@
         <hudson.model.StringParameterDefinition>
           <name>BOOMING_REPO</name>
           <description>Path to booming-il2cpp repository</description>
-          <defaultValue>/booming-il2cpp</defaultValue>
+          <defaultValue>/home/debian/agent/booming-il2cpp</defaultValue>
           <trim>true</trim>
         </hudson.model.StringParameterDefinition>
         <hudson.model.ChoiceParameterDefinition>

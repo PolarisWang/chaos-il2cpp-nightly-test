@@ -45,7 +45,7 @@ services:
       - jenkins-home:/var/jenkins_home
       - ./jenkins/jenkins.yaml:/usr/share/jenkins/ref/jenkins.yaml
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:ro
+      - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:ro
     networks:
       - jenkins
     restart: unless-stopped
@@ -79,7 +79,7 @@ services:
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
       <<: *external-urls
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/report-server/daily:/var/lib/report-server/daily
     networks:
@@ -102,7 +102,7 @@ services:
       - SONAR_HOST_URL=http://sonarqube:9000
       - SONAR_TOKEN=${SONAR_TOKEN:-}
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:rw
     networks:
       - jenkins
     depends_on:
@@ -123,7 +123,7 @@ services:
       - SONAR_HOST_URL=http://sonarqube:9000
       - SONAR_TOKEN=${SONAR_TOKEN:-}
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:rw
     networks:
       - jenkins
     depends_on:
@@ -156,7 +156,7 @@ services:
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
       <<: *external-urls
     volumes:
-      - /home/debian/agent/booming-il2cpp:/booming-il2cpp:rw
+      - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:rw
       - /var/lib/report-server/daily:/var/lib/report-server/daily
       - /home/jenkins/cr:/home/jenkins
     networks:

@@ -29,7 +29,7 @@ done
 if [[ -z "$FOUNDATION_DIR" ]]; then
     for candidate in \
         "${REPO_ROOT}/testing/foundation-dll" \
-        "/booming-il2cpp/testing/foundation-dll"; do
+        "/home/debian/agent/booming-il2cpp/testing/foundation-dll"; do
         if [[ -d "$candidate" ]]; then
             FOUNDATION_DIR="$candidate"
             break
