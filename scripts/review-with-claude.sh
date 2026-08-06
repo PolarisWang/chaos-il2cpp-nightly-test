@@ -193,11 +193,16 @@ if [[ -n "$DIFF" && "$DIFF_LINES" -gt 0 ]]; then
     TRUNCATION_RESULT=$(echo "$DIFF" | python3 -c '
 import sys
 
-# deepseek-v4-flash: 1,048,565 total tokens
-MAX_TOTAL_TOKENS = 1048565
-COMPLETION_TOKENS = 32000
+# deepseek-v4-flash: 1,048,565 total tokens (max context 1048576)
+# NB: must reserve the REAL completion size. With CLAUDE_CODE_EFFORT=max the
+# completion is 131072 tokens, NOT 32000. Under-reserving it let the prompt grow
+# past the hard limit -> "maximum context length exceeded" 400 error -> every
+# review build failed. Reserve ~138000 and use a conservative chars/token (code is
+# denser than prose, ~3.0 not 4.0) so message+completion stays under 1048576.
+MAX_TOTAL_TOKENS = 1048500
+COMPLETION_TOKENS = 138000   # fits the 131072 completion from effort=max
 PROMPT_OVERHEAD_TOKENS = 2000  # instructions + commit log + formatting
-CHARS_PER_TOKEN = 4.0
+CHARS_PER_TOKEN = 3.0
 
 available = MAX_TOTAL_TOKENS - COMPLETION_TOKENS - PROMPT_OVERHEAD_TOKENS
 
