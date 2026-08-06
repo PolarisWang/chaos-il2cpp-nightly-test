@@ -48,85 +48,58 @@ case "$COLOR" in
     *)     FEISHU_COLOR="green" ;;
 esac
 
-TIMESTAMP=$(date +%s)
+# Build the payload and send in PYTHON, which escapes the message/title/link values
+# correctly. The previous implementation interpolated ${MESSAGE} raw into a JSON
+# heredoc, so any multi-line message produced invalid JSON -> python json.load fail ->
+# under `set -e` the whole script quietly exits 1 and NOTHING is sent (the monitor's
+# failure alerts, which embed newlines, never arrived). Value fields (which can be
+# multi-line / contain secrets) are passed as env vars, NOT exported globally.
+# FEISHU_WEBHOOK_URL is the only pre-existing env var and is required.
+MSG_VALUE="$MESSAGE" TITLE_VALUE="$TITLE" COLOR_VALUE="$FEISHU_COLOR" \
+REPORT_VALUE="$REPORT_LINK" BUILD_VALUE="$BUILD_LINK" \
+python3 <<'PYEOF'
+import json, os, subprocess, sys, datetime
 
-# Write payload via heredoc into a temp file, then use Python to add buttons
-_TMPFILE=$(mktemp)
-cat > "$_TMPFILE" << PAYLOADEOF
-{
+data = {
     "msg_type": "interactive",
     "card": {
         "header": {
-            "title": {"tag": "plain_text", "content": "${TITLE}"},
-            "template": "${FEISHU_COLOR}"
+            "title": {"tag": "plain_text", "content": os.environ["TITLE_VALUE"]},
+            "template": os.environ["COLOR_VALUE"],
         },
         "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": "${MESSAGE}"}
-            },
-            {"tag": "hr"}
-        ]
-    }
+            {"tag": "div", "text": {"tag": "lark_md", "content": os.environ["MSG_VALUE"]}},
+            {"tag": "hr"},
+        ],
+    },
 }
-PAYLOADEOF
-
-# Inject action buttons via Python
-python3 > /dev/null 2>&1 << PYEOF
-import json
-
-with open("$_TMPFILE", "r") as f:
-    data = json.load(f)
-
-elements = data["card"]["elements"]
+els = data["card"]["elements"]
 actions = []
-
-if "$REPORT_LINK":
-    actions.append({
-        "tag": "button",
-        "text": {"tag": "plain_text", "content": "📊 查看报告"},
-        "url": "$REPORT_LINK",
-        "type": "default"
-    })
-
-if "$BUILD_LINK":
-    actions.append({
-        "tag": "button",
-        "text": {"tag": "plain_text", "content": "🔧 Jenkins Build"},
-        "url": "$BUILD_LINK",
-        "type": "default"
-    })
-
+for value, text in ((os.environ.get("REPORT_VALUE", ""), "📊 查看报告"),
+                    (os.environ.get("BUILD_VALUE", ""), "🔧 Jenkins Build")):
+    if value:
+        actions.append({"tag": "button", "text": {"tag": "plain_text", "content": text},
+                        "url": value, "type": "default"})
 if actions:
-    elements.append({
-        "tag": "action",
-        "actions": actions
-    })
-    elements.append({"tag": "hr"})
+    els.append({"tag": "action", "actions": actions})
+    els.append({"tag": "hr"})
+els.append({"tag": "note", "elements": [
+    {"tag": "plain_text", "content": "chaos-il2cpp CI · " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+]})
 
-# Footer timestamp
-elements.append({
-    "tag": "note",
-    "elements": [
-        {"tag": "plain_text", "content": "chaos-il2cpp CI · $(date '+%Y-%m-%d %H:%M:%S')"}
-    ]
-})
-
-with open("$_TMPFILE", "w") as f:
-    json.dump(data, f, ensure_ascii=False)
+payload = json.dumps(data, ensure_ascii=False)
+webhook = os.environ["FEISHU_WEBHOOK_URL"]
+r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                    "-X", "POST", webhook, "-H", "Content-Type: application/json",
+                    "-d", payload], capture_output=True, text=True)
+code = r.stdout.strip()
+print("Feishu notification sent (HTTP %s)" % code if code.startswith(("2", "3"))
+      else "WARNING: Feishu webhook returned HTTP %s" % code)
+sys.exit(0 if code.startswith(("2", "3")) else 1)
 PYEOF
-
-PAYLOAD=$(cat "$_TMPFILE")
-rm -f "$_TMPFILE"
-
-# Send to Feishu
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST "$WEBHOOK_URL" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" 2>/dev/null) || HTTP_CODE=000
-
-if [[ "$HTTP_CODE" -ge 200 && "$HTTP_CODE" -lt 300 ]]; then
-    echo "Feishu notification sent (HTTP ${HTTP_CODE})"
-else
-    echo "WARNING: Feishu webhook returned HTTP ${HTTP_CODE}"
+# propagate the send result; on failure surface it to stderr too
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "WARNING: Feishu send failed (rc=$RC)" >&2
 fi
+exit "$RC"
