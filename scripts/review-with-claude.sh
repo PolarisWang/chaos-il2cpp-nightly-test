@@ -444,11 +444,27 @@ PROMPT_HEADER
 PROMPT_FOOTER
 } > "$PROMPT_FILE"
 
-# Pass prompt via stdin redirection (not pipe) to avoid SIGPIPE with pipefail
-CLAUDE_OUTPUT=$(claude --print < "$PROMPT_FILE") || {
-    echo "ERROR: claude --print failed" >&2
+# Pass prompt via stdin redirection (not pipe) to avoid SIGPIPE with pipefail.
+# On failure claude can report API errors (e.g. "maximum context length exceeded",
+# 400) on stdout, stderr, or both — as in the token-budget overflow that previously
+# got swallowed behind a bare "claude --print failed". Capture both streams and, on
+# a non-zero exit, surface the real cause so a future failure is self-explanatory.
+OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
+set +e
+claude --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+CLAUDE_RC=$?
+set -e
+if [ "$CLAUDE_RC" -ne 0 ]; then
+    echo "ERROR: claude --print failed (rc=$CLAUDE_RC)" >&2
+    if [ -s "$OUT_CAP" ]; then echo "----- claude output -----" >&2; tail -8 "$OUT_CAP" >&2; fi
+    if [ -s "$ERR_CAP" ]; then echo "----- claude stderr -----" >&2; tail -8 "$ERR_CAP" >&2; fi
+    echo "-------------------------" >&2
+    rm -f "$OUT_CAP" "$ERR_CAP"
     exit 1
-}
+fi
+CLAUDE_OUTPUT=$(cat "$OUT_CAP")
+[ -z "$CLAUDE_OUTPUT" ] && CLAUDE_OUTPUT=$(cat "$ERR_CAP")
+rm -f "$OUT_CAP" "$ERR_CAP"
 
 # Extract JSON from Claude output (strips leading text and markdown fences)
 CLAUDE_JSON=$(echo "$CLAUDE_OUTPUT" | python3 -c '
