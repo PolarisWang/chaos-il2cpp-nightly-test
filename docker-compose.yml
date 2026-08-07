@@ -59,6 +59,7 @@ services:
       dockerfile: linux-x64-agent/Dockerfile
     image: chaos-agent-linux-x64:latest
     container_name: chaos-agent-x64
+    init: true
     environment:
       JENKINS_MASTER_URL: http://chaos-master:8080
       JENKINS_AGENT_NAME: linux-x64
@@ -94,6 +95,7 @@ services:
       dockerfile: linux-arm64-agent/Dockerfile
     image: chaos-agent-linux-arm64:latest
     container_name: chaos-agent-arm64
+    init: true
     environment:
       - JENKINS_MASTER_URL=http://chaos-master:8080
       - JENKINS_AGENT_NAME=linux-arm64
@@ -115,6 +117,7 @@ services:
       dockerfile: android-arm64-agent/Dockerfile
     image: chaos-agent-android-arm64:latest
     container_name: chaos-agent-android
+    init: true
     environment:
       - JENKINS_MASTER_URL=http://chaos-master:8080
       - JENKINS_AGENT_NAME=android-arm64
@@ -136,6 +139,7 @@ services:
   linux-x64-cr-agent:
     image: chaos-agent-linux-x64:latest
     container_name: chaos-agent-cr
+    init: true
     environment:
       JENKINS_MASTER_URL: http://chaos-master:8080
       JENKINS_AGENT_NAME: linux-x64-cr
