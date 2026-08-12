@@ -112,6 +112,11 @@ retry git fetch origin "refs/pull/${PR_NUM}/head:refs/heads/pr-${PR_NUM}" 2>/dev
     exit 0
 }
 git update-ref "refs/heads/pr-${PR_NUM}" "${PR_HEAD}" 2>/dev/null || true
+# Ensure the BASE commit is reachable from a branch too, so the Jenkins cache can fetch it
+# over the local path (fresh caches don't hold arbitrary base SHAs).
+if [ -n "${PR_BASE}" ]; then
+    git update-ref "refs/heads/pr-${PR_NUM}-base" "${PR_BASE}" 2>/dev/null || true
+fi
 
 # ── Step 6: lock + trigger Jenkins (crumb+cookie, same as trigger-code-review) ──
 if [ -f "$LOCK_FILE" ]; then

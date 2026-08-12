@@ -734,12 +734,15 @@ def runCodeReview(Map params = [:]) {
             def fromCommit
             def toCommit = env.CURRENT_COMMIT
             if (isPrReview) {
-                // Pull the PR head ref (pre-created as a real refs/heads/pr-<N> branch in the
-                // shared booming clone by trigger-pr-review.sh) into this cache so
-                // review-with-claude.sh can diff base..head. Local-path fetch = no TLS flakiness.
+                // Pull the PR head + base refs (created as real refs/heads/pr-<N> and
+                // refs/heads/pr-<N>-base branches in the shared booming clone by
+                // trigger-pr-review.sh) into this cache so review-with-claude.sh can diff
+                // base..head. Local-path fetch = no TLS flakiness. Both must be fetched
+                // because a fresh cache may not hold the base SHA.
                 sh """
                     cd '${boomingDir}'
                     git fetch origin 'refs/heads/pr-${prNumber}:refs/remotes/origin/pr-${prNumber}' 2>/dev/null || true
+                    git fetch origin 'refs/heads/pr-${prNumber}-base:refs/remotes/origin/pr-${prNumber}-base' 2>/dev/null || true
                 """
                 fromCommit = prBase
                 toCommit   = prHead
