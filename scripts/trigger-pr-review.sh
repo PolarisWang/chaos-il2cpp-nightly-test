@@ -102,12 +102,16 @@ if [ -n "${REVIEWED[$PR_NUM]:-}" ] && [ "${REVIEWED[$PR_NUM]}" = "$PR_HEAD" ]; t
     exit 0
 fi
 
-# ── Step 5: fetch the PR head into the local repo (so Jenkins can diff base..head) ──
+# ── Step 5: fetch the PR head into the local repo as a real branch (so the Jenkins
+# cache can pull it over the local file path and review base..head).
+# NB: must be refs/heads/* — fetching refs/remotes/origin/pr-* does NOT transfer the
+# object from this non-bare repo (git upload-pack skips remote-tracking refs).
 log "PR #${PR_NUM} needs review: base ${PR_BASE:0:8}..head ${PR_HEAD:0:8}"
-retry git fetch origin "refs/pull/${PR_NUM}/head:refs/remotes/origin/pr-${PR_NUM}" 2>/dev/null || {
+retry git fetch origin "refs/pull/${PR_NUM}/head:refs/heads/pr-${PR_NUM}" 2>/dev/null || {
     log "failed to fetch PR #${PR_NUM} head (after retries); skipping"
     exit 0
 }
+git update-ref "refs/heads/pr-${PR_NUM}" "${PR_HEAD}" 2>/dev/null || true
 
 # ── Step 6: lock + trigger Jenkins (crumb+cookie, same as trigger-code-review) ──
 if [ -f "$LOCK_FILE" ]; then
