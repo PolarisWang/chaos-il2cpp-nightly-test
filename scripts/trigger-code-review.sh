@@ -21,9 +21,21 @@ JENKINS_URL="http://localhost:8080"
 JOB_NAME="chaos-il2cpp-code-review"
 LOCK_TIMEOUT=1800  # 30 minutes — lock expires after this
 
+# Retry helper — GitHub TLS handshakes fail intermittently from this box
+# (GnuTLS "non-properly terminated"), so retry with a short backoff.
+retry() {
+    local n=0
+    until "$@"; do
+        n=$((n+1))
+        if [ "$n" -ge 3 ]; then return 1; fi
+        sleep 2
+    done
+    return 0
+}
+
 # ── Step 1: Sync local repo with GitHub ──
 cd "$BOOMING_DIR"
-git fetch origin 2>/dev/null || { echo "git fetch failed"; exit 0; }
+retry git fetch origin 2>/dev/null || { echo "git fetch failed (after retries)"; exit 0; }
 git update-ref refs/heads/main origin/main 2>/dev/null || true
 
 # ── Step 2: Compare HEAD with last reviewed commit ──

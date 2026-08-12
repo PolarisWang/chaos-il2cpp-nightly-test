@@ -45,6 +45,12 @@ pipeline {
                description: 'Path to booming-il2cpp repository')
         choice(name: 'BUILD_CONFIG', choices: ['profile', 'debug', 'ship'],
                description: 'Build configuration tier')
+        // PR-review params — set by trigger-pr-review.sh when reviewing a pull request
+        // (base..head). Empty = normal main-branch commit review.
+        string(name: 'REVIEW_BASE', defaultValue: '', description: 'PR base SHA (base of diff)')
+        string(name: 'REVIEW_HEAD', defaultValue: '', description: 'PR head SHA (head of diff)')
+        string(name: 'REVIEW_PR_NUMBER', defaultValue: '', description: 'GitHub PR number')
+        string(name: 'REVIEW_PR_TITLE', defaultValue: '', description: 'GitHub PR title')
     }
 
     environment {
@@ -65,10 +71,15 @@ pipeline {
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
-                        // No cron trigger — host trigger-code-review.sh checks and triggers via API
+                        // No cron trigger — host trigger-code-review.sh / trigger-pr-review.sh
+                        // check and trigger via API, optionally with PR base/head params.
                         runCodeReview(
                             repoUrl: '/home/debian/agent/booming-il2cpp',
-                            branch: params.BOOMING_BRANCH ?: 'main'
+                            branch: params.BOOMING_BRANCH ?: 'main',
+                            prBase:   params.REVIEW_BASE   ?: '',
+                            prHead:   params.REVIEW_HEAD   ?: '',
+                            prNumber: params.REVIEW_PR_NUMBER ?: '',
+                            prTitle:  params.REVIEW_PR_TITLE  ?: ''
                         )
                         env.DISPATCHED = 'true'
                     }
@@ -620,11 +631,21 @@ def runCodeReview(Map params = [:]) {
     def repoUrl    = params.repoUrl    ?: '/home/debian/agent/booming-il2cpp'
     def branch     = params.branch     ?: 'main'
     def stateFile  = params.stateFile  ?: '/var/lib/report-server/daily/last-reviewed-commit.json'
+    def prStateFile = '/var/lib/report-server/daily/pr-reviewed-head.json'
     def workspaceDir = "${env.WORKSPACE}/code-review"
     def repoCache    = "/home/jenkins/booming-il2cpp-cache"        // Persist across builds
     def boomingDir   = repoCache                                   // Use cached repo
     def findingsFile = "${workspaceDir}/findings.json"
     def SCRIPT_DIR   = "${workspaceDir}/scripts"
+
+    // PR-review mode: when REVIEW_HEAD is set, this build reviews PR base..head and
+    // posts a PR-titled card, then records the reviewed head in pr-reviewed-head.json.
+    def prBase   = (params.prBase   ?: '').trim()
+    def prHead   = (params.prHead   ?: '').trim()
+    def prNumber = (params.prNumber ?: '').trim()
+    def prTitle  = (params.prTitle  ?: '').trim()
+    def isPrReview = prHead != ''
+    echo "runCodeReview mode: ${isPrReview ? 'PR #' + prNumber + ' ' + prBase + '..' + prHead : 'main-branch commits'}"
 
     // NOTE: no node() blocks inside — runCodeReview is already called from
     // inside a node('linux-x64') in the Dispatch stage. Nested node() calls
@@ -661,8 +682,9 @@ def runCodeReview(Map params = [:]) {
                 echo "State file not found or invalid, treating as first run"
             }
 
-            // Quick skip check: compare local HEAD vs last reviewed
-            if (env.LAST_REVIEWED_COMMIT) {
+            // Quick skip check: compare local HEAD vs last reviewed (main-branch mode only;
+            // PR mode keeps its own per-PR head tracking in pr-reviewed-head.json).
+            if (!isPrReview && env.LAST_REVIEWED_COMMIT) {
                 def localHead = sh(
                     script: "cd '${repoUrl}' && git rev-parse HEAD 2>/dev/null || echo ''",
                     returnStdout: true
@@ -709,26 +731,51 @@ def runCodeReview(Map params = [:]) {
             echo "Repo synced @ ${env.CURRENT_COMMIT}"
 
             // Compute Diff
-            def fromCommit = env.LAST_REVIEWED_COMMIT
-            if (!fromCommit) {
-                fromCommit = sh(
-                    script: "cd '${boomingDir}' && git rev-list --max-parents=0 HEAD 2>/dev/null || echo ''",
-                    returnStdout: true
-                ).trim()
+            def fromCommit
+            def toCommit = env.CURRENT_COMMIT
+            if (isPrReview) {
+                // Pull the PR head ref (pre-fetched into the shared booming clone by
+                // trigger-pr-review.sh as refs/remotes/origin/pr-<N>) into this cache so
+                // review-with-claude.sh can diff base..head. Local-path fetch = no TLS flakiness.
+                sh """
+                    cd '${boomingDir}'
+                    git fetch origin 'refs/remotes/origin/pr-${prNumber}:refs/remotes/origin/pr-${prNumber}' 2>/dev/null || true
+                """
+                fromCommit = prBase
+                toCommit   = prHead
+                echo "PR review range: ${fromCommit}..${toCommit} (PR #${prNumber})"
+                // Guard: both endpoints must be resolvable in the cache, else fail loudly.
+                def ok = sh(returnStatus: true, script: """\
+cd '${boomingDir}'
+git rev-parse --verify --quiet '${fromCommit}^{commit}' >/dev/null && \\
+git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
+""")
+                if (ok != 0) {
+                    error "PR range endpoints not both present locally: ${fromCommit}..${toCommit}"
+                }
+            } else {
+                fromCommit = env.LAST_REVIEWED_COMMIT
+                if (!fromCommit) {
+                    fromCommit = sh(
+                        script: "cd '${boomingDir}' && git rev-list --max-parents=0 HEAD 2>/dev/null || echo ''",
+                        returnStdout: true
+                    ).trim()
+                }
+                echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
             }
-            echo "Diff range: ${fromCommit}..${env.CURRENT_COMMIT}"
             def commitCount = sh(
-                script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${env.CURRENT_COMMIT}' 2>/dev/null || echo '0'",
+                script: "cd '${boomingDir}' && git rev-list --count '${fromCommit}'..'${toCommit}' 2>/dev/null || echo '0'",
                 returnStdout: true
             ).trim()
             if (commitCount == '0') {
                 currentBuild.result = 'SUCCESS'
-                echo "No new commits since last review — skipping"
+                echo "No commits in ${fromCommit}..${toCommit} — skipping"
                 env.REVIEW_SKIPPED = 'true'
                 return
             }
             env.REVIEW_SKIPPED = 'false'
             env.REVIEW_FROM = fromCommit
+            env.REVIEW_TO = toCommit
             echo "New commits: ${commitCount}"
         }
     }
@@ -742,7 +789,7 @@ def runCodeReview(Map params = [:]) {
                     bash '${SCRIPT_DIR}/review-with-claude.sh' \
                         --repo-dir    '${boomingDir}' \
                         --from-commit '${env.REVIEW_FROM}' \
-                        --to-commit   '${env.CURRENT_COMMIT}' \
+                        --to-commit   '${env.REVIEW_TO}' \
                         --output      '${findingsFile}'
                 """
 
@@ -776,7 +823,7 @@ def runCodeReview(Map params = [:]) {
 
                 def colorTag = critCount > 0 || highCount > 0 ? 'red' : (medCount > 0 ? 'blue' : 'green')
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
-                def feishuTitle = "chaos-il2cpp 代码审查 — ${riskWord}"
+                def feishuTitle = isPrReview ? "chaos-il2cpp PR #${prNumber} 代码审查 — ${riskWord}" : "chaos-il2cpp 代码审查 — ${riskWord}"
                 def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
 
                 sh """
@@ -788,7 +835,12 @@ import json, os, urllib.request, subprocess
 # Extract commits from git log (not findings JSON — Claude may omit them)
 booming_dir = '${boomingDir}'
 from_commit = '${env.REVIEW_FROM}'
-to_commit = '${env.CURRENT_COMMIT}'
+to_commit = '${env.REVIEW_TO}'
+is_pr = '${isPrReview}' == 'true'
+pr_number = '${prNumber}'
+pr_title = '${prTitle}'
+# Blob links should point at the PR head's code, not main's CURRENT_COMMIT.
+file_sha = '${isPrReview ? prHead : env.CURRENT_COMMIT}'
 commits = []
 try:
     result = subprocess.run(
@@ -811,14 +863,18 @@ except Exception:
     d = {}
 flist = d.get('findings', [])
 
-# Build commit list with emoji + links
-cl = []
-for c in commits[:5]:
-    sha = c.get('sha', '')[:7]
-    msg = c.get('message', '')
-    url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-    cl.append('  • [[' + sha + '] ' + msg + '](' + url + ')')
-ct = chr(10).join(cl) if cl else '  （无新提交）'
+# PR mode: show the PR itself rather than a flat commit list.
+if is_pr and pr_number:
+    pr_url = 'https://github.com/PolarisWang/booming-il2cpp/pull/' + pr_number
+    cl = ['  • [[PR #' + pr_number + '] ' + (pr_title or '') + '](' + pr_url + ')']
+else:
+    cl = []
+    for c in commits[:5]:
+        sha = c.get('sha', '')[:7]
+        msg = c.get('message', '')
+        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+        cl.append('  • [[' + sha + '] ' + msg + '](' + url + ')')
+ct = chr(10).join(cl) if cl else ('  （无新提交）' if not is_pr else '  PR #' + pr_number)
 
 # Build findings list with emoji per severity
 severity_icons = {'CRITICAL': '🔴', 'HIGH': '🟠', 'MEDIUM': '🔵', 'LOW': '⚪'}
@@ -833,7 +889,7 @@ for fx in flist[:10]:
     ln = fx.get('line', 0)
     msg = fx.get('message', '')
     fname = fp.split('/')[-1] if '/' in fp else fp
-    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/${env.CURRENT_COMMIT}/' + fp + '#L' + str(ln)
+    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + '#L' + str(ln)
     flines.append('  ' + icon + ' **' + label + '** [' + cat + '] [' + fname + ':' + str(ln) + '](' + furl + ') ' + msg)
 if len(flist) > 10:
     flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
@@ -859,8 +915,12 @@ else:
     risk_line = '✅ 本次未发现代码问题'
 
 commit_count = len(commits)
+if is_pr and pr_number:
+    scope_line = '📋 **审查范围:** PR #' + pr_number + '（' + str(commit_count) + ' 个提交）' + (' — ' + pr_title if pr_title else '')
+else:
+    scope_line = '📋 **审查范围:** ' + str(commit_count) + ' 个提交'
 lines = [
-    '📋 **审查范围:** ' + str(commit_count) + ' 个提交',
+    scope_line,
     '',
     '**新提交:**',
     ct,
@@ -952,25 +1012,42 @@ print('ok')
                 echo "Skipped, no state update needed"
                 return
             }
-            def stateData = [
-                    repo: '/home/debian/agent/booming-il2cpp',
-                    branch: branch,
-                    last_reviewed_commit: env.CURRENT_COMMIT,
-                    last_reviewed_at: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
-                    findings_last_run: [
-                        critical: env.FINDINGS_CRIT.toInteger(),
-                        high: env.FINDINGS_HIGH.toInteger(),
-                        medium: env.FINDINGS_MED.toInteger(),
-                        low: env.FINDINGS_LOW.toInteger()
+            if (isPrReview) {
+                // PR mode: record the reviewed head per PR so the poller stops re-triggering.
+                def prState = [:]
+                try {
+                    def s = sh(script: "cat '${prStateFile}' 2>/dev/null || echo '{}'", returnStdout: true).trim()
+                    prState = readJSON(text: s)
+                } catch (err) {
+                    prState = [:]
+                }
+                prState["${prNumber}"] = prHead
+                writeJSON(file: prStateFile, json: prState, pretty: 2)
+                echo "PR state updated: #${prNumber} -> ${prHead} (${prStateFile})"
+                // Release the PR poller lock so the next PR/update can be picked up.
+                sh "rm -f /var/lib/report-server/daily/cr-pr-trigger.lock"
+                echo "PR trigger lock removed"
+            } else {
+                def stateData = [
+                        repo: '/home/debian/agent/booming-il2cpp',
+                        branch: branch,
+                        last_reviewed_commit: env.CURRENT_COMMIT,
+                        last_reviewed_at: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                        findings_last_run: [
+                            critical: env.FINDINGS_CRIT.toInteger(),
+                            high: env.FINDINGS_HIGH.toInteger(),
+                            medium: env.FINDINGS_MED.toInteger(),
+                            low: env.FINDINGS_LOW.toInteger()
+                        ]
                     ]
-                ]
-                writeJSON(file: stateFile, json: stateData, pretty: 2)
-                echo "State updated: ${stateFile}"
+                    writeJSON(file: stateFile, json: stateData, pretty: 2)
+                    echo "State updated: ${stateFile}"
 
-                // Remove trigger lock so next commit detection can fire
-                sh "rm -f /var/lib/report-server/daily/cr-trigger.lock"
-                echo "Trigger lock removed"
+                    // Remove trigger lock so next commit detection can fire
+                    sh "rm -f /var/lib/report-server/daily/cr-trigger.lock"
+                    echo "Trigger lock removed"
             }
+        }
     }
 }
 
