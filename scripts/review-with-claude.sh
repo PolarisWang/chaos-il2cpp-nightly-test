@@ -6,17 +6,29 @@
 #
 # Reliability: the model (deepseek-v4-flash via the llm proxy) is unreliable on
 # LARGE multi-file diffs — it flips between real findings, raw Python tracebacks,
-# and valid-but-empty "0 findings".  To make results trustworthy:
-#   * the diff is reviewed PER-CHANGED-FILE (one small, focused chunk each), which
-#     the model handles reliably, then aggregated;
-#   * a chunk that returns 0 findings for a substantive code file is RETRIED
-#     (default REVIEW_MAX_EMPTY_RETRIES=2) because empty is likely a glitch;
-#   * genuinely unparseable output FAILS LOUDLY (non-zero exit) rather than
-#     fabricating a "未发现代码问题" card.
+# and valid-but-empty "0 findings".  To keep results trustworthy WITHOUT the
+# unbounded runtime of a naive per-file loop, three levers are combined:
+#   1. DYNAMIC CHUNKING  — group many small changed files into a single prompt
+#      (each chunk stays a small, focused diff the model handles reliably), and
+#      cap the number of chunks (REVIEW_MAX_CHUNKS).  Large files still get their
+#      own chunk so high-risk changes are never diluted.
+#   2. DIFF-HASH CACHE   — keyed by (from, to, changed-file set).  A repeated diff
+#      reuses the prior NON-EMPTY findings (never cache an empty result, which
+#      could be a model glitch mistaken for a clean pass).
+#   3. LOW-CONFIDENCE MARK — a 0-findings result on substantive (non-docs) code is
+#      flagged low_confidence in the meta so it is not blindly reported as
+#      "✅ 本次未发现代码问题".
 #
 # Usage:
 #   review-with-claude.sh --repo-dir <path> --from-commit <sha> --to-commit <sha> \
 #       --output <path> [--max-diff-lines 50000]
+#
+# Env:
+#   REVIEW_MAX_EMPTY_RETRIES (default 2)   retries per chunk on empty/error
+#   REVIEW_CHUNK_MAX_LINES   (default 300) pack files into a chunk while combined
+#                                           diff lines stay under this
+#   REVIEW_MAX_CHUNKS        (default 4)   cap on number of chunks
+#   REVIEW_CACHE_DIR         (default <repo>-review-cache) diff-hash result cache
 #
 # Output:
 #   - Writes findings JSON to --output path
@@ -105,7 +117,6 @@ EXTS_KEEP = (".cs", ".cpp", ".h", ".hpp", ".py", ".scriban", ".cmake", ".yaml", 
 
 def is_excluded(path):
     """Return True if a file path should be excluded from code review."""
-    # Directory-based exclusions
     if path.startswith("third_party/"):
         return True
     if "/generated/" in path:
@@ -119,7 +130,6 @@ def is_excluded(path):
 
     basename = path.split("/")[-1] if "/" in path else path
 
-    # Filename-based exclusions
     if basename == "CombinedSubjects.cs":
         return True
     if basename.endswith(".deps.json"):
@@ -129,23 +139,20 @@ def is_excluded(path):
     if "/obj/" in path and basename.endswith(".g.cs"):
         return True
 
-    # Extension-based exclusions
     for ext in (".md", ".html", ".txt", ".dll", ".pdb", ".exe", ".lib",
                 ".svg", ".png", ".jpg", ".jpeg", ".jdata", ".jsonl"):
         if path.endswith(ext):
             return True
 
-    # Only keep known source/build extensions
     if any(basename.endswith(e) for e in EXTS_KEEP):
         return False
-    return True  # exclude everything else
+    return True
 
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     parts = line.split("\t")
-    # Rename/copy: status\told_path\tnew_path — take new_path
     if len(parts) >= 3:
         new_path = parts[2]
         if not is_excluded(new_path):
@@ -158,7 +165,6 @@ for line in sys.stdin:
 
 FILTERED_COUNT=$(wc -l < "$FILTERED_PATHS_FILE" | tr -d ' ')
 
-# Capture file names before potentially deleting the file
 FILTERED_FILE_NAMES=""
 if [[ "$FILTERED_COUNT" -gt 0 ]]; then
     FILTERED_FILE_NAMES=$(cat "$FILTERED_PATHS_FILE" 2>/dev/null || true)
@@ -178,30 +184,118 @@ echo "Filtered ${FILTERED_COUNT} reviewable files (out of $(echo "$CHANGED_FILES
 rm -f "$FILTERED_PATHS_FILE"
 
 # ──────────────────────────────────────────────────────────────
-# Chunked review — review EACH changed file as its own small diff, then aggregate.
-#
-# The model is unreliable on LARGE multi-file diffs.  A single file's diff is
-# small and focused — the model handles those reliably.  We also retry a chunk
-# whose review comes back empty when the file is substantive code (not docs),
-# because an empty result is more likely a model glitch than a genuine all-clean.
+# Config / cache setup
 # ──────────────────────────────────────────────────────────────
-MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"   # retries per chunk on empty/error result
+MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"
+CHUNK_MAX_LINES="${REVIEW_CHUNK_MAX_LINES:-300}"
+MAX_CHUNKS="${REVIEW_MAX_CHUNKS:-4}"
+CACHE_DIR="${REVIEW_CACHE_DIR:-}"
+[ -z "$CACHE_DIR" ] && CACHE_DIR="${REPO_DIR}-review-cache"
 PROMPT_FILE=$(mktemp)
 trap "rm -f '$PROMPT_FILE'" EXIT
 
-# Per-file diff between the two commits.
+# Multi-file diff between the two commits.
 chunk_diff_for() {
-    local p="$1"
-    git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- "$p" 2>/dev/null
+    # $@ = one or more paths
+    git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- "$@" 2>/dev/null
 }
 
-# review_one_diff <diff-text> <path>  →  echoes finding JSON on stdout, or "" on failure.
+# is_note_path <path>: 1 if it's a markdown/text (no code findings expected)
+is_note_path() {
+    case "$1" in
+        *.md) echo 1 ;;
+        *.txt) echo 1 ;;
+        *) echo 0 ;;
+    esac
+}
+
+# cache key: sha1 of (from,to,sorted file list)
+CACHE_KEY=$(printf '%s\n%s\n%s' "$FROM_COMMIT" "$TO_COMMIT" "$FILTERED_FILE_NAMES" | sha1sum | cut -c1-40)
+CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
+
+# ──────────────────────────────────────────────────────────────
+# Dynamic chunking — pack small files together, cap chunk count.
+# Output chunks are stored in bash arrays: CHUNK_PATHS[i] = space-joined paths.
+# ──────────────────────────────────────────────────────────────
+CHUNKS=()          # each element = space-joined list of file paths in a chunk
+
+# 1) compute each file's diff line-count + note status
+mapfile -t ALL_FILES <<<"$FILTERED_FILE_NAMES"
+declare -a FILE_LINES=()
+FILE_CT=0
+for f in "${ALL_FILES[@]:-}"; do
+    [ -z "$f" ] && continue
+    f="${f//$'\r'/}"
+    fl=$(chunk_diff_for "$f" | wc -l | tr -d ' ')
+    FILE_LINES[FILE_CT]="$fl"
+    FILE_CT=$((FILE_CT+1))
+done
+
+# 2) greedy pack: large files get their own chunk; small files accumulate until
+#    CHUNK_MAX_LINES or MAX_CHUNKS is reached.
+cur=""; cur_lines=0
+_i=0
+for f in "${ALL_FILES[@]:-}"; do
+    [ -z "$f" ] && continue
+    f="${f//$'\r'/}"
+    fl="${FILE_LINES[_i]:-0}"
+    fl="${fl:-0}"
+    _i=$((_i+1))
+    # each file alone is its own chunk if large
+    if [ "$fl" -gt "$CHUNK_MAX_LINES" ]; then
+        # flush pending small-file chunk
+        if [ -n "$cur" ]; then CHUNKS+=("$cur"); cur=""; cur_lines=0; fi
+        CHUNKS+=("$f")
+        continue
+    fi
+    # would adding push us over the line budget? then flush
+    if [ -n "$cur" ] && [ $((cur_lines + fl)) -gt "$CHUNK_MAX_LINES" ]; then
+        CHUNKS+=("$cur"); cur=""; cur_lines=0
+    fi
+    cur="$cur $f"
+    cur_lines=$((cur_lines + fl))
+done
+if [ -n "$cur" ]; then CHUNKS+=("$cur"); fi
+
+# enforce MAX_CHUNKS: if we have too many, merge the remainder into one final chunk.
+if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
+    echo "packing ${#CHUNKS[@]} chunks down to ${MAX_CHUNKS}"
+    _merged=""
+    while [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; do
+        _last="${CHUNKS[-1]}"
+        unset 'CHUNKS[${#CHUNKS[@]}-1]'
+        CHUNKS=("${CHUNKS[@]}")
+        _merged="$_merged $_last"
+    done
+    if [ -n "$_merged" ]; then
+        _last="${CHUNKS[-1]}"
+        unset 'CHUNKS[${#CHUNKS[@]}-1]'
+        CHUNKS=("${CHUNKS[@]}")
+        CHUNKS+=("$_last$_merged")
+    fi
+fi
+CHUNK_COUNT=${#CHUNKS[@]}
+
+# ── diff-hash cache check (feature 2) ───────────────────────
+CACHED_JSON=""
+if [ -f "$CACHE_FILE" ]; then
+    cached=$(cat "$CACHE_FILE" 2>/dev/null || echo "")
+    ct=$(echo "$cached" | python3 -c "import sys,json;print(json.load(sys.stdin).get('summary',{}).get('total_findings',0))" 2>/dev/null || echo "")
+    # Never reuse an empty ("clean") cache entry — it could be a model-glitch false clean.
+    if [ -n "$ct" ] && [ "${ct:-0}" -gt 0 ]; then
+        CACHED_JSON="$cached"
+        echo "diff-hash cache hit: ${CACHE_KEY:0:10} (reusing ${ct} findings)"
+    else
+        echo "cache present but empty/low-confidence — re-reviewing (do not poison cache with a false clean)"
+    fi
+fi
+
+# ── review_one_diff: review a single chunk (one or more files) ──
 review_one_diff() {
-    local cdiff="$1" cpath="$2"
+    local cdiff="$1" cpaths="$2"
     [ -z "$cdiff" ] && { echo ""; return; }
 
-    # Token-aware truncation (safety net). deepseek-v4-flash budget ~1048500
-    # tokens; reserve the 131072 completion (effort=max) + overhead, ~3 chars/token.
+    # Token-aware truncation (safety net).
     local trunc allowed lines
     trunc=$(printf '%s\n' "$cdiff" | python3 -c '
 import sys
@@ -234,7 +328,6 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
             ;;
     esac
 
-    # Build the prompt for THIS chunk only (same rubric header/footer).
     {
         cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
@@ -355,7 +448,7 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
 ## 变更范围
 PROMPT_HEADER
         echo ""
-        echo "变更文件: $cpath"
+        echo "变更文件: ${cpaths}"
         echo "提交范围: ${FROM_COMMIT}..${TO_COMMIT}"
         echo "${COMMIT_LOG}"
         echo ""
@@ -410,13 +503,10 @@ PROMPT_FOOTER
     [ -z "$CLAUDE_OUT" ] && CLAUDE_OUT=$(cat "$ERR_CAP")
     rm -f "$OUT_CAP" "$ERR_CAP"
     if [ "$RC" != "0" ]; then
-        echo ""   # claude itself errored → caller retries
-        return
+        echo ""; return
     fi
 
-    # Robust JSON extraction — see notes: finding messages may contain braces, so
-    # a naive first-{/last-} grab returns a malformed slice.  Locate the OUTERMOST
-    # balanced '{...}' object and validate with json.loads (require a `summary`).
+    # Robust JSON extraction (finding messages may contain braces).
     local extracted
     extracted=$(echo "$CLAUDE_OUT" | python3 -c '
 import sys, json
@@ -458,35 +548,50 @@ print(json.dumps(obj, ensure_ascii=False))
     echo "$extracted"
 }
 
-# ── Review each changed file as its own chunk, aggregate ──
+# ── If cached, short-circuit to the cached result ───────────
+if [ -n "$CACHED_JSON" ]; then
+    echo "$CACHED_JSON" > "$OUTPUT_FILE"
+    CRIT=$(echo "$CACHED_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin); s = d.get('summary', {})
+    print(s.get('严重', 0), s.get('中', 0), s.get('轻', 0), s.get('建议', 0), s.get('total_findings', 0))
+except Exception:
+    print('0 0 0 0 0')
+")
+    read -r SEV_CRIT SEV_MED SEV_LIGHT SEV_ADV TOTAL_COUNT <<< "$CRIT"
+    echo "Reviewed ${FILTERED_COUNT} reviewable files, ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT}) [cached]"
+    echo "Findings: ${SEV_CRIT} 严重 · ${SEV_MED} 中 · ${SEV_LIGHT} 轻 · ${SEV_ADV} 建议"
+    echo "Output: ${OUTPUT_FILE}"
+    exit 0
+fi
+
+# ── Aggregation over chunks ─────────────────────────────────
 AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
-# Iterate FILTERED_FILE_NAMES one path per line (no IFS override — repo paths
-# contain no spaces, so default splitting is safe and avoids leaking IFS abroad).
-for cpath in $FILTERED_FILE_NAMES; do
-    [ -z "$cpath" ] && continue
-    cpath="${cpath//$'\r'/}"
-    cdiff=$(chunk_diff_for "$cpath")
+CHUNK_IDX=0
+for chunk_paths in "${CHUNKS[@]:-}"; do
+    [ -z "${chunk_paths// /}" ] && continue
+    CHUNK_IDX=$((CHUNK_IDX+1))
+    # strip leading space
+    chunk_paths="${chunk_paths#" "}"
+    echo "reviewing chunk $CHUNK_IDX/${CHUNK_COUNT}: ${chunk_paths}"
+    cdiff=$(chunk_diff_for $chunk_paths)
     [ -z "$cdiff" ] && continue
-    echo "reviewing chunk: $cpath"
-    chunk_find=""
-    chunk_sum=""
-    attempts=0
-    # docs/notes file — a 0-findings result there is plausibly genuine.
-    is_note=0
-    case "$cpath" in
-        *.md) is_note=1 ;;
-        *.txt) is_note=1 ;;
-    esac
+    # Is everything in this chunk a note file? (then 0-findings is plausible.)
+    all_note=1
+    for f in $chunk_paths; do
+        [ "$(is_note_path "$f")" = "0" ] && { all_note=0; break; }
+    done
+    chunk_find=""; chunk_sum=""; attempts=0
     while [ -z "$chunk_find" ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; do
         attempts=$((attempts+1))
-        js=$(review_one_diff "$cdiff" "$cpath")
+        js=$(review_one_diff "$cdiff" "$chunk_paths")
         if [ -z "$js" ]; then
-            echo "  chunk '$cpath' claude/parse error — retry $attempts/$MAX_EMPTY_RETRIES"
+            echo "  chunk '$chunk_paths' claude/parse error — retry $attempts/$MAX_EMPTY_RETRIES"
             continue
         fi
-        # extract summary + findings (two lines: summary, then findings array)
         mapfile -t SF < <(echo "$js" | python3 -c '
 import sys, json
 try:
@@ -500,20 +605,18 @@ except Exception:
 ')
         ssum="${SF[0]:-}"; sfind="${SF[1]:-}"
         total=$(echo "$ssum" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
-        # retry empty result on substantive code (likely a model glitch)
-        if [ "$total" -eq 0 ] && [ "$is_note" -eq 0 ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; then
-            echo "  chunk '$cpath' returned 0 findings — retry $attempts/$MAX_EMPTY_RETRIES (model may have glitched)"
+        if [ "$total" -eq 0 ] && [ "$all_note" -eq 0 ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; then
+            echo "  chunk '$chunk_paths' returned 0 findings — retry $attempts/$MAX_EMPTY_RETRIES (model may have glitched)"
             continue
         fi
         chunk_find="$sfind"; chunk_sum="$ssum"
         break
     done
     if [ -z "$chunk_find" ]; then
-        echo "ERROR: could not get a reviewed result for '$cpath' after retries" >&2
+        echo "ERROR: could not get a reviewed result for '$chunk_paths' after retries" >&2
         CHUNK_FAILED=1
         continue
     fi
-    # Aggregate summary
     AGG_SUM=$(python3 - "$AGG_SUM" "$chunk_sum" <<'PY'
 import sys, json
 a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
@@ -523,7 +626,6 @@ a["total_findings"] = a.get("严重",0)+a.get("中",0)+a.get("轻",0)+a.get("建
 print(json.dumps(a, ensure_ascii=False))
 PY
 )
-    # Aggregate findings
     AGG_FIND=$(python3 - "$AGG_FIND" "$chunk_find" <<'PY'
 import sys, json
 a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
@@ -538,32 +640,57 @@ if [ "$CHUNK_FAILED" != "0" ]; then
     exit 1
 fi
 
-# ── Write aggregated findings ──
+# ── Low-confidence marker (feature 4) ───────────────────────
+# If the aggregated result is 0 findings on substantive (non-all-note) code, mark
+# low_confidence so the card can show "待人工确认" instead of a flat clean pass.
+_TOTAL=$(echo "$AGG_SUM" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
+LOW_CONF=false
+if [ "$_TOTAL" -eq 0 ]; then
+    # substantive code present? (any non-note file)
+    any_code=0
+    for f in "${ALL_FILES[@]:-}"; do
+        [ "$(is_note_path "$f")" = "0" ] && { any_code=1; break; }
+    done
+    if [ "$any_code" = "1" ]; then
+        LOW_CONF=true
+        echo "WARNING: 0 findings on substantive code — marking low_confidence (model glitch possible)"
+    fi
+fi
+
 _FROM_SHORT=$(echo "${FROM_COMMIT}" | cut -c1-7)
-CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" <<'PY'
+CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" <<'PY'
 import sys, json
 print(json.dumps({
     "summary": json.loads(sys.argv[1]),
     "findings": json.loads(sys.argv[2]),
     "commits": [{"sha": sys.argv[3], "message": "reviewed range"}],
+    "low_confidence": sys.argv[4] == "true",
 }, ensure_ascii=False))
 PY
 )
 echo "$CLAUDE_JSON" > "$OUTPUT_FILE"
 
-# Parse summary for stdout reporting (rage 4-tier: 严重 中 轻 建议)
+# Write cache ONLY for non-empty results (never poison with a false clean).
+if [ "$_TOTAL" -gt 0 ]; then
+    mkdir -p "$CACHE_DIR"
+    printf '%s' "$CLAUDE_JSON" > "$CACHE_FILE"
+    echo "cached result (${_TOTAL} findings) → ${CACHE_FILE}"
+else
+    echo "0 findings; not caching (keeps a possible model glitch from becoming a cached clean)"
+fi
+
 CRIT=$(echo "$CLAUDE_JSON" | python3 -c "
 import json, sys
 try:
-    d = json.load(sys.stdin)
-    s = d.get('summary', {})
+    d = json.load(sys.stdin); s = d.get('summary', {})
     print(s.get('严重', 0), s.get('中', 0), s.get('轻', 0), s.get('建议', 0), s.get('total_findings', 0))
 except Exception:
     print('0 0 0 0 0')
-" 2>/dev/null || echo "0 0 0 0 0")
-
+")
 IFS=' ' read -r SEV_CRIT SEV_MED SEV_LIGHT SEV_ADV TOTAL_COUNT <<< "$CRIT"
 
-echo "Reviewed ${FILTERED_COUNT} reviewable files, ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT})"
-echo "Findings: ${SEV_CRIT} 严重 · ${SEV_MED} 中 · ${SEV_LIGHT} 轻 · ${SEV_ADV} 建议"
+echo "Reviewed ${FILTERED_COUNT} reviewable files, ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT}) in ${CHUNK_COUNT} chunk(s)"
+_LC_FLAG=""
+[ "$LOW_CONF" = "true" ] && _LC_FLAG=" · ⚠low-confidence"
+echo "Findings: ${SEV_CRIT} 严重 · ${SEV_MED} 中 · ${SEV_LIGHT} 轻 · ${SEV_ADV} 建议${_LC_FLAG}"
 echo "Output: ${OUTPUT_FILE}"

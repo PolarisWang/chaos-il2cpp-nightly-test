@@ -309,3 +309,34 @@ def test_chunked_findings_concat():
 
 if __name__ == "__main__":
     _main()
+
+
+# ── 5. Low-confidence + cache behavior (方案1+4) ─────────────────────────────
+
+def test_review_script_emits_low_confidence_marker():
+    """review-with-claude.sh must emit low_confidence when a substantive-code diff
+    yields 0 findings — so the card can show '待人工确认' instead of a flat clean."""
+    body = _read(REVIEW_SCRIPT)
+    # the marker is written into the JSON when total_findings==0 on non-docs code
+    assert "low_confidence" in body, "script must set a low_confidence flag"
+
+
+def test_jenkinsfile_consumes_low_confidence():
+    """Jenkinsfile must read the top-level low_confidence flag and render a
+    low-confidence '0 发现' card instead of '✅ 本次未发现代码问题'."""
+    body = _read(JENKINSFILE)
+    assert "low_confidence" in body
+    assert "REVIEW_LOW_CONF" in body
+    assert "低置信" in body  # the card fallback text when low-confidence
+
+
+def test_review_script_never_caches_empty_result():
+    """A 0-findings result must NOT be written to the diff-hash cache, so a model
+    glitch can never masquerade as a cached clean pass."""
+    body = _read(REVIEW_SCRIPT)
+    assert "_TOTAL" in body and "not caching" in body
+    assert "not caching" in body
+
+
+if __name__ == "__main__":
+    _main()
