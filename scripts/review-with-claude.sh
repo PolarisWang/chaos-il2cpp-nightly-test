@@ -187,7 +187,11 @@ rm -f "$FILTERED_PATHS_FILE"
 # Config / cache setup
 # ──────────────────────────────────────────────────────────────
 MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"
-CHUNK_MAX_LINES="${REVIEW_CHUNK_MAX_LINES:-300}"
+# Small enough that no single chunk exceeds what the model handles reliably
+# (dense GC/pointer code starts glitching around ~200 diff lines), but large
+# enough to still merge many tiny files into one call. A file larger than this
+# threshold becomes its own chunk (never diluted).
+CHUNK_MAX_LINES="${REVIEW_CHUNK_MAX_LINES:-150}"
 MAX_CHUNKS="${REVIEW_MAX_CHUNKS:-4}"
 CACHE_DIR="${REVIEW_CACHE_DIR:-}"
 [ -z "$CACHE_DIR" ] && CACHE_DIR="${REPO_DIR}-review-cache"
@@ -571,6 +575,11 @@ AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
 CHUNK_IDX=0
+# The chunk loop calls claude and pipes its output through extractors; a glitchy
+# model answer or a transient pipe failure must NOT abort the whole script under
+# `set -e` with a cryptic code. Run the loop under set +e and let the explicit
+# CHUNK_FAILED/empty-retry logic below own error reporting.
+set +e
 for chunk_paths in "${CHUNKS[@]:-}"; do
     [ -z "${chunk_paths// /}" ] && continue
     CHUNK_IDX=$((CHUNK_IDX+1))
@@ -634,6 +643,7 @@ print(json.dumps(a, ensure_ascii=False))
 PY
 )
 done
+set -e
 
 if [ "$CHUNK_FAILED" != "0" ]; then
     echo "ERROR: one or more chunks failed to produce a review — refusing to emit a partial/false result." >&2
