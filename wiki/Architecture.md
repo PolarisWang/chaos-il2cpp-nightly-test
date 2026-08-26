@@ -195,6 +195,21 @@ Jenkins Dispatch（label linux-x64-cr）
 - findings 按严重度排序（严重优先），每条 `#N [严重] [Repo] file:line_range`，文件名即飞书深链（指向 PR head / 提交处代码）。
 - 状态文件 `findings_last_run` 用 rage 键：`{'严重','中','轻','建议'}`。
 
+### 审查可靠性 & 性能（方案 1+3+4）
+
+审查模型 `deepseek-v4-flash`（经 `llm-api` 代理）在**大规模多文件 diff** 上不可靠——同一份 GC diff 会在「真实 findings / 原始 Python traceback / 有效但错误的 0 findings」之间随机摇摆。为兼顾**可靠**与**快**（不破坏质量），`review-with-claude.sh` 采用三个杠杆：
+
+| 杠杆 | 机制 | 效果 |
+|---|---|---|
+| **1 动态分块** | 多个小文件合并成一个 prompting chunk（每 chunk diff ≤ `REVIEW_CHUNK_MAX_LINES`=300，且 ≤ `REVIEW_MAX_CHUNKS`=4）；大文件单独成 chunk。 | 8 文件从「8 次 claude 调用（~12min）」降到「1-4 次（~2-3min）」；小文件仍小 diff 可靠，大文件不稀释。 |
+| **3 diff-hash 缓存** | key=sha1(from,to,按序文件集)；重复 diff 复用先前**非空** findings；**绝不缓存 0-findings 结果**（防 model glitch 变成缓存真 0）。 | 轮询重触发同一 diff 秒回（0 claude 调用）；不引入"假干净"污染。 |
+| **4 低置信标记** | 实质性（非 docs）代码得 0 findings 时，JSON 标 `low_confidence: true`；Jenkinsfile 卡片渲染 `⚠️ 0 发现 — 低置信（建议人工复核）` 而非 `✅ 本次未发现代码问题`。 | 模型抽风空结果不再伪装成干净，可解释。
+
+**实测**（build 578 范围：5 个 GC 代码文件 + 3 docs）：
+- 首跑 1 chunk、**120s**，产出 `1 严重 / 1 轻 / 1 建议`（真实 findings，非假 0）。
+- 二次跑缓存命中 **0s**，结果与首跑完全一致。
+- （对照：修复前全分块该范围 >300s；修复前单次大 diff 假 0。）
+
 ### 状态 / 锁文件（`/var/lib/report-server/daily/`）
 
 | 文件 | 用途 |
@@ -205,8 +220,8 @@ Jenkins Dispatch（label linux-x64-cr）
 
 ### 测试
 
-`scripts/test_rage_alignment.py` 固化 review-with-claude.sh 与 Jenkinsfile 之间的 schema 契约（严重度键、finding 字段、卡片渲染），防止两侧不同步。运行：
-`python3 scripts/test_rage_alignment.py`（无 pytest 依赖）。
+`scripts/test_rage_alignment.py` 固化 review-with-claude.sh 与 Jenkinsfile 之间的 schema 契约（严重度键、finding 字段、卡片渲染、`low_confidence`/缓存行为），防止两侧不同步。运行：
+`python3 scripts/test_rage_alignment.py`（无 pytest 依赖；当前 16 用例）。
 
 ---
 
