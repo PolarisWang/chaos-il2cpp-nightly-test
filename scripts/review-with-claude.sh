@@ -479,18 +479,69 @@ CLAUDE_OUTPUT=$(cat "$OUT_CAP")
 [ -z "$CLAUDE_OUTPUT" ] && CLAUDE_OUTPUT=$(cat "$ERR_CAP")
 rm -f "$OUT_CAP" "$ERR_CAP"
 
-# Extract JSON from Claude output (strips leading text and markdown fences)
-CLAUDE_JSON=$(echo "$CLAUDE_OUTPUT" | python3 -c '
-import sys
+# Extract JSON from Claude output.  The simple "first { to last }" grab is WRONG
+# here: finding message fields THEMSELVES contain braces (e.g. "rewrites '{1}'").
+# Grabbing the first `{` and last `}` returns a malformed slice, json.load fails,
+# and the silent || fallback fabricated a "0 findings / 未发现代码问题" card even
+# though Claude found real issues.  So we locate the OUTERMOST balanced '{...}'
+# object by scanning brace depth over candidates and validating each with
+# json.loads.  If we truly find NO parseable JSON, we FAIL LOUDLY (non-zero exit)
+# rather than report a fake clean pass.
+CLAUDE_JSON=$(echo "$CLAUDE_OUTPUT" | python3 - '
+import sys, json
 content = sys.stdin.read()
-# Find first chr(123)="{" and last chr(125)="}" to extract JSON
-start = content.find(chr(123))
-end = content.rfind(chr(125))
-if start >= 0 and end > start:
-    print(content[start:end+1])
-else:
-    sys.exit(1)
-' 2>/dev/null) || CLAUDE_JSON='{"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}'
+
+def strip_fences(s):
+    out = []
+    in_block = False
+    for line in s.splitlines():
+        st = line.strip()
+        if st.startswith("```"):
+            in_block = not in_block
+            continue
+        if not in_block:
+            out.append(line)
+    return "\n".join(out)
+
+def find_json_object(s):
+    depth = 0
+    start = None
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                cand = s[start:i + 1]
+                try:
+                    obj = json.loads(cand)
+                    if isinstance(obj, dict) and isinstance(obj.get("summary"), dict):
+                        return obj
+                except Exception:
+                    pass
+                start = None
+    return None
+
+obj = None
+for source in (strip_fences(content), content):
+    obj = find_json_object(source)
+    if obj is not None:
+        break
+if obj is None:
+    sys.stderr.write("ERROR: no parseable review JSON in claude output\n")
+    sys.stderr.write("--- claude output tail ---\n")
+    sys.stderr.write(content[-2000:] + "\n")
+    sys.exit(2)
+print(json.dumps(obj, ensure_ascii=False))
+')
+CLAUDE_RC=$?
+if [ "$CLAUDE_RC" != "0" ]; then
+    echo "ERROR: could not parse review JSON from claude (rc=$CLAUDE_RC)" >&2
+    echo "  -> refusing to report a false '0 findings' result." >&2
+    exit 1
+fi
 
 # Write clean JSON to findings file
 echo "$CLAUDE_JSON" > "$OUTPUT_FILE"

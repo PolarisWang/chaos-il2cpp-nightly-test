@@ -206,5 +206,64 @@ def _main():
         sys.exit(1)
 
 
+# ── 4. JSON-extraction robustness (regression for "0 findings" bug) ─────────
+
+def _extract_json(claude_out):
+    """Mirror of the extractor now in review-with-claude.sh."""
+    import json
+    def strip_fences(s):
+        out = []; in_block = False
+        for line in s.splitlines():
+            st = line.strip()
+            if st.startswith("```"):
+                in_block = not in_block; continue
+            if not in_block:
+                out.append(line)
+        return "\n".join(out)
+    def find_json_object(s):
+        depth = 0; start = None
+        for i, ch in enumerate(s):
+            if ch == "{":
+                if depth == 0: start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    try:
+                        obj = json.loads(s[start:i+1])
+                        if isinstance(obj, dict) and isinstance(obj.get("summary"), dict):
+                            return obj
+                    except Exception:
+                        pass
+                    start = None
+        return None
+    for src in (strip_fences(claude_out), claude_out):
+        obj = find_json_object(src)
+        if obj is not None:
+            return obj
+    return None
+
+
+def test_extractor_survives_prose_braces_and_message_braces():
+    # prose BEFORE the JSON with {} braces, AND finding message containing {1}
+    out = ("Let me analyze: the '{0} moves, {1} rewrites' metric is suspicious.\n"
+           "```json\n"
+           '{"summary":{"严重":0,"中":2,"轻":1,"总":0,"total_findings":3},'
+           '"findings":[{"severity":"中","message":"log says rewrites {1} but uses moves.size()"}]}\n'
+           "```\n(complete)")
+    obj = _extract_json(out)
+    assert obj is not None and obj["summary"]["中"] == 2, obj
+
+
+def test_extractor_returns_none_on_no_json():
+    assert _extract_json("no json object in here, just prose") is None
+
+
+def test_extractor_does_not_report_fake_clean():
+    # If there is truly no parseable review JSON, the script now FAILS LOUDLY
+    # (exit != 0) instead of fabricating a 0/0/0/0 "clean" result. This test pins
+    # that contract: an unparseable review must NOT become a silent clean pass.
+    assert _extract_json("SOME ERROR, no braces at all") is None
+
 if __name__ == "__main__":
     _main()
