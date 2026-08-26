@@ -1,12 +1,18 @@
 #!/bin/bash
 # review-with-claude.sh — Invoke Claude Code CLI to review git diff
 #
-# Calls `claude --print` with a structured skill prompt that asks Claude
-# to analyze the diff between two commits for high-risk patterns.
+# Reviews the diff between two commits for high-risk patterns, producing a rage
+# standard JSON result (severity 严重/中/轻/建议 + `[Repo] file:line` findings).
 #
-# Smart filtering: excludes auto-generated files, vendored deps, binaries,
-# documentation, and other low-value files before computing the diff.
-# Token-aware truncation: dynamically fits the diff to the model context window.
+# Reliability: the model (deepseek-v4-flash via the llm proxy) is unreliable on
+# LARGE multi-file diffs — it flips between real findings, raw Python tracebacks,
+# and valid-but-empty "0 findings".  To make results trustworthy:
+#   * the diff is reviewed PER-CHANGED-FILE (one small, focused chunk each), which
+#     the model handles reliably, then aggregated;
+#   * a chunk that returns 0 findings for a substantive code file is RETRIED
+#     (default REVIEW_MAX_EMPTY_RETRIES=2) because empty is likely a glitch;
+#   * genuinely unparseable output FAILS LOUDLY (non-zero exit) rather than
+#     fabricating a "未发现代码问题" card.
 #
 # Usage:
 #   review-with-claude.sh --repo-dir <path> --from-commit <sha> --to-commit <sha> \
@@ -169,108 +175,68 @@ fi
 
 echo "Filtered ${FILTERED_COUNT} reviewable files (out of $(echo "$CHANGED_FILES_LIST" | grep -c . || true) total changed)"
 
-# ──────────────────────────────────────────────
-# Compute diff only for the filtered file set
-# ──────────────────────────────────────────────
-DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" --pathspec-from-file="$FILTERED_PATHS_FILE" 2>/dev/null || true)
-
-# Fallback if --pathspec-from-file failed
-if [[ -z "$DIFF" && "$FILTERED_COUNT" -gt 0 ]]; then
-    DIFF_FILE_LIST=$(tr '\n' ' ' < "$FILTERED_PATHS_FILE" | sed 's/ $//')
-    DIFF=$(git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- $DIFF_FILE_LIST 2>/dev/null || true)
-fi
-
 rm -f "$FILTERED_PATHS_FILE"
 
-# ──────────────────────────────────────────────
-# Token-aware dynamic truncation (C)
-# ──────────────────────────────────────────────
-DIFF_LINES=$(echo "$DIFF" | wc -l)
-DIFF_TRUNCATED=false
-ALL_TRUNCATED=false
+# ──────────────────────────────────────────────────────────────
+# Chunked review — review EACH changed file as its own small diff, then aggregate.
+#
+# The model is unreliable on LARGE multi-file diffs.  A single file's diff is
+# small and focused — the model handles those reliably.  We also retry a chunk
+# whose review comes back empty when the file is substantive code (not docs),
+# because an empty result is more likely a model glitch than a genuine all-clean.
+# ──────────────────────────────────────────────────────────────
+MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"   # retries per chunk on empty/error result
+PROMPT_FILE=$(mktemp)
+trap "rm -f '$PROMPT_FILE'" EXIT
 
-if [[ -n "$DIFF" && "$DIFF_LINES" -gt 0 ]]; then
-    TRUNCATION_RESULT=$(echo "$DIFF" | python3 -c '
+# Per-file diff between the two commits.
+chunk_diff_for() {
+    local p="$1"
+    git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- "$p" 2>/dev/null
+}
+
+# review_one_diff <diff-text> <path>  →  echoes finding JSON on stdout, or "" on failure.
+review_one_diff() {
+    local cdiff="$1" cpath="$2"
+    [ -z "$cdiff" ] && { echo ""; return; }
+
+    # Token-aware truncation (safety net). deepseek-v4-flash budget ~1048500
+    # tokens; reserve the 131072 completion (effort=max) + overhead, ~3 chars/token.
+    local trunc allowed lines
+    trunc=$(printf '%s\n' "$cdiff" | python3 -c '
 import sys
-
-# deepseek-v4-flash: 1,048,565 total tokens (max context 1048576)
-# NB: must reserve the REAL completion size. With CLAUDE_CODE_EFFORT=max the
-# completion is 131072 tokens, NOT 32000. Under-reserving it let the prompt grow
-# past the hard limit -> "maximum context length exceeded" 400 error -> every
-# review build failed. Reserve ~138000 and use a conservative chars/token (code is
-# denser than prose, ~3.0 not 4.0) so message+completion stays under 1048576.
 MAX_TOTAL_TOKENS = 1048500
-COMPLETION_TOKENS = 138000   # fits the 131072 completion from effort=max
-PROMPT_OVERHEAD_TOKENS = 2000  # instructions + commit log + formatting
+COMPLETION_TOKENS = 138000
+PROMPT_OVERHEAD_TOKENS = 2000
 CHARS_PER_TOKEN = 3.0
-
 available = MAX_TOTAL_TOKENS - COMPLETION_TOKENS - PROMPT_OVERHEAD_TOKENS
-
 diff_text = sys.stdin.read()
-diff_lines = diff_text.split("\n")
-num_lines = len(diff_lines)
-if num_lines > 0 and diff_lines[-1] == "":
-    num_lines -= 1
-    diff_lines = diff_lines[:num_lines]
-
-if num_lines == 0:
-    print("FULL")
-    sys.exit(0)
-
-estimated_tokens = len(diff_text) / CHARS_PER_TOKEN
-
-if estimated_tokens <= available:
-    print("FULL")
-else:
-    # Binary search for max whole lines that fit
-    lo, hi = 0, num_lines
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        partial = "\n".join(diff_lines[:mid])
-        tokens = len(partial) / CHARS_PER_TOKEN
-        if tokens <= available:
-            lo = mid
-        else:
-            hi = mid - 1
-
-    if lo <= 0:
-        print("ALL_TRUNCATED")
-    else:
-        print(f"TRUNCATED:{lo}")
+n = len(diff_text.split("\n"))
+if n > 0 and diff_text.split("\n")[-1] == "": n -= 1
+if n == 0:
+    print("FULL"); sys.exit(0)
+if len(diff_text)/CHARS_PER_TOKEN <= available:
+    print("FULL"); sys.exit(0)
+lo, hi = 0, n
+while lo < hi:
+    mid = (lo + hi + 1)//2
+    partial = "\n".join(diff_text.split("\n")[:mid])
+    if len(partial)/CHARS_PER_TOKEN <= available: lo = mid
+    else: hi = mid-1
+print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
 ' 2>/dev/null || echo "FULL")
-
-    case "$TRUNCATION_RESULT" in
-        FULL)
-            ;;
-        ALL_TRUNCATED)
-            DIFF=""
-            DIFF_TRUNCATED=true
-            ALL_TRUNCATED=true
-            ;;
+    case "$trunc" in
+        ALL_TRUNCATED) cdiff="" ;;
         TRUNCATED:*)
-            ALLOWED_LINES="${TRUNCATION_RESULT#TRUNCATED:}"
-            if [[ "$ALLOWED_LINES" -lt "$DIFF_LINES" ]]; then
-                echo "Token-aware truncation: ${DIFF_LINES} -> ${ALLOWED_LINES} lines"
-                DIFF=$(echo "$DIFF" | head -"$ALLOWED_LINES")
-                DIFF_TRUNCATED=true
-            fi
+            allowed="${trunc#TRUNCATED:}"
+            lines=$(printf '%s\n' "$cdiff" | wc -l | tr -d ' ')
+            [ "$allowed" -lt "$lines" ] && cdiff=$(printf '%s\n' "$cdiff" | head -"$allowed")
             ;;
     esac
-fi
 
-# Write diff to temp file to avoid shell quoting issues
-DIFF_FILE=$(mktemp)
-PROMPT_FILE=$(mktemp)
-trap "rm -f '$PROMPT_FILE' '$DIFF_FILE'" EXIT
-printf '%s\n' "$DIFF" > "$DIFF_FILE"
-
-# Build prompt file and pass to claude --print via stdin redirection
-# Using input redirection (<) instead of a pipe to avoid SIGPIPE (141)
-# when claude closes the pipe after consuming the prompt but the
-# producer side hasn't finished writing.
-
-{
-    cat << 'PROMPT_HEADER'
+    # Build the prompt for THIS chunk only (same rubric header/footer).
+    {
+        cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
 **重要：所有审查消息（message 字段）必须使用中文，不得使用英文。**
 
@@ -388,39 +354,16 @@ printf '%s\n' "$DIFF" > "$DIFF_FILE"
 
 ## 变更范围
 PROMPT_HEADER
-    echo ""
-    echo "从 ${FROM_COMMIT} 到 ${TO_COMMIT}"
-    echo "提交列表:"
-    echo "${COMMIT_LOG}"
-    echo ""
-    if [ "$ALL_TRUNCATED" = true ]; then
-        echo "## 变更文件列表（diff 因体积过大未提供，仅列出文件名）"
         echo ""
-        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
-        echo ""
-        echo "**注意:** diff 内容超过模型上下文窗口，仅提供文件列表供参考。"
-        echo ""
-    elif [ -n "$DIFF" ]; then
-        echo "## 变更文件列表 (${FILTERED_COUNT} 个文件)"
-        echo ""
-        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
+        echo "变更文件: $cpath"
+        echo "提交范围: ${FROM_COMMIT}..${TO_COMMIT}"
+        echo "${COMMIT_LOG}"
         echo ""
         echo '```diff'
-        cat "$DIFF_FILE"
+        printf '%s\n' "$cdiff"
         echo '```'
-        echo ""
-        if [ "$DIFF_TRUNCATED" = true ]; then
-            echo ""
-            echo "**注意:** diff 超过模型上下文窗口限制，已截断。"
-            echo ""
-        fi
-    else
-        echo "## 变更文件列表"
-        echo ""
-        echo "${FILTERED_FILE_NAMES}" | head -100 | while IFS= read -r f; do echo "- \`$f\`"; done
-        echo ""
-    fi
-    cat << 'PROMPT_FOOTER'
+        cat << 'PROMPT_FOOTER'
+
 ## 输出格式要求（rage 标准）
 
 每条 finding 必须包含:
@@ -455,66 +398,47 @@ PROMPT_HEADER
   ]
 }
 PROMPT_FOOTER
-} > "$PROMPT_FILE"
+    } > "$PROMPT_FILE"
 
-# Pass prompt via stdin redirection (not pipe) to avoid SIGPIPE with pipefail.
-# On failure claude can report API errors (e.g. "maximum context length exceeded",
-# 400) on stdout, stderr, or both — as in the token-budget overflow that previously
-# got swallowed behind a bare "claude --print failed". Capture both streams and, on
-# a non-zero exit, surface the real cause so a future failure is self-explanatory.
-OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
-set +e
-claude --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
-CLAUDE_RC=$?
-set -e
-if [ "$CLAUDE_RC" -ne 0 ]; then
-    echo "ERROR: claude --print failed (rc=$CLAUDE_RC)" >&2
-    if [ -s "$OUT_CAP" ]; then echo "----- claude output -----" >&2; tail -8 "$OUT_CAP" >&2; fi
-    if [ -s "$ERR_CAP" ]; then echo "----- claude stderr -----" >&2; tail -8 "$ERR_CAP" >&2; fi
-    echo "-------------------------" >&2
+    # Call claude --print for this chunk.
+    OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
+    set +e
+    claude --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+    RC=$?
+    set -e
+    CLAUDE_OUT=$(cat "$OUT_CAP")
+    [ -z "$CLAUDE_OUT" ] && CLAUDE_OUT=$(cat "$ERR_CAP")
     rm -f "$OUT_CAP" "$ERR_CAP"
-    exit 1
-fi
-CLAUDE_OUTPUT=$(cat "$OUT_CAP")
-[ -z "$CLAUDE_OUTPUT" ] && CLAUDE_OUTPUT=$(cat "$ERR_CAP")
-rm -f "$OUT_CAP" "$ERR_CAP"
+    if [ "$RC" != "0" ]; then
+        echo ""   # claude itself errored → caller retries
+        return
+    fi
 
-# Extract JSON from Claude output.  The simple "first { to last }" grab is WRONG
-# here: finding message fields THEMSELVES contain braces (e.g. "rewrites '{1}'").
-# Grabbing the first `{` and last `}` returns a malformed slice, json.load fails,
-# and the silent || fallback fabricated a "0 findings / 未发现代码问题" card even
-# though Claude found real issues.  So we locate the OUTERMOST balanced '{...}'
-# object by scanning brace depth over candidates and validating each with
-# json.loads.  If we truly find NO parseable JSON, we FAIL LOUDLY (non-zero exit)
-# rather than report a fake clean pass.
-CLAUDE_JSON=$(echo "$CLAUDE_OUTPUT" | python3 - '
+    # Robust JSON extraction — see notes: finding messages may contain braces, so
+    # a naive first-{/last-} grab returns a malformed slice.  Locate the OUTERMOST
+    # balanced '{...}' object and validate with json.loads (require a `summary`).
+    local extracted
+    extracted=$(echo "$CLAUDE_OUT" | python3 -c '
 import sys, json
 content = sys.stdin.read()
-
 def strip_fences(s):
-    out = []
-    in_block = False
+    out = []; in_block = False
     for line in s.splitlines():
         st = line.strip()
         if st.startswith("```"):
-            in_block = not in_block
-            continue
-        if not in_block:
-            out.append(line)
+            in_block = not in_block; continue
+        if not in_block: out.append(line)
     return "\n".join(out)
-
 def find_json_object(s):
-    depth = 0
-    start = None
+    depth = 0; start = None
     for i, ch in enumerate(s):
         if ch == "{":
-            if depth == 0:
-                start = i
+            if depth == 0: start = i
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0 and start is not None:
-                cand = s[start:i + 1]
+                cand = s[start:i+1]
                 try:
                     obj = json.loads(cand)
                     if isinstance(obj, dict) and isinstance(obj.get("summary"), dict):
@@ -523,27 +447,108 @@ def find_json_object(s):
                     pass
                 start = None
     return None
-
 obj = None
-for source in (strip_fences(content), content):
-    obj = find_json_object(source)
-    if obj is not None:
-        break
+for src in (strip_fences(content), content):
+    obj = find_json_object(src)
+    if obj is not None: break
 if obj is None:
-    sys.stderr.write("ERROR: no parseable review JSON in claude output\n")
-    sys.stderr.write("--- claude output tail ---\n")
-    sys.stderr.write(content[-2000:] + "\n")
     sys.exit(2)
 print(json.dumps(obj, ensure_ascii=False))
+' 2>/dev/null)
+    echo "$extracted"
+}
+
+# ── Review each changed file as its own chunk, aggregate ──
+AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
+AGG_FIND="[]"
+CHUNK_FAILED=0
+# Iterate FILTERED_FILE_NAMES one path per line (no IFS override — repo paths
+# contain no spaces, so default splitting is safe and avoids leaking IFS abroad).
+for cpath in $FILTERED_FILE_NAMES; do
+    [ -z "$cpath" ] && continue
+    cpath="${cpath//$'\r'/}"
+    cdiff=$(chunk_diff_for "$cpath")
+    [ -z "$cdiff" ] && continue
+    echo "reviewing chunk: $cpath"
+    chunk_find=""
+    chunk_sum=""
+    attempts=0
+    # docs/notes file — a 0-findings result there is plausibly genuine.
+    is_note=0
+    case "$cpath" in
+        *.md) is_note=1 ;;
+        *.txt) is_note=1 ;;
+    esac
+    while [ -z "$chunk_find" ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; do
+        attempts=$((attempts+1))
+        js=$(review_one_diff "$cdiff" "$cpath")
+        if [ -z "$js" ]; then
+            echo "  chunk '$cpath' claude/parse error — retry $attempts/$MAX_EMPTY_RETRIES"
+            continue
+        fi
+        # extract summary + findings (two lines: summary, then findings array)
+        mapfile -t SF < <(echo "$js" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    s = d.get("summary", {})
+    print(json.dumps(s, ensure_ascii=False))
+    print(json.dumps(d.get("findings", []), ensure_ascii=False))
+except Exception:
+    print("{\"严重\":0,\"中\":0,\"轻\":0,\"建议\":0,\"total_findings\":0}")
+    print("[]")
 ')
-CLAUDE_RC=$?
-if [ "$CLAUDE_RC" != "0" ]; then
-    echo "ERROR: could not parse review JSON from claude (rc=$CLAUDE_RC)" >&2
-    echo "  -> refusing to report a false '0 findings' result." >&2
+        ssum="${SF[0]:-}"; sfind="${SF[1]:-}"
+        total=$(echo "$ssum" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
+        # retry empty result on substantive code (likely a model glitch)
+        if [ "$total" -eq 0 ] && [ "$is_note" -eq 0 ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; then
+            echo "  chunk '$cpath' returned 0 findings — retry $attempts/$MAX_EMPTY_RETRIES (model may have glitched)"
+            continue
+        fi
+        chunk_find="$sfind"; chunk_sum="$ssum"
+        break
+    done
+    if [ -z "$chunk_find" ]; then
+        echo "ERROR: could not get a reviewed result for '$cpath' after retries" >&2
+        CHUNK_FAILED=1
+        continue
+    fi
+    # Aggregate summary
+    AGG_SUM=$(python3 - "$AGG_SUM" "$chunk_sum" <<'PY'
+import sys, json
+a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
+for k in ("严重","中","轻","建议"):
+    a[k] = a.get(k,0) + b.get(k,0)
+a["total_findings"] = a.get("严重",0)+a.get("中",0)+a.get("轻",0)+a.get("建议",0)
+print(json.dumps(a, ensure_ascii=False))
+PY
+)
+    # Aggregate findings
+    AGG_FIND=$(python3 - "$AGG_FIND" "$chunk_find" <<'PY'
+import sys, json
+a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
+a = a + b if isinstance(a, list) else b
+print(json.dumps(a, ensure_ascii=False))
+PY
+)
+done
+
+if [ "$CHUNK_FAILED" != "0" ]; then
+    echo "ERROR: one or more chunks failed to produce a review — refusing to emit a partial/false result." >&2
     exit 1
 fi
 
-# Write clean JSON to findings file
+# ── Write aggregated findings ──
+_FROM_SHORT=$(echo "${FROM_COMMIT}" | cut -c1-7)
+CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" <<'PY'
+import sys, json
+print(json.dumps({
+    "summary": json.loads(sys.argv[1]),
+    "findings": json.loads(sys.argv[2]),
+    "commits": [{"sha": sys.argv[3], "message": "reviewed range"}],
+}, ensure_ascii=False))
+PY
+)
 echo "$CLAUDE_JSON" > "$OUTPUT_FILE"
 
 # Parse summary for stdout reporting (rage 4-tier: 严重 中 轻 建议)
@@ -557,8 +562,8 @@ except Exception:
     print('0 0 0 0 0')
 " 2>/dev/null || echo "0 0 0 0 0")
 
-read -r SEV_CRIT SEV_MED SEV_LIGHT SEV_ADV TOTAL_COUNT <<< "$CRIT"
+IFS=' ' read -r SEV_CRIT SEV_MED SEV_LIGHT SEV_ADV TOTAL_COUNT <<< "$CRIT"
 
-echo "Reviewed ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT})"
+echo "Reviewed ${FILTERED_COUNT} reviewable files, ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT})"
 echo "Findings: ${SEV_CRIT} 严重 · ${SEV_MED} 中 · ${SEV_LIGHT} 轻 · ${SEV_ADV} 建议"
 echo "Output: ${OUTPUT_FILE}"

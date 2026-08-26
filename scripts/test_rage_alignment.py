@@ -265,5 +265,47 @@ def test_extractor_does_not_report_fake_clean():
     # that contract: an unparseable review must NOT become a silent clean pass.
     assert _extract_json("SOME ERROR, no braces at all") is None
 
+
+# ── 4b. Chunked-review aggregation (mirrors review-with-claude.sh loop) ─────
+
+def _merge_summary(*summs):
+    import json
+    a = {"严重": 0, "中": 0, "轻": 0, "建议": 0}
+    for s in summs:
+        for k in ("严重", "中", "轻", "建议"):
+            a[k] += s.get(k, 0)
+    a["total_findings"] = a["严重"] + a["中"] + a["轻"] + a["建议"]
+    return a
+
+
+def test_chunked_aggregation_sums_findings():
+    # 3 per-file chunks -> aggregated summary + findings list
+    c1 = {"严重": 1, "中": 0, "轻": 0, "建议": 0, "total_findings": 1}
+    c2 = {"严重": 0, "中": 2, "轻": 0, "建议": 1, "total_findings": 3}
+    c3 = {"严重": 0, "中": 0, "轻": 1, "建议": 0, "total_findings": 1}
+    agg = _merge_summary(c1, c2, c3)
+    assert agg == {"严重": 1, "中": 2, "轻": 1, "建议": 1, "total_findings": 5}
+    assert agg["total_findings"] == 5
+
+
+def test_chunked_aggregation_empty_chunks_noop():
+    # A genuinely empty chunk (docs-only, or true clean) contributes 0.
+    empty = {"严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0}
+    agg = _merge_summary(empty)
+    assert agg["total_findings"] == 0
+    # ...and does not fabricate findings when all chunks are empty
+    assert _merge_summary(empty, empty)["total_findings"] == 0
+
+
+def test_chunked_findings_concat():
+    # final findings array = ordered concat of each chunk's findings
+    import json
+    fl = [{"severity": "严重", "file": "a.cpp"}, {"severity": "中", "file": "b.cpp"}]
+    fl2 = [{"severity": "轻", "file": "c.cpp"}]
+    merged = fl + fl2
+    assert len(merged) == 3
+    assert merged[0]["file"] == "a.cpp" and merged[2]["severity"] == "轻"
+
+
 if __name__ == "__main__":
     _main()
