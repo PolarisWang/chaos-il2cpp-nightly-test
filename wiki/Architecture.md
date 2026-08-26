@@ -122,4 +122,92 @@ Agent 在 `/booming-il2cpp/testing/foundation-dll/` 中操作，无需 git clone
 
 ---
 
-*Last updated: 2026-06-16*
+## 代码审查（Code Review）流程
+
+独立于 Nightly 的流水线，审查 `PolarisWang/booming-il2cpp` 的提交或 GitHub PR，输出 **rage 标准**的审查结果并推送飞书卡片。
+
+```
+宿主机 cron（每 1 分钟）
+  ├─ trigger-code-review.sh  → main 分支新提交
+  └─ trigger-pr-review.sh    → 打开的 GitHub PR（base..head）
+        │  fetch refs/heads/pr-<N> / pr-<N>-base（真分支，供缓存本地拉取）
+        │  crumb+cookie → 触发 Jenkins job `chaos-il2cpp-code-review`
+        ▼
+Jenkins Dispatch（label linux-x64-cr）
+  └─ runCodeReview（内联，:630）  ← 权威路径（非 vars/codeReviewPipeline.groovy，后者已废弃）
+      ├─ 下载 review-with-claude.sh 等脚本（raw.githubusercontent.com/main）
+      │   ← 关键：脚本/改动 push 到 main 即生效，无需额外部署
+      ├─ 增量 fetch → ~/booming-il2cpp-cache
+      ├─ diff = base..head（PR）或 last_reviewed..HEAD（main）
+      ├─ review-with-claude.sh --repo-dir --from-commit --to-commit --output findings.json
+      │    ① 智能过滤：排除 third_party/、generated/、二进制、文档
+      │    ② token 预算：预留 completion，按 ~3 chars/token 二分截断
+      │    ③ claude --print 七维审查 + rage 输出 schema
+      └─ 解析 findings.json → 渲染 rage 卡片 → 飞书 webhook
+```
+
+### Rage 标准输出格式
+
+审查结果 JSON（`findings.json`）schema（**严重级别 4 级：严重 / 中 / 轻 / 建议**，对应 rage `_SEVERITY_ORDER`）
+
+```json
+{
+  "summary": { "严重": 1, "中": 2, "轻": 0, "建议": 0, "total_findings": 3 },
+  "findings": [
+    {
+      "severity": "严重",
+      "repo": "il2cpp",
+      "category": "layer_boundary",
+      "dimension": 1,
+      "file": "AutoTestGenerator/Verification/verification/some_script.py",
+      "line": 85,
+      "line_range": "85-90",
+      "message": "Python层调用了 write_text 写入 .cpp 文件，违反四层边界",
+      "fix": "将 write_text 移到 TPG 层对应的脚本中处理",
+      "verify": "CPP 文件不再由 Python 脚本生成，四层边界检查通过"
+    }
+  ],
+  "commits": [ { "sha": "abc1234", "message": "feat: add GC optimization" } ]
+}
+```
+
+**严重级别映射**：严重（维度1/2/5 违规、内存/安全漏洞、边界越界）> 中（维度3/4 风险、线程安全、平台遗漏、测试诚信）> 轻（维度6、错误处理、性能隐患）> 建议（可选优化）。每条 finding 必须绑定真实代码行（`file` + `line`，可给 `line_range`）。
+
+**飞书卡片渲染**（Jenkinsfile 内联 Python）：
+
+```
+📋 审查范围: 3 个提交  /  PR #12（3 个提交）
+
+新提交:
+  • [abc1234] feat: add GC optimization   (commit URL)
+  • [[PR #12] title](https://github.com/.../pull/12)   (PR 模式)
+
+风险概览:
+  🔴 **1** 严重  🟠 **2** 中  ⚪ **0** 轻  🟢 **0** 建议
+
+问题列表:
+  🔴 **#1 [严重] [il2cpp]** [some_script.py:85](.../blob/<sha>/.../some_script.py#L85) — Python层调用了 write_text ...
+  🟠 **#2 [中] [il2cpp]** [a.cpp:1303](...) — mask 不对称
+  ...
+🔗 [查看完整报告](Jenkins build URL)
+```
+
+- findings 按严重度排序（严重优先），每条 `#N [严重] [Repo] file:line_range`，文件名即飞书深链（指向 PR head / 提交处代码）。
+- 状态文件 `findings_last_run` 用 rage 键：`{'严重','中','轻','建议'}`。
+
+### 状态 / 锁文件（`/var/lib/report-server/daily/`）
+
+| 文件 | 用途 |
+|---|---|
+| `last-reviewed-commit.json` | main 模式上次审查 commit |
+| `pr-reviewed-head.json` | PR 模式各 PR 已审查 head（去重） |
+| `cr-trigger.lock` / `cr-pr-trigger.lock` | 防重锁，30 分钟超时 |
+
+### 测试
+
+`scripts/test_rage_alignment.py` 固化 review-with-claude.sh 与 Jenkinsfile 之间的 schema 契约（严重度键、finding 字段、卡片渲染），防止两侧不同步。运行：
+`python3 scripts/test_rage_alignment.py`（无 pytest 依赖）。
+
+---
+
+*Last updated: 2026-08-26*

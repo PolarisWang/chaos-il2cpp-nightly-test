@@ -799,32 +799,32 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def summaryStr = ''
                 try {
                     summaryStr = sh(
-                        script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" || echo '{\"critical\":0,\"high\":0,\"medium\":0,\"low\":0,\"total_findings\":0}'",
+                        script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" || echo '{\"严重\":0,\"中\":0,\"轻\":0,\"建议\":0,\"total_findings\":0}'",
                         returnStdout: true
                     ).trim()
                 } catch (err) {
                     echo "WARNING: findings parsing failed (${err.message}), using defaults"
-                    summaryStr = '{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0}'
+                    summaryStr = '{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
                 }
 
                 def parsed = readJSON text: summaryStr
-                env.FINDINGS_CRIT = parsed.critical.toString()
-                env.FINDINGS_HIGH = parsed.high.toString()
-                env.FINDINGS_MED  = parsed.medium.toString()
-                env.FINDINGS_LOW  = parsed.low.toString()
-                env.FINDINGS_TOTAL = parsed.total_findings.toString()
+                env.FINDINGS_SEV   = (parsed['严重'] ?: 0).toString()
+                env.FINDINGS_MED   = (parsed['中'] ?: 0).toString()
+                env.FINDINGS_LIGHT = (parsed['轻'] ?: 0).toString()
+                env.FINDINGS_ADV   = (parsed['建议'] ?: 0).toString()
+                env.FINDINGS_TOTAL = (parsed.total_findings ?: 0).toString()
 
-                echo "Findings: ${env.FINDINGS_CRIT} CRITICAL · ${env.FINDINGS_HIGH} HIGH · ${env.FINDINGS_MED} MEDIUM · ${env.FINDINGS_LOW} LOW"
+                echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议"
 
                 // Feishu notification — same node() block, no @2 workspace mismatch
                 def safeInt = { s -> (s != null && s != 'null' && s != '') ? s.toInteger() : 0 }
-                def critCount = safeInt(env.FINDINGS_CRIT)
-                def highCount = safeInt(env.FINDINGS_HIGH)
+                def sevCount  = safeInt(env.FINDINGS_SEV)
                 def medCount  = safeInt(env.FINDINGS_MED)
-                def lowCount  = safeInt(env.FINDINGS_LOW)
+                def lightCount = safeInt(env.FINDINGS_LIGHT)
+                def advCount  = safeInt(env.FINDINGS_ADV)
                 def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
-                def colorTag = critCount > 0 || highCount > 0 ? 'red' : (medCount > 0 ? 'blue' : 'green')
+                def colorTag = sevCount > 0 || medCount > 0 ? 'red' : (lightCount > 0 ? 'blue' : 'green')
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
                 def feishuTitle = isPrReview ? "chaos-il2cpp PR #${prNumber} 代码审查 — ${riskWord}" : "chaos-il2cpp 代码审查 — ${riskWord}"
                 def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
@@ -879,40 +879,45 @@ else:
         cl.append('  • [[' + sha + '] ' + msg + '](' + url + ')')
 ct = chr(10).join(cl) if cl else ('  （无新提交）' if not is_pr else '  PR #' + pr_number)
 
-# Build findings list with emoji per severity
-severity_icons = {'CRITICAL': '🔴', 'HIGH': '🟠', 'MEDIUM': '🔵', 'LOW': '⚪'}
-severity_labels = {'CRITICAL': '严重', 'HIGH': '高危', 'MEDIUM': '中等', 'LOW': '低危'}
+# Build findings list — rage-standard 4-tier lines: #N [严重] [Repo] file:line_range
+severity_icons = {'严重': '🔴', '中': '🟠', '轻': '⚪', '建议': '🟢'}
+sel_order = {'严重': 0, '中': 1, '轻': 2, '建议': 3}
+# severity-sort (严重 first), stable
+flist_sorted = sorted(flist, key=lambda f: sel_order.get(f.get('severity', '建议'), 9))
 flines = []
-for fx in flist[:10]:
-    sev = fx.get('severity', 'LOW')
+for ndx, fx in enumerate(flist_sorted[:10], start=1):
+    sev = fx.get('severity') or '建议'
     icon = severity_icons.get(sev, '⚪')
-    label = severity_labels.get(sev, '低危')
-    cat  = fx.get('category', '')
+    repo = fx.get('repo', 'il2cpp')
     fp = fx.get('file', '')
     ln = fx.get('line', 0)
+    lr = fx.get('line_range') or (str(ln) if ln else '')
+    loc = ':' + str(lr) if lr else ''
     msg = fx.get('message', '')
     fname = fp.split('/')[-1] if '/' in fp else fp
-    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + '#L' + str(ln)
-    flines.append('  ' + icon + ' **' + label + '** [' + cat + '] [' + fname + ':' + str(ln) + '](' + furl + ') ' + msg)
+    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + ('#L' + str(lr.split('-')[0]) if lr else '')
+    # rage line: #N [严重] [il2cpp] fname:line_range — filename is the Feishu link
+    flines.append('{0} **#{1} [{2}] [{3}]** [{4}]({5}) — {6}'.format(
+        icon, ndx, sev, repo, fname + loc, furl, msg))
 if len(flist) > 10:
     flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
 ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
 bu = '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/'
 
-# Build risk overview line with emoji icons
+# Build risk overview line with emoji icons (rage 4-tier: 严重 中 轻 建议)
 risk_line = ''
 total = ${totalFindings}
 if total > 0:
     parts = []
-    if ${critCount} > 0:
-        parts.append('🔴 **' + str(${critCount}) + '** 严重')
-    if ${highCount} > 0:
-        parts.append('🟠 **' + str(${highCount}) + '** 高危')
+    if ${sevCount} > 0:
+        parts.append('🔴 **' + str(${sevCount}) + '** 严重')
     if ${medCount} > 0:
-        parts.append('🔵 **' + str(${medCount}) + '** 中等')
-    if ${lowCount} > 0:
-        parts.append('⚪ **' + str(${lowCount}) + '** 低危')
+        parts.append('🟠 **' + str(${medCount}) + '** 中')
+    if ${lightCount} > 0:
+        parts.append('⚪ **' + str(${lightCount}) + '** 轻')
+    if ${advCount} > 0:
+        parts.append('🟢 **' + str(${advCount}) + '** 建议')
     risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
 else:
     risk_line = '✅ 本次未发现代码问题'
@@ -1037,10 +1042,10 @@ print('ok')
                         last_reviewed_commit: env.CURRENT_COMMIT,
                         last_reviewed_at: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
                         findings_last_run: [
-                            critical: env.FINDINGS_CRIT.toInteger(),
-                            high: env.FINDINGS_HIGH.toInteger(),
-                            medium: env.FINDINGS_MED.toInteger(),
-                            low: env.FINDINGS_LOW.toInteger()
+                            '严重': env.FINDINGS_SEV.toInteger(),
+                            '中': env.FINDINGS_MED.toInteger(),
+                            '轻': env.FINDINGS_LIGHT.toInteger(),
+                            '建议': env.FINDINGS_ADV.toInteger()
                         ]
                     ]
                     writeJSON(file: stateFile, json: stateData, pretty: 2)

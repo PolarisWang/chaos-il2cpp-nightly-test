@@ -73,7 +73,7 @@ COMMIT_COUNT=$(echo "$COMMIT_LOG" | grep -c . || true)
 
 if [[ "$COMMIT_COUNT" -eq 0 ]]; then
     echo "No new commits between ${FROM_COMMIT} and ${TO_COMMIT}"
-    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
     echo "Reviewed 0 commits"
     echo "Findings: 0"
     exit 0
@@ -87,7 +87,7 @@ CHANGED_FILES_LIST=$(git diff --name-status "${FROM_COMMIT}".."${TO_COMMIT}" 2>/
 
 if [[ -z "$CHANGED_FILES_LIST" ]]; then
     echo "WARNING: git diff --name-status returned empty" >&2
-    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
     exit 0
 fi
 
@@ -163,7 +163,7 @@ if [[ "$FILTERED_COUNT" -eq 0 ]]; then
     rm -f "$FILTERED_PATHS_FILE"
     echo "Reviewed 0 reviewable files"
     echo "Findings: 0"
-    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
     exit 0
 fi
 
@@ -322,7 +322,7 @@ printf '%s\n' "$DIFF" > "$DIFF_FILE"
 - abort() / std::terminate() + 日志
 - 返回明确标记的 sentinel 值
 
-错误做法（不劲爆，要报 HIGH）:
+错误做法（不劲爆，要报 中 以上）:
 - return 0 / return null / return false 静默返回
 - 空函数体 {} 什么也不做
 - // TODO 注释但没有运行时告警
@@ -374,12 +374,17 @@ printf '%s\n' "$DIFF" > "$DIFF_FILE"
 - 可维护性: 命名规范、函数长度、重复代码
 - 错误处理: 所有错误路径是否被处理、日志是否恰当
 
-## 严重级别定义
+## 严重级别定义（rage 标准 · 4 级：严重 / 中 / 轻 / 建议）
 
-- **CRITICAL**: 维度1/2/5 违规、内存安全漏洞、安全漏洞、四层边界越界
-- **HIGH**: 维度3/4 风险、线程安全缺陷、平台适配遗漏、测试诚信问题
-- **MEDIUM**: 维度6 问题、常规质量缺陷、错误处理不完善
-- **LOW**: 格式问题、注释遗留、小优化建议
+按高到低排序，逐级判定:
+
+- **严重**: 维度1/2/5 违规、内存安全漏洞、安全漏洞、四层边界越界、数据损坏/错误结果
+- **中**: 维度3/4 风险、线程安全缺陷、平台适配遗漏、测试诚信问题、明确的功能错误
+- **轻**: 维度6 问题、错误处理不完善、性能隐患、可维护性/风格欠佳但非错误
+- **建议**: 可选的优化、微重构、注释/命名改进（非必须）
+
+**每个 finding 必须绑定到真实代码行**（`file` + `line`，可给 `line_range`），
+禁止无法定位到实际代码的问题。判断失败宁可降级为 建议 也不要点到未改动的代码。
 
 ## 变更范围
 PROMPT_HEADER
@@ -416,22 +421,30 @@ PROMPT_HEADER
         echo ""
     fi
     cat << 'PROMPT_FOOTER'
-## 输出格式要求
+## 输出格式要求（rage 标准）
 
 每条 finding 必须包含:
+- **repo**: 仓库标签（本项目统一 "il2cpp"）
+- **file**: 文件相对路径
+- **line**: 问题起始行号
+- **line_range**: 如适用，形如 "85-120"（跨行）或与 line 相同（单行）；整文件问题可省略
+- **severity**: "严重" | "中" | "轻" | "建议"
+- **message**: 中文问题描述
 - **fix**: 精确修复方案（言简意赅，一行）
 - **verify**: 修复后的验证目标（言简意赅，一行）
 
 请严格输出以下 JSON 结构（不要包含其他说明文字，不要用 markdown 代码块包裹）:
 {
-  "summary": { "critical": 0, "high": 0, "medium": 0, "low": 0, "total_findings": 0 },
+  "summary": { "严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0 },
   "findings": [
     {
-      "severity": "CRITICAL",
+      "severity": "严重",
+      "repo": "il2cpp",
       "category": "layer_boundary",
       "dimension": 1,
-      "file": "testing/foundation-dll/verification/some_script.py",
+      "file": "AutoTestGenerator/Verification/verification/some_script.py",
       "line": 85,
+      "line_range": "85-90",
       "message": "Python层调用了 write_text 写入 .cpp 文件，违反四层边界",
       "fix": "将 write_text 移到 TPG 层对应的脚本中处理",
       "verify": "CPP 文件不再由 Python 脚本生成，四层边界检查通过"
@@ -477,24 +490,24 @@ if start >= 0 and end > start:
     print(content[start:end+1])
 else:
     sys.exit(1)
-' 2>/dev/null) || CLAUDE_JSON='{"summary":{"critical":0,"high":0,"medium":0,"low":0,"total_findings":0},"findings":[],"commits":[]}'
+' 2>/dev/null) || CLAUDE_JSON='{"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}'
 
 # Write clean JSON to findings file
 echo "$CLAUDE_JSON" > "$OUTPUT_FILE"
 
-# Parse summary for stdout reporting
+# Parse summary for stdout reporting (rage 4-tier: 严重 中 轻 建议)
 CRIT=$(echo "$CLAUDE_JSON" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
     s = d.get('summary', {})
-    print(s.get('critical', 0), s.get('high', 0), s.get('medium', 0), s.get('low', 0), s.get('total_findings', 0))
+    print(s.get('严重', 0), s.get('中', 0), s.get('轻', 0), s.get('建议', 0), s.get('total_findings', 0))
 except Exception:
     print('0 0 0 0 0')
 " 2>/dev/null || echo "0 0 0 0 0")
 
-read -r CRIT_COUNT HIGH_COUNT MEDIUM_COUNT LOW_COUNT TOTAL_COUNT <<< "$CRIT"
+read -r SEV_CRIT SEV_MED SEV_LIGHT SEV_ADV TOTAL_COUNT <<< "$CRIT"
 
 echo "Reviewed ${COMMIT_COUNT} commits (${FROM_COMMIT}..${TO_COMMIT})"
-echo "Findings: ${CRIT_COUNT} CRITICAL · ${HIGH_COUNT} HIGH · ${MEDIUM_COUNT} MEDIUM · ${LOW_COUNT} LOW"
+echo "Findings: ${SEV_CRIT} 严重 · ${SEV_MED} 中 · ${SEV_LIGHT} 轻 · ${SEV_ADV} 建议"
 echo "Output: ${OUTPUT_FILE}"
