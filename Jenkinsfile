@@ -904,7 +904,7 @@ sel_order = {'严重': 0, '中': 1, '轻': 2, '建议': 3}
 # severity-sort (严重 first), stable
 flist_sorted = sorted(flist, key=lambda f: sel_order.get(f.get('severity', '建议'), 9))
 flines = []
-for ndx, fx in enumerate(flist_sorted[:10], start=1):
+for ndx, fx in enumerate(flist_sorted, start=1):
     sev = fx.get('severity') or '建议'
     icon = severity_icons.get(sev, '⚪')
     repo = fx.get('repo', 'il2cpp')
@@ -918,8 +918,6 @@ for ndx, fx in enumerate(flist_sorted[:10], start=1):
     # rage line: #N [严重] [il2cpp] fname:line_range — filename is the Feishu link
     flines.append('{0} **#{1} [{2}] [{3}]** [{4}]({5}) — {6}'.format(
         icon, ndx, sev, repo, fname + loc, furl, msg))
-if len(flist) > 10:
-    flines.append('  … 还有 ' + str(len(flist) - 10) + ' 个问题')
 ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
 bu = '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/'

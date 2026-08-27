@@ -687,6 +687,17 @@ if [ "$LOW_CONF" = "false" ] && [ "$_TOTAL" -eq 0 ]; then
 fi
 
 _FROM_SHORT=$(echo "${FROM_COMMIT}" | cut -c1-7)
+# Sort the aggregated findings by severity (严重>中>轻>建议) so every downstream
+# consumer (report, card, GitLab comment) sees a deterministic, severity-ordered list.
+AGG_FIND=$(python3 - "$AGG_FIND" <<'PY'
+import sys, json
+order = {"严重": 0, "中": 1, "轻": 2, "建议": 3}
+fs = json.loads(sys.argv[1])
+fs.sort(key=lambda f: order.get(f.get("severity", "建议"), 9))
+# stable: keep model order within same severity
+print(json.dumps(fs, ensure_ascii=False))
+PY
+)
 CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" <<'PY'
 import sys, json
 print(json.dumps({
