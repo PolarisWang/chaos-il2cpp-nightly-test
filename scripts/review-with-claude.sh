@@ -187,6 +187,12 @@ rm -f "$FILTERED_PATHS_FILE"
 # Config / cache setup
 # ──────────────────────────────────────────────────────────────
 MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"
+# Default to the more reliable model tier. deepseek-v4-flash (the haiku-tier) is
+# fast but frequently returns NON-JSON/unparseable output on substantive code —
+# which my fail-loud path turns into RED builds (the "构建失败" spam). The sonnet
+# tier (deepseek-v4-pro here) reviews code reliably when the JSON schema is
+# enforced in the prompt. Override with REVIEW_AGENT_MODEL if unavailable.
+REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-pro}"
 # Small enough that no single chunk exceeds what the model handles reliably
 # (dense GC/pointer code starts glitching around ~200 diff lines), but large
 # enough to still merge many tiny files into one call. A file larger than this
@@ -473,7 +479,7 @@ PROMPT_HEADER
 - **fix**: 精确修复方案（言简意赅，一行）
 - **verify**: 修复后的验证目标（言简意赅，一行）
 
-请严格输出以下 JSON 结构（不要包含其他说明文字，不要用 markdown 代码块包裹）:
+请严格输出**纯 JSON 对象**（一个合法的 JSON object，最外层必须以 `{` 开头、以 `}` 结尾）。禁止输出任何前置/后置解释文字、禁止 markdown 代码块（` ``` `）、禁止注释或尾随逗号。`summary` 必须是一个 JSON 对象（含 `严重`/`中`/`轻`/`建议`/`total_findings` 五个数字键），绝不能是字符串。直接输出以下 JSON 结构:
 {
   "summary": { "严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0 },
   "findings": [
@@ -497,10 +503,11 @@ PROMPT_HEADER
 PROMPT_FOOTER
     } > "$PROMPT_FILE"
 
-    # Call claude --print for this chunk.
+    # Call claude --print for this chunk, with the configured model + a hard
+    # per-chunk timeout (a hung model/proxy must NEVER block the whole build).
     OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
     set +e
-    claude --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+    timeout "${REVIEW_CHUNK_TIMEOUT:-180}" claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
     RC=$?
     set -e
     CLAUDE_OUT=$(cat "$OUT_CAP")
