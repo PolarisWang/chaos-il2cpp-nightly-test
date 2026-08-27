@@ -814,20 +814,26 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 env.FINDINGS_ADV   = (parsed['建议'] ?: 0).toString()
                 env.FINDINGS_TOTAL = (parsed.total_findings ?: 0).toString()
 
-                // low_confidence flag — set by review-with-claude.sh when a
-                // substantive-code diff came back with 0 findings (likely a model
-                // glitch). Surface it on the card so "0 findings" is not presented
-                // as a hard "clean pass".
+                // low_confidence / incomplete flags — set by review-with-claude.sh.
+                // low_confidence = substantive diff came back 0 findings (model glitch
+                // possible) OR some chunks were skipped; incomplete = one or more
+                // chunks failed to review entirely (model glitch). Surface both so a
+                // partial/unreliable review is never presented as a clean pass or a
+                // hard build failure.
                 def lowConf = false
+                def inComplete = false
                 try {
                     def full = readJSON text: readFile("${findingsFile}").trim()
                     lowConf = (full.low_confidence == true)
+                    inComplete = (full.incomplete == true)
                 } catch (err) {
                     lowConf = false
+                    inComplete = false
                 }
                 env.REVIEW_LOW_CONF = lowConf.toString()
+                env.REVIEW_INCOMPLETE = inComplete.toString()
 
-                echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${lowConf ? " · low-confidence" : ""}"
+                echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${lowConf ? " · low-confidence" : ""}${inComplete ? " · INCOMPLETE" : ""}"
 
                 // Feishu notification — same node() block, no @2 workspace mismatch
                 def safeInt = { s -> (s != null && s != 'null' && s != '') ? s.toInteger() : 0 }
@@ -933,7 +939,9 @@ if total > 0:
         parts.append('🟢 **' + str(${advCount}) + '** 建议')
     risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
 else:
-    if ${env.REVIEW_LOW_CONF}:
+    if ${env.REVIEW_INCOMPLETE}:
+        risk_line = '⚠️ **审查不完整**（部分文件因模型异常未能覆盖，建议稍后重跑以获得完整结果）'
+    elif ${env.REVIEW_LOW_CONF}:
         risk_line = '⚠️ **0 发现 — 低置信**（在实质性代码上得到 0 条，可能是模型异常，建议人工复核）'
     else:
         risk_line = '✅ 本次未发现代码问题'

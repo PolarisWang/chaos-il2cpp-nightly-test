@@ -187,12 +187,10 @@ rm -f "$FILTERED_PATHS_FILE"
 # Config / cache setup
 # ──────────────────────────────────────────────────────────────
 MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"
-# Default to the more reliable model tier. deepseek-v4-flash (the haiku-tier) is
-# fast but frequently returns NON-JSON/unparseable output on substantive code —
-# which my fail-loud path turns into RED builds (the "构建失败" spam). The sonnet
-# tier (deepseek-v4-pro here) reviews code reliably when the JSON schema is
-# enforced in the prompt. Override with REVIEW_AGENT_MODEL if unavailable.
-REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-pro}"
+# Use deepseek-v4-flash (the available model). Per-chunk hard timeout below keeps
+# a hung call from blocking the build. Override with REVIEW_AGENT_MODEL if a
+# different tier becomes available.
+REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-flash}"
 # Small enough that no single chunk exceeds what the model handles reliably
 # (dense GC/pointer code starts glitching around ~200 diff lines), but large
 # enough to still merge many tiny files into one call. A file larger than this
@@ -581,6 +579,7 @@ fi
 AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
+INCOMPLETE=0
 CHUNK_IDX=0
 # The chunk loop calls claude and pipes its output through extractors; a glitchy
 # model answer or a transient pipe failure must NOT abort the whole script under
@@ -629,8 +628,13 @@ except Exception:
         break
     done
     if [ -z "$chunk_find" ]; then
-        echo "ERROR: could not get a reviewed result for '$chunk_paths' after retries" >&2
-        CHUNK_FAILED=1
+        # Model glitched on this chunk after retries. Do NOT fail the whole build
+        # (that's what spams Feishu with "构建失败"). Skip this chunk, mark the
+        # review incomplete, and let the other chunks still contribute. The final
+        # result will be flagged low_confidence so it isn't presented as a clean
+        # pass / a definitive all-files review.
+        echo "WARNING: could not review '$chunk_paths' after retries — skipping (模型异常，此文件稍后未覆盖)" >&2
+        INCOMPLETE=1
         continue
     fi
     AGG_SUM=$(python3 - "$AGG_SUM" "$chunk_sum" <<'PY'
@@ -652,17 +656,25 @@ PY
 done
 set -e
 
-if [ "$CHUNK_FAILED" != "0" ]; then
-    echo "ERROR: one or more chunks failed to produce a review — refusing to emit a partial/false result." >&2
-    exit 1
+# If some chunks glitched and were skipped (INCOMPLETE), the build must NOT go
+# RED / spam "构建失败" — that's the exact pain. Instead force low_confidence and
+# continue so the card says "部分文件审查未覆盖（模型异常）" with whatever WAS
+# reviewed. Only a genuine full-pipeline failure (below, none) would hard-fail.
+if [ "$INCOMPLETE" != "0" ]; then
+    echo "WARNING: some chunks were skipped due to model output errors — review is partial, flagged low_confidence." >&2
 fi
 
 # ── Low-confidence marker (feature 4) ───────────────────────
-# If the aggregated result is 0 findings on substantive (non-all-note) code, mark
-# low_confidence so the card can show "待人工确认" instead of a flat clean pass.
+# If the aggregated result is 0 findings on substantive (non-all-note) code, OR any
+# chunk was skipped (INCOMPLETE), mark low_confidence so the card shows a wary note
+# instead of a flat clean pass / a definitive all-files review.
 _TOTAL=$(echo "$AGG_SUM" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
 LOW_CONF=false
-if [ "$_TOTAL" -eq 0 ]; then
+if [ "$INCOMPLETE" != "0" ]; then
+    LOW_CONF=true
+    echo "WARNING: review incomplete (one or more chunks skipped) — marking low_confidence"
+fi
+if [ "$LOW_CONF" = "false" ] && [ "$_TOTAL" -eq 0 ]; then
     # substantive code present? (any non-note file)
     any_code=0
     for f in "${ALL_FILES[@]:-}"; do
@@ -675,13 +687,14 @@ if [ "$_TOTAL" -eq 0 ]; then
 fi
 
 _FROM_SHORT=$(echo "${FROM_COMMIT}" | cut -c1-7)
-CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" <<'PY'
+CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" <<'PY'
 import sys, json
 print(json.dumps({
     "summary": json.loads(sys.argv[1]),
     "findings": json.loads(sys.argv[2]),
     "commits": [{"sha": sys.argv[3], "message": "reviewed range"}],
     "low_confidence": sys.argv[4] == "true",
+    "incomplete": sys.argv[5] == "1",
 }, ensure_ascii=False))
 PY
 )

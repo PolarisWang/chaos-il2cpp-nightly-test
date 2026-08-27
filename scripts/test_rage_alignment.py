@@ -340,3 +340,28 @@ def test_review_script_never_caches_empty_result():
 
 if __name__ == "__main__":
     _main()
+
+
+# ── 6. Incomplete-review (方案A) — partial glitch must not fail the build ───
+
+def test_review_script_skips_not_fails_on_glitch():
+    """When a model glitch makes a chunk unparseable after retries, the script must
+    SKIP that chunk (incomplete) and continue — NOT exit 1 / fail the build. This
+    stops the "构建失败" Feishu spam for a transient model glitch."""
+    body = _read(REVIEW_SCRIPT)
+    # the skip path sets INCOMPLETE and continues, not CHUNK_FAILED-exit-1
+    assert "INCOMPLETE=1" in body
+    assert "skipping" in body
+    # the hard "refusing to emit a partial/false result" exit is GONE
+    assert "refusing to emit a partial" not in body
+
+
+def test_review_script_emits_incomplete_flag():
+    """findings JSON must carry an `incomplete` field so the card can warn that
+    part of the diff was not reviewed (model glitch), distinct from a clean pass."""
+    body = _read(REVIEW_SCRIPT)
+    assert '"incomplete"' in body
+
+
+if __name__ == "__main__":
+    _main()
