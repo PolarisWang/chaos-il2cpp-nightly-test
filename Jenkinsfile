@@ -73,15 +73,27 @@ pipeline {
                     if (env.JOB_NAME?.contains('code-review')) {
                         // No cron trigger — host trigger-code-review.sh / trigger-pr-review.sh
                         // check and trigger via API, optionally with PR base/head params.
-                        runCodeReview(
-                            repoUrl: '/home/debian/agent/booming-il2cpp',
-                            branch: params.BOOMING_BRANCH ?: 'main',
-                            prBase:   params.REVIEW_BASE   ?: '',
-                            prHead:   params.REVIEW_HEAD   ?: '',
-                            prNumber: params.REVIEW_PR_NUMBER ?: '',
-                            prTitle:  params.REVIEW_PR_TITLE  ?: ''
-                        )
+                        // Set DISPATCHED BEFORE running the review: whatever happens (even an
+                        // error), the nightly pipeline stages below must never run for a
+                        // code-review job. Previously it was set after runCodeReview() returned,
+                        // so any review error fell through into the full build + SonarQube.
                         env.DISPATCHED = 'true'
+                        try {
+                            runCodeReview(
+                                repoUrl: '/home/debian/agent/booming-il2cpp',
+                                branch: params.BOOMING_BRANCH ?: 'main',
+                                prBase:   params.REVIEW_BASE   ?: '',
+                                prHead:   params.REVIEW_HEAD   ?: '',
+                                prNumber: params.REVIEW_PR_NUMBER ?: '',
+                                prTitle:  params.REVIEW_PR_TITLE  ?: ''
+                            )
+                        } catch (err) {
+                            // Review failed — fail the build here, but DO NOT let the error
+                            // cascade into the untouched nightly stages. Rethrow so the job
+                            // turns red with the actual review cause visible.
+                            echo "Code review failed: ${err.message}"
+                            throw err
+                        }
                     }
                 }
             }
@@ -830,8 +842,11 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                     lowConf = false
                     inComplete = false
                 }
-                env.REVIEW_LOW_CONF = lowConf.toString()
-                env.REVIEW_INCOMPLETE = inComplete.toString()
+                // Interpolate as 1/0 (not .toString() "true"/"false") so the flag is a
+                // valid Python int literal when spliced into the Feishu card python below
+                // — "false" (lowercase) would raise NameError. See commit 2542ba8.
+                env.REVIEW_LOW_CONF = lowConf ? '1' : '0'
+                env.REVIEW_INCOMPLETE = inComplete ? '1' : '0'
 
                 echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${lowConf ? " · low-confidence" : ""}${inComplete ? " · INCOMPLETE" : ""}"
 
