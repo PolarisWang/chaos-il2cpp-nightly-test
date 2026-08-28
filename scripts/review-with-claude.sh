@@ -139,7 +139,11 @@ def is_excluded(path):
     if "/obj/" in path and basename.endswith(".g.cs"):
         return True
 
-    for ext in (".md", ".html", ".txt", ".dll", ".pdb", ".exe", ".lib",
+    # Keep reviewable NOTE/text docs (.md, .txt): they are routed through a lighter
+    # docs-review prompt (see all_note handling) rather than silently discarded, so a
+    # docs-only change is never presented as a confident "no issues". Binary /
+    # generated / non-text artifacts stay excluded.
+    for ext in (".html", ".dll", ".pdb", ".exe", ".lib",
                 ".svg", ".png", ".jpg", ".jpeg", ".jdata", ".jsonl"):
         if path.endswith(ext):
             return True
@@ -175,7 +179,9 @@ if [[ "$FILTERED_COUNT" -eq 0 ]]; then
     rm -f "$FILTERED_PATHS_FILE"
     echo "Reviewed 0 reviewable files"
     echo "Findings: 0"
-    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[]}' > "$OUTPUT_FILE"
+    # Nothing reviewable: flag docs_only + low_confidence so the card can never be
+    # mistaken for a trustworthy code clean-pass. See commit 89a61b3 follow-up.
+    echo '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[],"low_confidence":true,"incomplete":false,"docs_only":true}' > "$OUTPUT_FILE"
     exit 0
 fi
 
@@ -299,8 +305,10 @@ if [ -f "$CACHE_FILE" ]; then
 fi
 
 # ── review_one_diff: review a single chunk (one or more files) ──
+# $1 cdiff, $2 cpaths, $3 mode ("code"|"docs"). docs = all-note chunk → lighter
+# review of the technical substance/claims, not code-bug hunting.
 review_one_diff() {
-    local cdiff="$1" cpaths="$2"
+    local cdiff="$1" cpaths="$2" mode="${3:-code}"
     [ -z "$cdiff" ] && { echo ""; return; }
 
     # Token-aware truncation (safety net).
@@ -337,7 +345,39 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
     esac
 
     {
-        cat << 'PROMPT_HEADER'
+        # Docs-mode (all-note chunk): lighter review of the technical substance —
+        # the claims, evidence, and plan in a handoff/notes file — rather than
+        # hunting for code bugs in prose. Findings still use the same JSON schema.
+        if [ "$mode" = "docs" ]; then
+            cat << 'PROMPT_HEADER'
+请 review 以下文档 diff（.md / .txt 技术文档或交接笔记），输出 JSON 格式的审查结果。
+**重要：所有审查消息（message 字段）必须使用中文，不得使用英文。**
+
+## 背景
+这是 booming-il2cpp 项目的技术文档/交接笔记变更。它通常是既有代码调查的结论固化、
+或给接续者看的执行方案。**不要寻找代码 bug**——这里没有代码可查；请审查文档本身的
+内容质量与技术可信度。
+
+## 文档审查维度
+1. **技术结论是否站得住**：断言是否有实测证据支撑，是否混淆了"断言"与"证据"。
+2. **事实与推断分离**：哪些是观测到的硬事实、哪些是推测/假设，是否可能误导读者。
+3. **交接完整性**：接续者看是否足够复现/承接，必要的复现步骤、命令、上下文上下文是否缺失。
+4. **风险与后续行动**：文中声明的执行计划/方案是否有明显漏洞、遗漏或前后矛盾。
+5. **一致性与命名**：与关联文档/代码术语是否一致，是否有自相矛盾的表述。
+6. **不含敏感信息**：文档是否硬编码了进程私有/运行时的一次性地址、密钥、token、绝对路径
+   （同类内容在本次 handoff 中已明确要求"泛化"）。
+
+严重级别定义（rage 标准 · 4 级）：
+- **严重**: 技术结论错误/无证据支撑却当作定论、交接信息会导致接续者误操作、敏感信息泄漏
+- **中**: 事实与推断未分清可能误导、复现步骤缺失导致无法承接、方案存在明显漏洞
+- **轻**: 前后矛盾、术语不一致、一次性绝对值未被泛化（非敏感但易误导）
+- **建议**: 可选的措辞/结构/命名改进
+
+**每个 finding 必须绑定到文档的准确位置**（`file` + `line`，可给 `line_range`）。
+没有真实问题的文档应如实给 0 findings，不要为了凑数而编造。
+PROMPT_HEADER
+        else
+            cat << 'PROMPT_HEADER'
 请 review 以下 git diff，输出 JSON 格式的审查结果。
 **重要：所有审查消息（message 字段）必须使用中文，不得使用英文。**
 
@@ -455,6 +495,8 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
 
 ## 变更范围
 PROMPT_HEADER
+        fi
+
         echo ""
         echo "变更文件: ${cpaths}"
         echo "提交范围: ${FROM_COMMIT}..${TO_COMMIT}"
@@ -463,7 +505,45 @@ PROMPT_HEADER
         echo '```diff'
         printf '%s\n' "$cdiff"
         echo '```'
-        cat << 'PROMPT_FOOTER'
+        if [ "$mode" = "docs" ]; then
+            cat << 'PROMPT_FOOTER'
+
+## 输出格式要求（rage 标准）
+
+每条 finding 必须包含:
+- **repo**: 仓库标签（本项目统一 "il2cpp"）
+- **file**: 文档文件相对路径
+- **line**: 问题起始行号
+- **line_range**: 如适用，形如 "85-120"（跨行）或与 line 相同（单行）
+- **severity**: "严重" | "中" | "轻" | "建议"
+- **message**: 中文问题描述
+- **fix**: 建议的修改方向（言简意赅，一行）
+- **verify**: 修订后的验证目标（言简意赅，一行）
+
+请严格输出**纯 JSON 对象**（一个合法的 JSON object，最外层必须以 `{` 开头、以 `}` 结尾）。禁止输出任何前置/后置解释文字、禁止 markdown 代码块（` ``` `）、禁止注释或尾随逗号。`summary` 必须是一个 JSON 对象（含 `严重`/`中`/`轻`/`建议`/`total_findings` 五个数字键），绝不能是字符串。直接输出以下 JSON 结构:
+{
+  "summary": { "严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0 },
+  "findings": [
+    {
+      "severity": "中",
+      "repo": "il2cpp",
+      "category": "documentation",
+      "dimension": 2,
+      "file": "docs/dev/in-progress/gc-align-coreclr/notes/young-collector-emptiness-refactor-handoff.md",
+      "line": 85,
+      "line_range": "85-90",
+      "message": "文档把某次运行的进程私有绝对地址当作通用结论，接续者会误以为常量",
+      "fix": "将具体地址泛化为稳定的相对关系描述",
+      "verify": "文档不再包含一次性运行地址"
+    }
+  ],
+  "commits": [
+    { "sha": "abc1234", "message": "docs: handoff" }
+  ]
+}
+PROMPT_FOOTER
+        else
+            cat << 'PROMPT_FOOTER'
 
 ## 输出格式要求（rage 标准）
 
@@ -499,6 +579,7 @@ PROMPT_HEADER
   ]
 }
 PROMPT_FOOTER
+        fi
     } > "$PROMPT_FILE"
 
     # Call claude --print for this chunk, with the configured model + a hard
@@ -599,10 +680,11 @@ for chunk_paths in "${CHUNKS[@]:-}"; do
     for f in $chunk_paths; do
         [ "$(is_note_path "$f")" = "0" ] && { all_note=0; break; }
     done
+    chunk_mode="code"; [ "$all_note" = "1" ] && chunk_mode="docs"
     chunk_find=""; chunk_sum=""; attempts=0
     while [ -z "$chunk_find" ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; do
         attempts=$((attempts+1))
-        js=$(review_one_diff "$cdiff" "$chunk_paths")
+        js=$(review_one_diff "$cdiff" "$chunk_paths" "$chunk_mode")
         if [ -z "$js" ]; then
             echo "  chunk '$chunk_paths' claude/parse error — retry $attempts/$MAX_EMPTY_RETRIES"
             continue
@@ -687,6 +769,14 @@ if [ "$LOW_CONF" = "false" ] && [ "$_TOTAL" -eq 0 ]; then
 fi
 
 _FROM_SHORT=$(echo "${FROM_COMMIT}" | cut -c1-7)
+# docs_only: the reviewed range contains NO substantive code — only note/text docs.
+# Used by the card to distinguish "纯文档变更" from a real code clean-pass.
+DOCS_ONLY=false
+any_code=0
+for f in "${ALL_FILES[@]:-}"; do
+    [ "$(is_note_path "$f")" = "0" ] && { any_code=1; break; }
+done
+[ "$any_code" = "0" ] && DOCS_ONLY=true
 # Sort the aggregated findings by severity (严重>中>轻>建议) so every downstream
 # consumer (report, card, GitLab comment) sees a deterministic, severity-ordered list.
 AGG_FIND=$(python3 - "$AGG_FIND" <<'PY'
@@ -698,7 +788,7 @@ fs.sort(key=lambda f: order.get(f.get("severity", "建议"), 9))
 print(json.dumps(fs, ensure_ascii=False))
 PY
 )
-CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" <<'PY'
+CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" "$DOCS_ONLY" <<'PY'
 import sys, json
 print(json.dumps({
     "summary": json.loads(sys.argv[1]),
@@ -706,6 +796,7 @@ print(json.dumps({
     "commits": [{"sha": sys.argv[3], "message": "reviewed range"}],
     "low_confidence": sys.argv[4] == "true",
     "incomplete": sys.argv[5] == "1",
+    "docs_only": sys.argv[6] == "true",
 }, ensure_ascii=False))
 PY
 )

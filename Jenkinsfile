@@ -834,21 +834,25 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 // hard build failure.
                 def lowConf = false
                 def inComplete = false
+                def docsOnly = false
                 try {
                     def full = readJSON text: readFile("${findingsFile}").trim()
                     lowConf = (full.low_confidence == true)
                     inComplete = (full.incomplete == true)
+                    docsOnly = (full.docs_only == true)
                 } catch (err) {
                     lowConf = false
                     inComplete = false
+                    docsOnly = false
                 }
                 // Interpolate as 1/0 (not .toString() "true"/"false") so the flag is a
                 // valid Python int literal when spliced into the Feishu card python below
                 // — "false" (lowercase) would raise NameError. See commit 2542ba8.
                 env.REVIEW_LOW_CONF = lowConf ? '1' : '0'
                 env.REVIEW_INCOMPLETE = inComplete ? '1' : '0'
+                env.REVIEW_DOCS_ONLY = docsOnly ? '1' : '0'
 
-                echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${lowConf ? " · low-confidence" : ""}${inComplete ? " · INCOMPLETE" : ""}"
+                echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${docsOnly ? " · docs-only" : ""}${lowConf ? " · low-confidence" : ""}${inComplete ? " · INCOMPLETE" : ""}"
 
                 // Feishu notification — same node() block, no @2 workspace mismatch
                 def safeInt = { s -> (s != null && s != 'null' && s != '') ? s.toInteger() : 0 }
@@ -858,7 +862,7 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def advCount  = safeInt(env.FINDINGS_ADV)
                 def totalFindings = safeInt(env.FINDINGS_TOTAL)
 
-                def colorTag = sevCount > 0 || medCount > 0 ? 'red' : (lightCount > 0 ? 'blue' : 'green')
+                def colorTag = sevCount > 0 || medCount > 0 ? 'red' : (lightCount > 0 ? 'blue' : (docsOnly || lowConf || inComplete ? 'orange' : 'green'))
                 def riskWord = totalFindings > 0 ? "${totalFindings} 个问题" : "无问题"
                 def feishuTitle = isPrReview ? "chaos-il2cpp PR #${prNumber} 代码审查 — ${riskWord}" : "chaos-il2cpp 代码审查 — ${riskWord}"
                 def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
@@ -952,7 +956,9 @@ if total > 0:
         parts.append('🟢 **' + str(${advCount}) + '** 建议')
     risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
 else:
-    if ${env.REVIEW_INCOMPLETE}:
+    if ${env.REVIEW_DOCS_ONLY}:
+        risk_line = '📄 **纯文档变更**（本次仅改动 .md/.txt 文档，已按文档维度审查；如有代码改动请单独 review code 变更）'
+    elif ${env.REVIEW_INCOMPLETE}:
         risk_line = '⚠️ **审查不完整**（部分文件因模型异常未能覆盖，建议稍后重跑以获得完整结果）'
     elif ${env.REVIEW_LOW_CONF}:
         risk_line = '⚠️ **0 发现 — 低置信**（在实质性代码上得到 0 条，可能是模型异常，建议人工复核）'
