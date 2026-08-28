@@ -585,11 +585,14 @@ PROMPT_FOOTER
         fi
     } > "$PROMPT_FILE"
 
-    # Call claude --print for this chunk, with the configured model + a hard
-    # per-chunk timeout (a hung model/proxy must NEVER block the whole build).
+    # Call claude --print for this chunk, with a hard per-chunk timeout (a hung or
+    # busy model/proxy must NEVER wedge the whole build). `-k <grace>` force-kills
+    # (SIGKILL) after the grace period in case claude/Node ignores the first SIGTERM
+    # — observed: a busy deepseek-v4-flash call can otherwise linger past `timeout`.
     OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
     set +e
-    timeout "${REVIEW_CHUNK_TIMEOUT:-180}" claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+    timeout -k "${REVIEW_CHUNK_KILL_AFTER:-30}" "${REVIEW_CHUNK_TIMEOUT:-180}" \
+        claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
     RC=$?
     set -e
     CLAUDE_OUT=$(cat "$OUT_CAP")
