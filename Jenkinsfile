@@ -672,13 +672,37 @@ def runCodeReview(Map params = [:]) {
                 set -euo pipefail
                 mkdir -p '${SCRIPT_DIR}'
                 echo "Downloading review scripts from GitHub..."
-                curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/review-with-claude.sh' \
-                    'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
-                curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
-                    'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu-text.sh'
-                curl -sL -H 'Cache-Control: no-cache' -o '${SCRIPT_DIR}/notify-feishu.sh' \
-                    'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/notify-feishu.sh'
+                # Prefer a pin to this repo's own checked-out SHA (GIT_COMMIT), so the
+                # download is consistent: raw.githubusercontent.com's bare 'main' path is
+                # CDN-cached and can serve a STALE script for a while after a push (e.g.
+                # missing the docs-only review). Fall back to 'main' if GIT_COMMIT is unset.
+                NIGHTLY_SHA="\${GIT_COMMIT}"
+                if [ -n "\$NIGHTLY_SHA" ]; then
+                    RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
+                else
+                    RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                fi
+                echo "Downloading from \$RAWT"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                    "\$RAWT/scripts/review-with-claude.sh"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
+                    "\$RAWT/scripts/notify-feishu-text.sh"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu.sh' \
+                    "\$RAWT/scripts/notify-feishu.sh"
                 chmod +x '${SCRIPT_DIR}/'*.sh
+                # Sanity: the review script must keep .md/.txt in EXTS_KEEP (docs reviewed,
+                # not dropped) — the fix that makes the docs path actually run. Without it a
+                # docs-only range still falls through to the all-excluded early exit.
+                if ! grep -Eq 'EXTS_KEEP = \(.*"\.md"' '${SCRIPT_DIR}/review-with-claude.sh'; then
+                    echo "WARNING: review script lacks docs EXTS_KEEP (stale download?); re-pulling from main"
+                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
+                    chmod +x '${SCRIPT_DIR}/review-with-claude.sh'
+                    if ! grep -Eq 'EXTS_KEEP = \(.*"\.md"' '${SCRIPT_DIR}/review-with-claude.sh'; then
+                        echo "ERROR: review script still lacks docs EXTS_KEEP after re-pull"
+                        exit 1
+                    fi
+                fi
                 echo "Scripts synced to ${SCRIPT_DIR}"
             """
 
