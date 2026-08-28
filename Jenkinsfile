@@ -690,19 +690,19 @@ def runCodeReview(Map params = [:]) {
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu.sh' \
                     "\$RAWT/scripts/notify-feishu.sh"
                 chmod +x '${SCRIPT_DIR}/'*.sh
-                # Sanity: the review script must keep .md/.txt in EXTS_KEEP (docs reviewed,
-                # not dropped) — the fix that makes the docs path actually run. Without it a
-                # docs-only range still falls through to the all-excluded early exit.
-                if ! grep -Eq 'EXTS_KEEP = \(.*"\.md"' '${SCRIPT_DIR}/review-with-claude.sh'; then
-                    echo "WARNING: review script lacks docs EXTS_KEEP (stale download?); re-pulling from main"
+                # Sanity: the review script must carry the docs-reviewable marker (the
+                # EXTS_KEEP-with-.md fix that makes the docs path actually run). Without it
+                # a docs-only range still falls through to the all-excluded early exit.
+                grep -Fq 'DOCS_REVIEWABLE_VERSION_MARKER' '${SCRIPT_DIR}/review-with-claude.sh' || {
+                    echo "WARNING: review script lacks docs marker (stale download?); re-pulling from main"
                     curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
                         'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
                     chmod +x '${SCRIPT_DIR}/review-with-claude.sh'
-                    if ! grep -Eq 'EXTS_KEEP = \(.*"\.md"' '${SCRIPT_DIR}/review-with-claude.sh'; then
-                        echo "ERROR: review script still lacks docs EXTS_KEEP after re-pull"
+                    grep -Fq 'DOCS_REVIEWABLE_VERSION_MARKER' '${SCRIPT_DIR}/review-with-claude.sh' || {
+                        echo "ERROR: review script still lacks docs marker after re-pull"
                         exit 1
-                    fi
-                fi
+                    }
+                }
                 echo "Scripts synced to ${SCRIPT_DIR}"
             """
 

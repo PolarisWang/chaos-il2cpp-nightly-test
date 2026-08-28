@@ -114,6 +114,7 @@ echo "$CHANGED_FILES_LIST" | python3 -c '
 import sys
 
 # NOTE text/docs are kept (reviewed via the docs-mode prompt) as well as code.
+# marker: DOCS_REVIEWABLE_VERSION_MARKER
 EXTS_KEEP = (".cs", ".cpp", ".h", ".hpp", ".py", ".scriban", ".cmake", ".yaml", ".yml",
              ".md", ".txt")
 
