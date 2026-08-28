@@ -676,7 +676,7 @@ def runCodeReview(Map params = [:]) {
                 # download is consistent: raw.githubusercontent.com's bare 'main' path is
                 # CDN-cached and can serve a STALE script for a while after a push (e.g.
                 # missing the docs-only review). Fall back to 'main' if GIT_COMMIT is unset.
-                NIGHTLY_SHA="\${GIT_COMMIT}"
+                NIGHTLY_SHA="\${GIT_COMMIT:-}"
                 if [ -n "\$NIGHTLY_SHA" ]; then
                     RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
                 else
