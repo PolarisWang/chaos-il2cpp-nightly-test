@@ -113,7 +113,9 @@ FILTERED_PATHS_FILE=$(mktemp)
 echo "$CHANGED_FILES_LIST" | python3 -c '
 import sys
 
-EXTS_KEEP = (".cs", ".cpp", ".h", ".hpp", ".py", ".scriban", ".cmake", ".yaml", ".yml")
+# NOTE text/docs are kept (reviewed via the docs-mode prompt) as well as code.
+EXTS_KEEP = (".cs", ".cpp", ".h", ".hpp", ".py", ".scriban", ".cmake", ".yaml", ".yml",
+             ".md", ".txt")
 
 def is_excluded(path):
     """Return True if a file path should be excluded from code review."""
