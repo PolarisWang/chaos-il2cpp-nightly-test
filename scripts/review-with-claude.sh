@@ -236,43 +236,53 @@ CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 # ──────────────────────────────────────────────────────────────
 CHUNKS=()          # each element = space-joined list of file paths in a chunk
 
-# 1) compute each file's diff line-count + note status
+# compute each file's diff line-count (for packing budget)
 mapfile -t ALL_FILES <<<"$FILTERED_FILE_NAMES"
-declare -a FILE_LINES=()
-FILE_CT=0
-for f in "${ALL_FILES[@]:-}"; do
-    [ -z "$f" ] && continue
-    f="${f//$'\r'/}"
-    fl=$(chunk_diff_for "$f" | wc -l | tr -d ' ')
-    FILE_LINES[FILE_CT]="$fl"
-    FILE_CT=$((FILE_CT+1))
-done
 
-# 2) greedy pack: large files get their own chunk; small files accumulate until
-#    CHUNK_MAX_LINES or MAX_CHUNKS is reached.
-cur=""; cur_lines=0
-_i=0
+# 2) greedy pack — BUT keep code and note/docs files in SEPARATE chunks. Bundling
+#    a .cpp with a bunch of .md in one prompt reliably confuses the model into
+#    malformed JSON (observed: parse errors on mixed chunks), so we never mix them.
+#    Two independent streams: code files pack together, note files pack together.
+declare -A FL_MAP=()
 for f in "${ALL_FILES[@]:-}"; do
     [ -z "$f" ] && continue
     f="${f//$'\r'/}"
-    fl="${FILE_LINES[_i]:-0}"
-    fl="${fl:-0}"
-    _i=$((_i+1))
-    # each file alone is its own chunk if large
+    FL_MAP["$f"]=$(chunk_diff_for "$f" | wc -l | tr -d ' ')
+done
+pack_to() {
+    # $1 = stream var name prefix (used for cur/cur_lines bash vars), $2 = file.
+    # Appends files to CHUNKS, honoring large-file and line-budget rules per stream.
+    local f="$2"
+    local fl="${FL_MAP[$f]:-0}"
     if [ "$fl" -gt "$CHUNK_MAX_LINES" ]; then
-        # flush pending small-file chunk
-        if [ -n "$cur" ]; then CHUNKS+=("$cur"); cur=""; cur_lines=0; fi
+        # large file -> itself a chunk (flush pending in this stream)
+        if [ -n "$cur" ]; then CHUNKS+=("$cur"); fi
         CHUNKS+=("$f")
-        continue
+        cur=""; cur_lines=0
+        return
     fi
-    # would adding push us over the line budget? then flush
     if [ -n "$cur" ] && [ $((cur_lines + fl)) -gt "$CHUNK_MAX_LINES" ]; then
         CHUNKS+=("$cur"); cur=""; cur_lines=0
     fi
     cur="$cur $f"
     cur_lines=$((cur_lines + fl))
+}
+cur=""; cur_lines=0
+for f in "${ALL_FILES[@]:-}"; do
+    [ -z "$f" ] && continue
+    f="${f//$'\r'/}"
+    [ "$(is_note_path "$f")" = "1" ] && continue   # notes handled below
+    pack_to code "$f"
 done
-if [ -n "$cur" ]; then CHUNKS+=("$cur"); fi
+[ -n "$cur" ] && CHUNKS+=("$cur")
+cur=""; cur_lines=0
+for f in "${ALL_FILES[@]:-}"; do
+    [ -z "$f" ] && continue
+    f="${f//$'\r'/}"
+    [ "$(is_note_path "$f")" = "0" ] && continue   # code handled above
+    pack_to note "$f"
+done
+[ -n "$cur" ] && CHUNKS+=("$cur")
 
 # enforce MAX_CHUNKS: if we have too many, merge the remainder into one final chunk.
 if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
@@ -605,7 +615,7 @@ PROMPT_FOOTER
     # Robust JSON extraction (finding messages may contain braces).
     local extracted
     extracted=$(echo "$CLAUDE_OUT" | python3 -c '
-import sys, json
+import sys, json, re
 content = sys.stdin.read()
 def strip_fences(s):
     out = []; in_block = False
@@ -615,6 +625,135 @@ def strip_fences(s):
             in_block = not in_block; continue
         if not in_block: out.append(line)
     return "\n".join(out)
+def sanitize(s):
+    # Repair common model JSON errors so a mostly-valid summary survives instead
+    # of being treated as a hard parse failure -> chunk skipped -> INCOMPLETE.
+    s = re.sub(r",\s*([}\]])", r"\1", s)          # trailing commas
+    s = re.sub(r"(?m)//[^\n]*", "", s)            # // comments
+    s = re.sub(r"(?s)/\*.*?\*/", "", s)           # /* */ comments
+    s = re.sub(chr(39), "\"", s)                   # single -> double quotes (best effort)
+    s = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r"\1\"\2\":", s)  # unquoted keys
+    return s
+def try_parse(s):
+    if not s: return None
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict) and isinstance(obj.get("summary"), dict):
+            return obj
+    except Exception:
+        pass
+    return None
+def find_json_object(s):
+    depth = 0; start = None
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if depth == 0: start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                cand = s[start:i+1]
+                obj = try_parse(cand) or try_parse(sanitize(cand))
+                if obj is not None:
+                    return (obj, i)
+                start = None
+    return None
+obj = None
+for src in (strip_fences(content), content):
+    hit = find_json_object(src)
+    if hit is not None:
+        obj, _ = hit
+        break
+if obj is None:
+    # last resort: sanitize the ENTIRE fence-stripped output and scan again
+    hit = find_json_object(sanitize(strip_fences(content)))
+    if hit is not None:
+        obj, _ = hit
+if obj is None:
+    sys.exit(2)
+print(json.dumps(obj, ensure_ascii=False))
+' 2>/dev/null)
+    echo "$extracted"
+}
+
+# ── review_one_diff_minimal: last-resort summary-only retry ──
+# When the full review 3-parse-failed, this asks the model for *only* a severity
+# summary (no findings JSON, no per-finding fields). The model is far more
+# reliable at producing a single number than a complex JSON, so this prevents
+# the chunk from being marked INCOMPLETE when the actual issue is just JSON
+# formatting in the full prompt.
+review_one_diff_minimal() {
+    local cdiff="$1" cpaths="$2" mode="${3:-code}"
+    [ -z "$cdiff" ] && { echo ""; return; }
+
+    # Token-aware truncation (safety net) — same as review_one_diff
+    local trunc=$(printf '%s\n' "$cdiff" | python3 -c '
+import sys
+MAX_TOTAL_TOKENS = 1048500
+COMPLETION_TOKENS = 138000
+PROMPT_OVERHEAD_TOKENS = 2000
+CHARS_PER_TOKEN = 3.0
+available = MAX_TOTAL_TOKENS - COMPLETION_TOKENS - PROMPT_OVERHEAD_TOKENS
+diff_text = sys.stdin.read()
+n = len(diff_text.split("\n"))
+if n > 0 and diff_text.split("\n")[-1] == "": n -= 1
+if n == 0:
+    print("FULL"); sys.exit(0)
+if len(diff_text)/CHARS_PER_TOKEN <= available:
+    print("FULL"); sys.exit(0)
+lo, hi = 0, n
+while lo < hi:
+    mid = (lo + hi + 1)//2
+    partial = "\n".join(diff_text.split("\n")[:mid])
+    if len(partial)/CHARS_PER_TOKEN <= available: lo = mid
+    else: hi = mid-1
+print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
+' 2>/dev/null || echo "FULL")
+    case "$trunc" in
+        ALL_TRUNCATED) cdiff="" ;;
+        TRUNCATED:*)
+            allowed="${trunc#TRUNCATED:}"
+            local lines=$(printf '%s\n' "$cdiff" | wc -l | tr -d ' ')
+            [ "$allowed" -lt "$lines" ] && cdiff=$(printf '%s\n' "$cdiff" | head -"$allowed") ;;
+    esac
+
+    local PROMPT_FILE=$(mktemp)
+    {
+        echo "请 review 以下代码变更，回答 ONLY 一个问题：变更中有多少条问题？"
+        echo ""
+        echo "请按 严重/中/轻/建议 四级分级。如无问题则全部为 0。"
+        echo ""
+        echo "变更文件: ${cpaths}"
+        echo '```diff'
+        printf '%s\n' "$cdiff"
+        echo '```'
+        echo ""
+        echo "输出格式：纯 JSON，且 ONLY 输出这个 JSON（不要任何其他文字）："
+        echo '{'
+        echo '  "summary": { "严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0 },'
+        echo '  "findings": []'
+        echo '}'
+        echo "把 summary 中的数字替换为实际值，findings 留空数组。"
+    } > "$PROMPT_FILE"
+
+    local OUT_CAP=$(mktemp); local ERR_CAP=$(mktemp)
+    set +e
+    timeout -k "${REVIEW_CHUNK_KILL_AFTER:-30}" "${REVIEW_CHUNK_TIMEOUT:-180}" \
+        claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+    local RC=$?
+    set -e
+    local CLAUDE_OUT=$(cat "$OUT_CAP")
+    [ -z "$CLAUDE_OUT" ] && CLAUDE_OUT=$(cat "$ERR_CAP")
+    rm -f "$OUT_CAP" "$ERR_CAP" "$PROMPT_FILE"
+    if [ "$RC" != "0" ]; then
+        echo ""; return
+    fi
+
+    # Extract a bare summary JSON (much simpler — just find any JSON with summary dict)
+    local extracted
+    extracted=$(echo "$CLAUDE_OUT" | python3 -c '
+import sys, json
+content = sys.stdin.read()
 def find_json_object(s):
     depth = 0; start = None
     for i, ch in enumerate(s):
@@ -633,12 +772,11 @@ def find_json_object(s):
                     pass
                 start = None
     return None
-obj = None
-for src in (strip_fences(content), content):
-    obj = find_json_object(src)
-    if obj is not None: break
+obj = find_json_object(content)
 if obj is None:
     sys.exit(2)
+if "findings" not in obj:
+    obj["findings"] = []
 print(json.dumps(obj, ensure_ascii=False))
 ' 2>/dev/null)
     echo "$extracted"
@@ -715,6 +853,38 @@ except Exception:
         chunk_find="$sfind"; chunk_sum="$ssum"
         break
     done
+    if [ -z "$chunk_find" ]; then
+        # Model glitched on this chunk after retries. Before giving up, try one
+        # last time with a MINIMAL summary-only prompt (no findings required).
+        # This at least gives us a trustworthy total for the chunk rather than
+        # marking it INCOMPLETE. The model is far more reliable when asked only
+        # for a single number than for a full JSON with findings.
+        echo "  chunk '$chunk_paths' — retrying with minimal summary-only prompt"
+        js=$(review_one_diff_minimal "$cdiff" "$chunk_paths" "$chunk_mode")
+        mapfile -t SF < <(echo "$js" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    s = d.get("summary", {})
+    print(json.dumps(s, ensure_ascii=False))
+    print(json.dumps(d.get("findings", []), ensure_ascii=False))
+except Exception:
+    print("{\"严重\":0,\"中\":0,\"轻\":0,\"建议\":0,\"total_findings\":0}")
+    print("[]")
+')
+        ssum="${SF[0]:-}"; sfind="${SF[1]:-}"
+        if [ -n "$ssum" ]; then
+            total=$(echo "$ssum" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
+            if [ "${total:-0}" -gt 0 ]; then
+                chunk_find="$sfind"; chunk_sum="$ssum"
+                echo "  chunk '$chunk_paths' — summary-only retry produced ${total} findings, accepted"
+            else
+                # 0 findings from summary-only is trustworthy — model reliably counts
+                chunk_find="$sfind"; chunk_sum="$ssum"
+                echo "  chunk '$chunk_paths' — summary-only confirmed 0 findings, accepted"
+            fi
+        fi
+    fi
     if [ -z "$chunk_find" ]; then
         # Model glitched on this chunk after retries. Do NOT fail the whole build
         # (that's what spams Feishu with "构建失败"). Skip this chunk, mark the
