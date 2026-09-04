@@ -940,9 +940,12 @@ file_sha = '${isPrReview ? prHead : env.CURRENT_COMMIT}'
 commits = []
 try:
     # Capture the FULL commit message (subject + body), not just %s title.
-    # Emit each commit as: <sha40>\x00<full-message>\x00  (%x00 = NUL). Splitting on
-    # NUL is safe because git forbids NUL bytes inside commit messages, and %B strips
-    # the trailing newline, so parts come out as [sha1, msg1, sha2, msg2, ...].
+    # Emit each commit as <sha40> NUL <full-message> NUL (NUL = ASCII 0x00). Splitting
+    # on NUL is safe because git forbids NUL bytes inside messages, and %B strips the
+    # trailing newline, so parts come out [sha1, msg1, sha2, msg2, ...]. NOTE: this block
+    # lives inside a Groovy sh triple-quote string, so NO literal backslash may appear
+    # here (Groovy would turn it into an escape and break the build). We use chr(0) /
+    # chr(10) / splitlines() instead of backslash escapes on purpose — stable + safe.
     result = subprocess.run(
         ['git', '-C', booming_dir, 'log',
          '--format=%H%x00%B%x00',
@@ -950,7 +953,7 @@ try:
         capture_output=True, timeout=30
     )
     out = result.stdout.decode('utf-8', errors='replace')
-    parts = out.split('\x00')
+    parts = out.split(chr(0))
     i = 0
     n = len(parts)
     while i + 1 < n:
@@ -959,7 +962,7 @@ try:
         i += 2
         if not sha or not full_msg:
             continue
-        lines = full_msg.split('\n')
+        lines = full_msg.splitlines()
         subject = lines[0].strip() if lines else full_msg
         body_lines = lines[1:]
         # Strip a git TRALER block (Co-Authored-By / Signed-off-by / Reviewed-by, ...).
@@ -986,7 +989,7 @@ try:
             preceded_by_header = (trailing == len(body_lines))      # subject-only + trailers
             if separated or preceded_by_header:
                 body_lines = body_lines[:j + 1] if j >= 0 else []
-        body = '\n'.join(l.strip() for l in body_lines if l.strip())
+        body = chr(10).join(l.strip() for l in body_lines if l.strip())
         commits.append({'sha': sha, 'subject': subject, 'body': body})
 except Exception:
     pass
@@ -1019,7 +1022,7 @@ def render_commit_lines(commits, prefix='  • '):
         subj = c.get('subject', '')
         url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
         out.append(prefix + u'[[' + sha + u'] ' + subj + u'](' + url + u')')
-        blines = (c.get('body') or '').split('\n')
+        blines = (c.get('body') or '').splitlines()
         keep = min(len(blines), MAX_BODY_LINES_PER_COMMIT, budget)
         for bl in blines[:keep]:
             out.append('       ' + bl.strip())

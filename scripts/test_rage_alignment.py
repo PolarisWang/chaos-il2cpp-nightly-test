@@ -356,6 +356,28 @@ def test_review_script_skips_not_fails_on_glitch():
     assert "refusing to emit a partial" not in body
 
 
+def test_jenkinsfile_commit_parse_region_has_no_backslash():
+    """THE COMMIT-PARSE EMBEDDED PYTHON LIVES INSIDE A Groovy sh triple-quote string
+    (\"\"\"). ANY literal backslash there is interpreted by Groovy as an escape — an
+    invalid one like '\\x00' raises 'unexpected char' and kills EVERY code-review/job
+    build at compile time, before review runs (this is exactly how the pipeline went
+    dark in 2026-09-04 build #814). The parse must therefore use chr(0)/chr(10)/
+    splitlines() and carry NO backslash. This test fails loudly if one gets edited in."""
+    body = _read(JENKINSFILE)
+    start = body.index('commits = []')
+    end = body.index('# PR mode: show the PR', start)   # end of the parse+render block
+    region = body[start:end]
+    assert '\\' not in region, (
+        "commit-parse embedded python must not contain a backslash (Groovy escape "
+        "hazard breaks the build). Use chr(0)/chr(10)/splitlines() instead."
+    )
+    # The code should actually use the safe constructs (guard against someone swapping
+    # back to backslash escapes via a partial revert):
+    assert 'chr(0)' in region, "must split on NUL via chr(0), not backslash escape"
+    assert 'splitlines()' in region or 'chr(10)' in region, (
+        "must split/join newlines via splitlines()/chr(10), not backslash escapes")
+
+
 def test_review_script_emits_incomplete_flag():
     """findings JSON must carry an `incomplete` field so the card can warn that
     part of the diff was not reviewed (model glitch), distinct from a clean pass."""
