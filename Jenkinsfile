@@ -125,8 +125,39 @@ pipeline {
                         set -eu
                         mkdir -p "\${WORKSPACE}/scripts"
                         cd "\${WORKSPACE}/scripts"
+                        # Download the helper scripts, pinning to this build's own GIT_COMMIT so the
+                        # download is consistent (raw.githubusercontent.com's bare 'main' path is
+                        # CDN-cached and can serve a STALE script for a while after a push). Fall back
+                        # to 'main' if GIT_COMMIT is unset. See the P0-1 note in runCodeReview too.
+                        NIGHTLY_SHA="\${GIT_COMMIT:-}"
+                        if [ -n "\$NIGHTLY_SHA" ]; then
+                            RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
+                        else
+                            RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                        fi
+                        echo "Downloading nightly scripts from \$RAWT"
                         for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh; do
-                            curl -sL -o "\$script" "https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/\$script" || echo "WARNING: failed to download \$script"
+                            # curl can return rc=0 even on a GnuTLS handshake failure (this box's flaky
+                            # link to GitHub), so ALWAYS sanity-check the downloaded content rather than
+                            # trusting rc alone. A corrupt/empty script would otherwise silently break
+                            # publishing under the old || echo WARNING pattern.
+                            ok=0
+                            for attempt in 1 2 3; do
+                                rm -f "\$script"
+                                curl -sfL --max-time 60 -o "\$script" "\$RAWT/scripts/\$script" && \\
+                                    [ -s "\$script" ] && ok=1 && break
+                                echo "download attempt \$attempt/3 failed for \$script (retry)"
+                                sleep 2
+                            done
+                            if [ "\$ok" != "1" ]; then
+                                echo "FATAL: failed to download \$script after 3 attempts"
+                                exit 1
+                            fi
+                            # Generic content sanity: it should look like the script type expected.
+                            case "\$script" in
+                                *.py) grep -q '^#!/usr/bin/env python3' "\$script" || { echo "FATAL: \$script not a valid python script"; exit 1; } ;;
+                                *.sh) grep -q '^#!.*sh'            "\$script" || { echo "FATAL: \$script not a valid shell script"; exit 1; } ;;
+                            esac
                         done
                         chmod +x *.sh *.py 2>/dev/null || true
                         ls -la
@@ -1097,11 +1128,23 @@ print('ok')
                     prState = [:]
                 }
                 prState["${prNumber}"] = prHead
+                // Ensure state directory exists before write
+                sh "mkdir -p '/var/lib/report-server/daily'"
                 writeJSON(file: prStateFile, json: prState, pretty: 2)
                 echo "PR state updated: #${prNumber} -> ${prHead} (${prStateFile})"
                 // Release the PR poller lock so the next PR/update can be picked up.
                 sh "rm -f /var/lib/report-server/daily/cr-pr-trigger.lock"
                 echo "PR trigger lock removed"
+                // Clean up the temporary refs/heads/pr-* branches created by
+                // trigger-pr-review.sh — they accumulate over time and slow down
+                // git operations. Delete is safe here because the review has
+                // already completed and the state file now records the reviewed head.
+                sh """
+                    cd '${boomingDir}'
+                    git update-ref -d 'refs/heads/pr-${prNumber}' 2>/dev/null || true
+                    git update-ref -d 'refs/heads/pr-${prNumber}-base' 2>/dev/null || true
+                    echo "Cleanup: removed tmp branches for PR #${prNumber}"
+                """
             } else {
                 def stateData = [
                         repo: '/home/debian/agent/booming-il2cpp',
@@ -1115,6 +1158,8 @@ print('ok')
                             '建议': env.FINDINGS_ADV.toInteger()
                         ]
                     ]
+                    // Ensure state directory exists before write
+                    sh "mkdir -p '/var/lib/report-server/daily'"
                     writeJSON(file: stateFile, json: stateData, pretty: 2)
                     echo "State updated: ${stateFile}"
 
