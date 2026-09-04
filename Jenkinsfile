@@ -940,28 +940,53 @@ file_sha = '${isPrReview ? prHead : env.CURRENT_COMMIT}'
 commits = []
 try:
     # Capture the FULL commit message (subject + body), not just %s title.
-    # NUL-delimited (-z + %x00) so multi-line bodies never break the parse.
-    # Format per record: <sha40>\x00<title>\x00<body>\x00  (title lines merged).
+    # Emit each commit as: <sha40>\x00<full-message>\x00  (%x00 = NUL). Splitting on
+    # NUL is safe because git forbids NUL bytes inside commit messages, and %B strips
+    # the trailing newline, so parts come out as [sha1, msg1, sha2, msg2, ...].
     result = subprocess.run(
         ['git', '-C', booming_dir, 'log',
-         # %B = raw full body (subject first line + blank + body). Isolate the subject
-         # (first line) so we can render it bold, and keep the remainder as the body.
-         '--format=%H%x00%B',
+         '--format=%H%x00%B%x00',
          from_commit + '..' + to_commit],
         capture_output=True, timeout=30
     )
-    # Decode defensively; drop the final trailing NUL when present.
     out = result.stdout.decode('utf-8', errors='replace')
-    recs = [r for r in out.split('\x00') if r.strip()]
-    for rec in recs:
-        if not rec.strip():
+    parts = out.split('\x00')
+    i = 0
+    n = len(parts)
+    while i + 1 < n:
+        sha = parts[i].strip()
+        full_msg = parts[i + 1].strip()
+        i += 2
+        if not sha or not full_msg:
             continue
-        # first token is the 40-char sha; the rest is the full message
-        sha = rec[0:40]
-        full_msg = rec[40:].strip()
         lines = full_msg.split('\n')
         subject = lines[0].strip() if lines else full_msg
-        body = '\n'.join(l.strip() for l in lines[1:] if l.strip())
+        body_lines = lines[1:]
+        # Strip a git TRALER block (Co-Authored-By / Signed-off-by / Reviewed-by, ...).
+        # Real git trailers are a trailing run of `Key: value` lines that git parses ONLY
+        # because they are separated from the message prose by a blank line. We mirror git:
+        #   * walk body_lines from the END;
+        #   * collect the contiguous trailing run of `Key: value` lines;
+        #   * if that run is empty, or it is NOT preceded by a blank separator, keep everything.
+        # This avoids dropping ordinary prose that merely ends in `foo: bar` with no blank above.
+        def is_trailer_line(s):
+            if ':' not in s:
+                return False
+            head = s.split(':', 1)[0].strip()
+            return bool(head) and all(c.isalnum() or c in '-/_' for c in head)
+        trailing = 0
+        for ln in reversed(body_lines):
+            if is_trailer_line(ln.strip()):
+                trailing += 1
+            else:
+                break
+        if trailing > 0:
+            j = len(body_lines) - trailing - 1
+            separated = (j >= 0 and body_lines[j].strip() == '')   # blank right before the run
+            preceded_by_header = (trailing == len(body_lines))      # subject-only + trailers
+            if separated or preceded_by_header:
+                body_lines = body_lines[:j + 1] if j >= 0 else []
+        body = '\n'.join(l.strip() for l in body_lines if l.strip())
         commits.append({'sha': sha, 'subject': subject, 'body': body})
 except Exception:
     pass
@@ -975,28 +1000,43 @@ except Exception:
 flist = d.get('findings', [])
 
 # ── Render commit list (shared between PR mode and main-branch mode) ──
-# Budget: max 5 commits, each commit body ≤ 3 lines, total body lines ≤ 15.
-# This prevents a long multi-commit PR from blowing the Feishu card's text limit.
-MAX_COMMITS = 5
+# Priorities substantive commits (those with a body worth explaining); pure
+# changelog/chore commits that carry no body are NOT given their own slot (they'd
+# crowd out real changes) but are folded into a compact single trailing line. This
+# keeps the card readable while making every commit discoverable via its link.
+MAX_COMMITS = 5            # max individually-rendered substantive commits
 MAX_BODY_LINES_PER_COMMIT = 3
 MAX_BODY_LINES_TOTAL = 15
+MAX_NOBODY_CHAINED = 5     # up to 5 body-less commits shown on the fold line
 def render_commit_lines(commits, prefix='  • '):
+    substantives = [c for c in commits if (c.get('body') or '').strip()]
+    nobodies     = [c for c in commits if not (c.get('body') or '').strip()]
     out = []
     budget = MAX_BODY_LINES_TOTAL
-    for c in commits[:MAX_COMMITS]:
+    # Render substantive commits first, each with up to 3 body lines within the budget.
+    for c in substantives[:MAX_COMMITS]:
         sha = c.get('sha', '')[:7]
         subj = c.get('subject', '')
-        body = c.get('body', '')
         url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
         out.append(prefix + u'[[' + sha + u'] ' + subj + u'](' + url + u')')
-        if body and budget > 0:
-            blines = body.split('\n')
-            # Cap per-commit and within global budget
-            blines = blines[:min(MAX_BODY_LINES_PER_COMMIT, budget)]
-            budget -= len(blines)
-            for bl in blines:
-                out.append('       ' + bl.strip())
-        # if budget exhausted, remaining commits get no body — that's fine
+        blines = (c.get('body') or '').split('\n')
+        keep = min(len(blines), MAX_BODY_LINES_PER_COMMIT, budget)
+        for bl in blines[:keep]:
+            out.append('       ' + bl.strip())
+        budget -= keep
+        if budget <= 0:
+            break
+    # Fold body-less commits into one compact line (they have no prose to show).
+    shown_nobodies = nobodies[:MAX_NOBODY_CHAINED]
+    if shown_nobodies:
+        parts = []
+        for c in shown_nobodies:
+            u = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+            parts.append(u'[[' + c.get('sha', '')[:7] + u'] ' + (c.get('subject') or '') + u'](' + u + u')')
+        line = u'  • ' + u' ; '.join(parts)
+        if len(nobodies) > MAX_NOBODY_CHAINED:
+            line = u'  • ' + ' ; '.join(parts) + u' … (+%d)' % (len(nobodies) - MAX_NOBODY_CHAINED)
+        out.append(line)
     return out
 
 # PR mode: show the PR header + individual commits with full messages.
