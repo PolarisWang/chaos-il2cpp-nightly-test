@@ -939,15 +939,30 @@ pr_title = '${prTitle}'
 file_sha = '${isPrReview ? prHead : env.CURRENT_COMMIT}'
 commits = []
 try:
+    # Capture the FULL commit message (subject + body), not just %s title.
+    # NUL-delimited (-z + %x00) so multi-line bodies never break the parse.
+    # Format per record: <sha40>\x00<title>\x00<body>\x00  (title lines merged).
     result = subprocess.run(
-        ['git', '-C', booming_dir, 'log', '--format=%H|||%s',
+        ['git', '-C', booming_dir, 'log',
+         # %B = raw full body (subject first line + blank + body). Isolate the subject
+         # (first line) so we can render it bold, and keep the remainder as the body.
+         '--format=%H%x00%B',
          from_commit + '..' + to_commit],
-        capture_output=True, text=True, timeout=30
+        capture_output=True, timeout=30
     )
-    for line in result.stdout.strip().split('\\n'):
-        if '|||' in line:
-            sha, msg = line.split('|||', 1)
-            commits.append({'sha': sha[:40], 'message': msg.strip()})
+    # Decode defensively; drop the final trailing NUL when present.
+    out = result.stdout.decode('utf-8', errors='replace')
+    recs = [r for r in out.split('\x00') if r.strip()]
+    for rec in recs:
+        if not rec.strip():
+            continue
+        # first token is the 40-char sha; the rest is the full message
+        sha = rec[0:40]
+        full_msg = rec[40:].strip()
+        lines = full_msg.split('\n')
+        subject = lines[0].strip() if lines else full_msg
+        body = '\n'.join(l.strip() for l in lines[1:] if l.strip())
+        commits.append({'sha': sha, 'subject': subject, 'body': body})
 except Exception:
     pass
 
@@ -959,17 +974,39 @@ except Exception:
     d = {}
 flist = d.get('findings', [])
 
-# PR mode: show the PR itself rather than a flat commit list.
+# PR mode: show the PR header + individual commits with full messages.
 if is_pr and pr_number:
     pr_url = 'https://github.com/PolarisWang/booming-il2cpp/pull/' + pr_number
-    cl = ['  • [[PR #' + pr_number + '] ' + (pr_title or '') + '](' + pr_url + ')']
+    cl = ['• [PR #' + pr_number + '] ' + (pr_title or '') + '  —  ' + pr_url]
+    for c in commits[:5]:
+        sha = c.get('sha', '')[:7]
+        subj = c.get('subject', '')
+        body = c.get('body', '')
+        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+        # Subject line as a link, body indented below if present
+        cl.append('    • [[' + sha + '] ' + subj + '](' + url + ')')
+        if body:
+            # Truncate long body to 3 lines to keep the card compact
+            blines = body.split('\n')
+            if len(blines) > 3:
+                blines = blines[:3] + ['⋯']
+            for bl in blines:
+                cl.append('       ' + bl.strip())
 else:
     cl = []
     for c in commits[:5]:
         sha = c.get('sha', '')[:7]
-        msg = c.get('message', '')
+        subj = c.get('subject', '')
+        body = c.get('body', '')
         url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-        cl.append('  • [[' + sha + '] ' + msg + '](' + url + ')')
+        # Subject line as a link, body indented below if present
+        cl.append('  • [[' + sha + '] ' + subj + '](' + url + ')')
+        if body:
+            blines = body.split('\n')
+            if len(blines) > 3:
+                blines = blines[:3] + ['⋯']
+            for bl in blines:
+                cl.append('       ' + bl.strip())
 ct = chr(10).join(cl) if cl else ('  （无新提交）' if not is_pr else '  PR #' + pr_number)
 
 # Build findings list — rage-standard 4-tier lines: #N [严重] [Repo] file:line_range
