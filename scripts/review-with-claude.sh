@@ -200,6 +200,10 @@ MAX_EMPTY_RETRIES="${REVIEW_MAX_EMPTY_RETRIES:-2}"
 # a hung call from blocking the build. Override with REVIEW_AGENT_MODEL if a
 # different tier becomes available.
 REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-flash}"
+# Prompt version: bump this whenever the prompt template (review dimensions, severity
+# rubric, output format) changes meaningfully. Included in the cache key so cache
+# auto-invalidates when the review criteria change.
+PROMPT_VERSION="1"
 # Small enough that no single chunk exceeds what the model handles reliably
 # (dense GC/pointer code starts glitching around ~200 diff lines), but large
 # enough to still merge many tiny files into one call. A file larger than this
@@ -207,9 +211,23 @@ REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-flash}"
 CHUNK_MAX_LINES="${REVIEW_CHUNK_MAX_LINES:-150}"
 MAX_CHUNKS="${REVIEW_MAX_CHUNKS:-4}"
 CACHE_DIR="${REVIEW_CACHE_DIR:-}"
+# Default the cache next to the output file (the Jenkins workspace is writable by the
+# build user), NOT next to the repo — the booming repo lives under a docker volume owned
+# by root in the agent container and is often read-only to the Jenkins user, so writing
+# "<repo>-review-cache" there silently fails. REVIEW_CACHE_DIR env can still override.
+if [ -z "$CACHE_DIR" ]; then
+    _odir=$(dirname "$OUTPUT_FILE")
+    [ -n "$_odir" ] && [ -d "$_odir" ] && CACHE_DIR="${_odir}/review-cache" || CACHE_DIR=""
+fi
 [ -z "$CACHE_DIR" ] && CACHE_DIR="${REPO_DIR}-review-cache"
+# Cap on merged chunk diff lines: if the merged overflow chunk exceeds this, files
+# are dropped (and INCOMPLETE flagged) rather than risking a model glitch on a huge
+# diff. 2000 lines is a generous upper bound for reliable model output.
+MERGED_CHUNK_MAX_LINES=2000
 PROMPT_FILE=$(mktemp)
-trap "rm -f '$PROMPT_FILE'" EXIT
+TRUNC_FLAG_FILE=$(mktemp)   # set when any chunk diff had to be truncated (low-conf signal)
+rm -f "$TRUNC_FLAG_FILE"
+trap "rm -f '$PROMPT_FILE' '$TRUNC_FLAG_FILE'" EXIT
 
 # Multi-file diff between the two commits.
 chunk_diff_for() {
@@ -226,8 +244,10 @@ is_note_path() {
     esac
 }
 
-# cache key: sha1 of (from,to,sorted file list)
-CACHE_KEY=$(printf '%s\n%s\n%s' "$FROM_COMMIT" "$TO_COMMIT" "$FILTERED_FILE_NAMES" | sha1sum | cut -c1-40)
+# cache key: sha1 of (prompt_version, model, from, to, sorted file list)
+# Includes PROMPT_VERSION and REVIEW_MODEL so cache auto-invalidates when the
+# review criteria or model change.
+CACHE_KEY=$(printf '%s\n%s\n%s\n%s\n%s' "$PROMPT_VERSION" "$REVIEW_MODEL" "$FROM_COMMIT" "$TO_COMMIT" "$FILTERED_FILE_NAMES" | sha1sum | cut -c1-40)
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}.json"
 
 # ──────────────────────────────────────────────────────────────
@@ -285,20 +305,68 @@ done
 [ -n "$cur" ] && CHUNKS+=("$cur")
 
 # enforce MAX_CHUNKS: if we have too many, merge the remainder into one final chunk.
+# BUT: check the merged chunk's total diff size — if it exceeds MERGED_CHUNK_MAX_LINES,
+# drop overflow files (mark INCOMPLETE) rather than risk model glitch on a huge diff.
 if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
     echo "packing ${#CHUNKS[@]} chunks down to ${MAX_CHUNKS}"
     _merged=""
+    _merged_files=""
     while [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; do
         _last="${CHUNKS[-1]}"
         unset 'CHUNKS[${#CHUNKS[@]}-1]'
         CHUNKS=("${CHUNKS[@]}")
         _merged="$_merged $_last"
+        _merged_files="$_merged_files $_last"
     done
     if [ -n "$_merged" ]; then
+        # Check total diff size of the merged chunk before committing it.
+        _merged_total_lines=$(chunk_diff_for $_merged_files | wc -l | tr -d ' ')
+        echo "  merged chunk diff size: ${_merged_total_lines} lines (max ${MERGED_CHUNK_MAX_LINES})"
+        if [ "$_merged_total_lines" -gt "$MERGED_CHUNK_MAX_LINES" ]; then
+            # Too large — warn and drop overflow, marking INCOMPLETE.
+            echo "WARNING: merged chunk (${_merged_total_lines} lines) exceeds ${MERGED_CHUNK_MAX_LINES} — dropping overflow files; review will be partial" >&2
+            INCOMPLETE=1
+            # Drop the largest files one by one until the total fits.
+            _reduced=$(FROM_COMMIT="$FROM_COMMIT" TO_COMMIT="$TO_COMMIT" REPO_DIR="$REPO_DIR" python3 - "$_merged_files" "$MERGED_CHUNK_MAX_LINES" <<'PY'
+import sys, subprocess, os
+repo = os.environ.get('REPO_DIR', '')
+files = sys.argv[1].strip().split()
+limit = int(sys.argv[2])
+# compute each file's diff line count
+sizes = {}
+for f in files:
+    if not f: continue
+    r = subprocess.run(
+        ['git', 'diff', os.environ['FROM_COMMIT'] + '..' + os.environ['TO_COMMIT'], '--', f],
+        capture_output=True, text=True, cwd=repo
+    )
+    sizes[f] = len(r.stdout.splitlines()) if r.stdout else 0
+# sort by size descending, drop largest until total fits
+sorted_files = sorted(sizes.items(), key=lambda x: -x[1])
+total = sum(sizes.values())
+kept = []
+for f, sz in sorted_files:
+    # always keep at least one file, and always keep sz==0 ones (they cost nothing)
+    if sz == 0 or not kept:
+        kept.append(f)
+        continue
+    # dropping this file must bring total under limit
+    if total > limit:
+        total -= sz
+        continue  # drop this (largest) file
+    kept.append(f)
+print(' '.join(kept))
+PY
+)
+            if [ -n "$_reduced" ]; then
+                _merged_files="$_reduced"
+                echo "  reduced to $(echo $_merged_files | wc -w | tr -d ' ') files"
+            fi
+        fi
         _last="${CHUNKS[-1]}"
         unset 'CHUNKS[${#CHUNKS[@]}-1]'
         CHUNKS=("${CHUNKS[@]}")
-        CHUNKS+=("$_last$_merged")
+        CHUNKS+=("$_last$_merged_files")
     fi
 fi
 CHUNK_COUNT=${#CHUNKS[@]}
@@ -349,11 +417,21 @@ while lo < hi:
 print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
 ' 2>/dev/null || echo "FULL")
     case "$trunc" in
-        ALL_TRUNCATED) cdiff="" ;;
+        ALL_TRUNCATED)
+            # Whole diff exceeds the model's usable context — nothing reviewable was fed.
+            echo "WARNING: chunk diff entirely exceeded context and was truncated" >&2
+            touch "$TRUNC_FLAG_FILE"
+            cdiff=""
+            ;;
         TRUNCATED:*)
             allowed="${trunc#TRUNCATED:}"
             lines=$(printf '%s\n' "$cdiff" | wc -l | tr -d ' ')
-            [ "$allowed" -lt "$lines" ] && cdiff=$(printf '%s\n' "$cdiff" | head -"$allowed")
+            # Only treat as truncated if we actually dropped trailing lines.
+            if [ "$allowed" -lt "$lines" ]; then
+                echo "WARNING: chunk diff truncated from ${lines} to ${allowed} lines by token budget" >&2
+                touch "$TRUNC_FLAG_FILE"
+                cdiff=$(printf '%s\n' "$cdiff" | head -"$allowed")
+            fi
             ;;
     esac
 
@@ -671,6 +749,30 @@ if obj is None:
         obj, _ = hit
 if obj is None:
     sys.exit(2)
+# Schema validation: each finding must have all required fields. A finding missing
+# any required field (or carrying an invalid severity) is a model glitch — drop it
+# rather than render a broken card line (#1 [None] None (None)).
+REQUIRED = {"severity", "file", "line", "message", "fix", "verify"}
+SEVERITIES = {"严重", "中", "轻", "建议"}
+_findings = obj.get("findings", [])
+_valid = []
+for _fx in _findings:
+    if not isinstance(_fx, dict):
+        continue
+    _missing = [k for k in ("file", "message") if not _fx.get(k)]
+    if _missing:
+        continue  # cannot show a meaningful Feishu line without file+message
+    _sev = _fx.get("severity")
+    if not _sev or _sev not in SEVERITIES:
+        continue
+    _valid.append(_fx)
+obj["findings"] = _valid
+# Recompute summary from the surviving findings - never trust the model self count.
+_sum = {"严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0}
+for _fx in _valid:
+    _sum[_fx["severity"]] += 1
+_sum["total_findings"] = len(_valid)
+obj["summary"] = _sum
 print(json.dumps(obj, ensure_ascii=False))
 ' 2>/dev/null)
     echo "$extracted"
@@ -826,7 +928,7 @@ for chunk_paths in "${CHUNKS[@]:-}"; do
     done
     chunk_mode="code"; [ "$all_note" = "1" ] && chunk_mode="docs"
     chunk_find=""; chunk_sum=""; attempts=0
-    while [ -z "$chunk_find" ] && [ "$attempts" -le "$MAX_EMPTY_RETRIES" ]; do
+    while [ -z "$chunk_find" ] && [ "$attempts" -lt "$MAX_EMPTY_RETRIES" ]; do
         attempts=$((attempts+1))
         js=$(review_one_diff "$cdiff" "$chunk_paths" "$chunk_mode")
         if [ -z "$js" ]; then
@@ -928,6 +1030,12 @@ fi
 # instead of a flat clean pass / a definitive all-files review.
 _TOTAL=$(echo "$AGG_SUM" | python3 -c "import sys,json;print(json.load(sys.stdin).get('total_findings',0))" 2>/dev/null)
 LOW_CONF=false
+if [ -f "$TRUNC_FLAG_FILE" ]; then
+    # Some chunk diff exceeded the token budget and was truncated — the model never
+    # saw the tail of the diff, so the result cannot be a definitive all-files review.
+    LOW_CONF=true
+    echo "WARNING: chunk diff was truncated by token budget — marking low_confidence"
+fi
 if [ "$INCOMPLETE" != "0" ]; then
     LOW_CONF=true
     echo "WARNING: review incomplete (one or more chunks skipped) — marking low_confidence"
