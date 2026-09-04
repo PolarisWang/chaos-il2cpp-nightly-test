@@ -974,39 +974,38 @@ except Exception:
     d = {}
 flist = d.get('findings', [])
 
+# ── Render commit list (shared between PR mode and main-branch mode) ──
+# Budget: max 5 commits, each commit body ≤ 3 lines, total body lines ≤ 15.
+# This prevents a long multi-commit PR from blowing the Feishu card's text limit.
+MAX_COMMITS = 5
+MAX_BODY_LINES_PER_COMMIT = 3
+MAX_BODY_LINES_TOTAL = 15
+def render_commit_lines(commits, prefix='  • '):
+    out = []
+    budget = MAX_BODY_LINES_TOTAL
+    for c in commits[:MAX_COMMITS]:
+        sha = c.get('sha', '')[:7]
+        subj = c.get('subject', '')
+        body = c.get('body', '')
+        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
+        out.append(prefix + u'[[' + sha + u'] ' + subj + u'](' + url + u')')
+        if body and budget > 0:
+            blines = body.split('\n')
+            # Cap per-commit and within global budget
+            blines = blines[:min(MAX_BODY_LINES_PER_COMMIT, budget)]
+            budget -= len(blines)
+            for bl in blines:
+                out.append('       ' + bl.strip())
+        # if budget exhausted, remaining commits get no body — that's fine
+    return out
+
 # PR mode: show the PR header + individual commits with full messages.
 if is_pr and pr_number:
     pr_url = 'https://github.com/PolarisWang/booming-il2cpp/pull/' + pr_number
-    cl = ['• [PR #' + pr_number + '] ' + (pr_title or '') + '  —  ' + pr_url]
-    for c in commits[:5]:
-        sha = c.get('sha', '')[:7]
-        subj = c.get('subject', '')
-        body = c.get('body', '')
-        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-        # Subject line as a link, body indented below if present
-        cl.append('    • [[' + sha + '] ' + subj + '](' + url + ')')
-        if body:
-            # Truncate long body to 3 lines to keep the card compact
-            blines = body.split('\n')
-            if len(blines) > 3:
-                blines = blines[:3] + ['⋯']
-            for bl in blines:
-                cl.append('       ' + bl.strip())
+    pr_header = u'• [PR #' + pr_number + u'] ' + (pr_title or '') + u'  —  ' + pr_url
+    cl = [pr_header] + render_commit_lines(commits, prefix='    • ')
 else:
-    cl = []
-    for c in commits[:5]:
-        sha = c.get('sha', '')[:7]
-        subj = c.get('subject', '')
-        body = c.get('body', '')
-        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-        # Subject line as a link, body indented below if present
-        cl.append('  • [[' + sha + '] ' + subj + '](' + url + ')')
-        if body:
-            blines = body.split('\n')
-            if len(blines) > 3:
-                blines = blines[:3] + ['⋯']
-            for bl in blines:
-                cl.append('       ' + bl.strip())
+    cl = render_commit_lines(commits, prefix='  • ')
 ct = chr(10).join(cl) if cl else ('  （无新提交）' if not is_pr else '  PR #' + pr_number)
 
 # Build findings list — rage-standard 4-tier lines: #N [严重] [Repo] file:line_range
