@@ -35,13 +35,29 @@ JENKINS_URL="${JENKINS_URL:-http://localhost:8080/job/chaos-il2cpp-code-review}"
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # Find the newest build with a terminal result (skip the running/in-progress one).
-# Jenkins writes <result> only when a build finishes; a still-running build has none.
+# Jenkins writes <result>... randomly into build.xml at build start as a placeholder,
+# and the build is never re-read after it finishes.  So we must check BOTH:
+#   1. The build has a <result> tag (it has started)
+#   2. The build has a non-zero <duration> (it has finished — Jenkins only writes
+#      duration at completion) OR the log ends with "Finished: " (durable result).
+# A build that just started has <result>SUCCESS</result> before it actually runs
+# anything, so we can't trust it until we see the duration.
 newest_completed() {
     sudo docker exec "$CONTAINER" bash -c "
         newest=''
         for f in \$(ls -t '$JOBS_DIR_CT' 2>/dev/null | grep -E '^[0-9]+\$'); do
-            if grep -q '<result>' '$JOBS_DIR_CT'/\$f/build.xml 2>/dev/null; then
-                newest=\$f; break
+            xml='$JOBS_DIR_CT'/\$f/build.xml
+            if [ -f \"\$xml\" ] && grep -q '<result>' \"\$xml\"; then
+                # Check duration > 0 = build completed.  duration=0 means still running
+                # (it was written at start time).  Also check the log ends with
+                # 'Finished: ' as a second signal.
+                dur=\$(grep -oE '<duration>[0-9]+' \"\$xml\" | grep -oE '[0-9]+')
+                log='$JOBS_DIR_CT'/\$f/log
+                finished=''
+                [ -f \"\$log\" ] && finished=\$(grep -c 'Finished:' \"\$log\" 2>/dev/null || echo 0)
+                if [ \"\${dur:-0}\" -gt 0 ] || [ \"\${finished:-0}\" -gt 0 ]; then
+                    newest=\$f; break
+                fi
             fi
         done
         echo \"\$newest\"
