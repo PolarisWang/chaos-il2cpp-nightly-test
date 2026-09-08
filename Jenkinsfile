@@ -1056,6 +1056,16 @@ severity_icons = {'严重': '🔴', '中': '🟠', '轻': '⚪', '建议': '🟢
 sel_order = {'严重': 0, '中': 1, '轻': 2, '建议': 3}
 # severity-sort (严重 first), stable
 flist_sorted = sorted(flist, key=lambda f: sel_order.get(f.get('severity', '建议'), 9))
+# Defense in depth: drop ghost findings whose message carries no real content
+# (blank / whitespace-only). The generator now drops these at the source, but a
+# poisoned cache entry or a legacy findings.json could still carry one — never
+# render a "file:line — " line with a dangling dash and nothing after it.
+meaningful = []
+for f in flist_sorted:
+    _m = f.get('message')
+    if isinstance(_m, str) and _m.strip():
+        meaningful.append(f)
+flist_sorted = meaningful
 flines = []
 for ndx, fx in enumerate(flist_sorted, start=1):
     sev = fx.get('severity') or '建议'
@@ -1063,8 +1073,14 @@ for ndx, fx in enumerate(flist_sorted, start=1):
     repo = fx.get('repo', 'il2cpp')
     fp = fx.get('file', '')
     ln = fx.get('line', 0)
-    lr = fx.get('line_range') or (str(ln) if ln else '')
-    loc = ':' + str(lr) if lr else ''
+    lr = fx.get('line_range')
+    # Model may emit line_range as a bare number; normalize to a string so the
+    # .split('-') below never raises AttributeError and takes the whole card down.
+    if lr is None or lr == '':
+        lr = str(ln) if ln else ''
+    else:
+        lr = str(lr).strip()
+    loc = ':' + lr if lr else ''
     msg = fx.get('message', '')
     fname = fp.split('/')[-1] if '/' in fp else fp
     furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + ('#L' + str(lr.split('-')[0]) if lr else '')

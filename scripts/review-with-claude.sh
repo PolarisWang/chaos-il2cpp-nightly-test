@@ -752,14 +752,16 @@ if obj is None:
 # Schema validation: each finding must have all required fields. A finding missing
 # any required field (or carrying an invalid severity) is a model glitch — drop it
 # rather than render a broken card line (#1 [None] None (None)).
-REQUIRED = {"severity", "file", "line", "message", "fix", "verify"}
+# NOTE: check uses .strip() so whitespace-only / blank messages are also dropped
+# (they'd render as a dangling "— " with no content on the Feishu card).
+REQUIRED = {"severity", "file", "message"}
 SEVERITIES = {"严重", "中", "轻", "建议"}
 _findings = obj.get("findings", [])
 _valid = []
 for _fx in _findings:
     if not isinstance(_fx, dict):
         continue
-    _missing = [k for k in ("file", "message") if not _fx.get(k)]
+    _missing = [k for k in REQUIRED if not (k in _fx and isinstance(_fx[k], str) and _fx[k].strip())]
     if _missing:
         continue  # cannot show a meaningful Feishu line without file+message
     _sev = _fx.get("severity")

@@ -159,6 +159,97 @@ def test_rage_risk_overview():
     assert "未发现代码问题" in risk_none
 
 
+# ── 2b. Ghost-finding guard (message must be non-blank content) ──────────────
+
+# Mirror of the validator logic now in review-with-claude.sh: a finding must carry
+# string severity/file/message each with real (non-whitespace) content, else the
+# model glitch would surface as a Feishu line with a dangling "— " and no message.
+_VALIDATE_REQUIRED = {"severity", "file", "message"}
+
+
+def _is_meaningful_finding(fx):
+    if not isinstance(fx, dict):
+        return False
+    for k in _VALIDATE_REQUIRED:
+        v = fx.get(k)
+        if not (isinstance(v, str) and v.strip()):
+            return False
+    return True
+
+
+def _render_grid_filtered(flist):
+    """Render card from the validator's surviving (meaningful) findings only."""
+    meaningful = [f for f in flist if _is_meaningful_finding(f)]
+    return _render_rage_card(meaningful)
+
+
+def test_ghost_finding_whitespace_message_is_dropped():
+    """A finding whose message is whitespace-only (or blank) must NOT reach the
+    card — it would render as '— ' with nothing after it. Regression for the empty-
+    content findings seen on Feishu (#1/#2/#4 had file+line but blank content)."""
+    findings = [
+        {"severity": "轻", "repo": "il2cpp", "file": "a.cpp",
+         "line": 587, "message": "   ", "line_range": "587"},
+        {"severity": "轻", "repo": "il2cpp", "file": "a.cpp",
+         "line": 637, "message": "", "line_range": "637"},
+        {"severity": "建议", "repo": "il2cpp", "file": "a.cpp",
+         "line": 641, "message": " \t\n", "line_range": "641"},
+        {"severity": "轻", "repo": "il2cpp", "file": "b.cpp",
+         "line": 90, "message": "命名可读性差"},
+    ]
+    assert _is_meaningful_finding(findings[0]) is False
+    assert _is_meaningful_finding(findings[1]) is False
+    assert _is_meaningful_finding(findings[2]) is False
+    assert _is_meaningful_finding(findings[3]) is True
+    card = _render_grid_filtered(findings)
+    # only the real finding survives: renumbered as #1, and blank content never shown
+    assert "b.cpp:90" in card
+    assert "命名可读性差" in card
+    assert "a.cpp:587" not in card
+    assert "a.cpp:637" not in card
+    assert "a.cpp:641" not in card
+    assert "—   " not in card  # ghost lines would end in a bare dash
+
+
+def test_ghost_finding_missing_message_field_is_dropped():
+    """A finding lacking a message key entirely must also be dropped."""
+    findings = [
+        {"severity": "中", "repo": "il2cpp", "file": "src/x.cpp",
+         "line": 7, "message": "", "line_range": "7"},
+        {"severity": "严重", "repo": "il2cpp", "file": "src/x.cpp",
+         "line": 30, "message": None, "line_range": "30"},
+        {"severity": "轻", "repo": "il2cpp", "file": "src/y.cpp",
+         "line": 5, "message": "mask 不对称"},
+    ]
+    assert _is_meaningful_finding(findings[0]) is False
+    assert _is_meaningful_finding(findings[1]) is False
+    assert _is_meaningful_finding(findings[2]) is True
+    card = _render_grid_filtered(findings)
+    assert "y.cpp" in card and "mask 不对称" in card
+    assert "x.cpp" not in card
+
+
+def test_review_script_validator_is_strip_aware():
+    """The live review-with-claude.sh validator itself must be whitespace-aware, so
+    ghost findings are killed at the source (before counts/summary/cache are built)."""
+    body = _read(REVIEW_SCRIPT)
+    # The validator must .strip() content before deeming a field present.
+    assert ".strip()" in body
+
+
+def test_renderer_mirrors_ghost_guard():
+    """The shipped Jenkinsfile renderer must skip blank-message findings as a defense
+    in depth even if one slips past source validation (old cache, legacy file)."""
+    body = _read(JENKINSFILE)
+    # Look at the render loop region (from findings-list build to the em-dash line).
+    start = body.find("severity_icons = ")
+    end = body.find("# Build risk overview line", start)
+    region = body[start:end]
+    assert "flines.append" in region
+    # region must contain a blank/whitespace message skip so a dangling "— " can't render
+    assert ".strip()" in region
+
+
 # ── 3. Full-flow simulation (schema contract end-to-end) ───────────────────
 
 def test_full_flow_summary_contract():
