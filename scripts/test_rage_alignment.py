@@ -274,26 +274,64 @@ def test_renderer_mirrors_ghost_guard():
 # test_B only ever sees well-formed quoting.
 
 def _embedded_python_regions(body):
-    """Yield (label, code) for every literal Python region in a shell script:
-    single-quoted `python3 -c '...'` bodies and `<<'PY'` (quoted) heredocs."""
+    """Yield (label, code) for every Python region bash feeds verbatim to python3,
+    covering ALL the quoting styles actually used in this repo's scripts:
+      * single-quoted  `python3 -c '...'`            (always literal)
+      * double-quoted  `python3 -c "..."`  WITHOUT a `$` (no shell interp → literal)
+      * quoted heredoc `python3 ... <<'TAG'` / `<<'PYEOF'`  (always literal)
+    A double-quoted block that embeds a `$` (shell var/subcommand) is NOT returned,
+    because bash expands it before python runs and the raw text is not valid Python.
+    A single-quoted body / heredoc with an unbalanced quote is also skipped here —
+    `bash -n` catches that class first (test_A), so B only ever sees well-formed
+    quoting.
+    """
     regions = []
-
-    # single-quoted -c bodies: python3 -c '<code>'
-    for m in re.finditer(r"python3 -c '", body):
+    single = re.finditer(r"python3[^'\"\\]* -c '", body)
+    for m in single:
         start = m.end()
         end = body.find("'", start)
         if end == -1:
-            continue  # unterminated; test_A will already have flagged it
+            continue  # unterminated; test_A already flags it
         code = body[start:end]
-        # sanity: a lone ' that closes the string is the LAST one; inner quotes
-        # like \" or '' handled elsewhere. Only accept if no further unbalanced '.
         if code.count("'") > code.count("\\'") + code.count('"'):
-            # ambiguous unterminated region — defer to test_A
-            continue
-        regions.append((f"python3 -c '...' at offset {start}", code))
+            continue  # ambiguous/unterminated inner quote — let test_A handle it
+        regions.append(("python3 -c '...' at offset %d" % start, code))
 
-    # quoted heredocs:  python3 - <<'PY'\n<code>\nPY
-    for m in re.finditer(r"python3 - <<'([A-Za-z0-9_]+)'\s*$", body, re.M):
+    for m in re.finditer(r'python3 -c "', body):
+        start = m.end()
+        # Find the closing double-quote that is NOT escaped (backslash before it).
+        # monitor.sh's 137-line block has f-strings with escaped \" within, so
+        # a naive body.find('"', start) would stop at the first escaped quote.
+        i = start
+        while i < len(body):
+            q = body.find('"', i)
+            if q == -1:
+                break
+            # Count backslashes immediately before the quote: odd count = escaped.
+            bs = 0
+            j = q - 1
+            while j >= 0 and body[j] == '\\':
+                bs += 1
+                j -= 1
+            if bs % 2 == 1:
+                i = q + 1  # escaped, skip past it
+                continue
+            code = body[start:q]
+            if "$" in code:
+                break  # shell-interpolated → not literal python, skip
+            # Bash processes the double-quoted body before python sees it:
+            #   `\"` → `"`, `\\` → `\`.  Our extraction gets the raw text with
+            # shell escapes still present, which is NOT valid Python.  Unescape
+            # so compile() matches what python actually receives.
+            code = code.replace('\\"', '"').replace("\\\\", "\\")
+            regions.append(('python3 -c "..." at offset %d' % start, code))
+            break
+
+    # quoted heredocs fed to python (python3 ... <<'TAG'), allowing an optional
+    # space between << and the quote. Anchored on the python invocation so plain
+    # `cat <<'TAG'` heredocs (e.g. the prompt templates in review-with-claude.sh,
+    # which contain Chinese markdown, not python) are never mistaken for python.
+    for m in re.finditer(r"(?m)^[ \t]*[A-Za-z0-9_/.-]*python3[^\n]*<<\s?'?([A-Za-z0-9_]+)'", body):
         tag = m.group(1)
         body_start = m.end()
         marker = "\n" + tag
@@ -301,43 +339,99 @@ def _embedded_python_regions(body):
         if end == -1:
             continue
         code = body[body_start:end]
-        regions.append((f"python3 - <<'{tag}' heredoc", code))
+        regions.append(("python3 <<'%s' heredoc" % tag, code))
 
     return regions
 
 
-def test_review_script_passes_bash_syntax_check():
-    """review-with-claude.sh must pass `bash -n`. Guards against unbalanced
-    quotes/parens in embedded python -c blocks (the builds-856/857 regression):
-    a stray apostrophe breaking a single-quoted bash string surfaces here, not
-    only after the job runs on the Jenkins agent."""
+def _bash_syntax_error(path):
+    """Run `bash -n`; return a human message on failure, or None when clean."""
     result = subprocess.run(
-        ["bash", "-n", REVIEW_SCRIPT],
-        capture_output=True, text=True,
+        ["bash", "-n", path], capture_output=True, text=True,
     )
-    assert result.returncode == 0, (
-        "Shell syntax error in review-with-claude.sh (bash -n):\n"
-        + result.stderr.strip()
-    )
+    if result.returncode == 0:
+        return None
+    return ("Shell syntax error in %s (bash -n):\n%s"
+            % (os.path.basename(path), result.stderr.strip()))
+
+
+def _compile_embedded_python(path, require_region=True):
+    """compile() every literal embedded-python region of `path`. Returns a list of
+    human messages on failure (empty == clean)."""
+    body = _read(path)
+    regions = _embedded_python_regions(body)
+    problems = []
+    for label, code in regions:
+        try:
+            compile(code, "<" + os.path.basename(path) + ": " + label + ">", "exec")
+        except SyntaxError as e:
+            problems.append(
+                "Python syntax error in %s @ %s (line %s): %s\nCode was:\n%s"
+                % (os.path.basename(path), label, e.lineno or "?", e.msg, code[:400])
+            )
+    return problems
+
+
+# ── 2d. Syntax guard applied to ALL shell scripts with embedded python ─────
+#
+# Generalization of 2c: the same two-layer guard (bash -n for the shell tree,
+# compile() for literal embedded python) that protects review-with-claude.sh is
+# applied to every script in the repo that inlines python, because a syntax error
+# in any of the CRON scripts (below) silently kills a production path with no
+# checkout or validation, exactly as builds 856/857 died on the review script.
+
+# Every shell script under scripts/ that embeds python via any of the transports
+# the audit found (single/double `-c`, quoted heredoc), excluding only scripts
+# whose inline blocks are fully `$`-interpolated (B auto-skips those, A still runs).
+# Kept as a plain constant so adding/removing a script is a one-line change and the
+# cron-syntax test is the single enforcement point.
+_SCRIPT_DIR = os.path.join(REPO_ROOT, "scripts")
+_SHELL_SCRIPTS_WITH_PYTHON = [
+    "review-with-claude.sh",      # single-quote -c + python heredocs (856/857 case)
+    # cron, every 1 minute:
+    "trigger-code-review.sh",
+    "trigger-pr-review.sh",
+    # cron, every 5 minutes:
+    "monitor.sh",
+    "monitor-il2cpp-review.sh",
+    # nightly / Jenkins-node scripts:
+    "collect-all-results.sh",     # 234-line quoted heredoc (PYEOF)
+    "notify-feishu.sh",           # quoted heredoc (PYEOF)
+    "notify-feishu-text.sh",
+    "nightly-orchestrator.sh",
+    "startup.sh",
+]
+
+
+def test_review_script_passes_bash_syntax_check():
+    """review-with-claude.sh must pass `bash -n`. (Regression gate for builds
+    856/857 — a stray apostrophe in an embedded single-quote block.)"""
+    err = _bash_syntax_error(REVIEW_SCRIPT)
+    assert err is None, err
 
 
 def test_embedded_python_chunks_are_valid_python():
-    """Every literal Python region embedded in the review script must compile()
-    cleanly. Catches syntax errors inside the Python itself (bad indentation /
-    parens) that bash -n cannot see because the surrounding shell quoting is
-    balanced."""
-    body = _read(REVIEW_SCRIPT)
-    regions = _embedded_python_regions(body)
-    assert regions, "expected to find at least one embedded python region"
-    for label, code in regions:
-        try:
-            compile(code, "<" + label + ">", "exec")
-        except SyntaxError as e:
-            lineno = e.lineno or "?"
-            raise AssertionError(
-                f"Python syntax error in {label} (line {lineno}): "
-                f"{e.msg}. Code was:\n{code[:400]}"
-            )
+    """review-with-claude.sh's literal embedded Python must compile cleanly."""
+    problems = _compile_embedded_python(REVIEW_SCRIPT)
+    assert not problems, "\n".join(problems)
+
+
+def test_scripts_with_embedded_python_pass_syntax_guard():
+    """Every shell script that inlines python must (A) parse under `bash -n` AND
+    (B) have no malformed literal (non-shell-interpolated) embedded Python. This
+    covers the cron-production scripts and the Jenkins-node aggregation/notify
+    scripts, none of which have a checkout or sanity gate — a syntax error is a
+    silent outage, exactly how builds 856/857 died on the review script."""
+    failures = []
+    for name in _SHELL_SCRIPTS_WITH_PYTHON:
+        p = os.path.join(_SCRIPT_DIR, name)
+        err = _bash_syntax_error(p)
+        if err:
+            failures.append(err)
+            continue
+        for problem in _compile_embedded_python(p):
+            failures.append(problem)
+    assert not failures, "\nGuard failures (run each bash -n / compile() by hand for a precise line):\n" + "\n".join(failures)
 
 
 # ── 3. Full-flow simulation (schema contract end-to-end) ───────────────────

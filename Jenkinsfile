@@ -154,9 +154,19 @@ pipeline {
                                 exit 1
                             fi
                             # Generic content sanity: it should look like the script type expected.
+                            # Deep syntax gate too: a pushed-to-main syntax error reaches this
+                            # download with NO checkout (raw.githubusercontent.com, pinned to this
+                            # build's GIT_COMMIT) and would otherwise pass a plain non-empty/shebang
+                            # check and then silently break the nightly/notify path at runtime —
+                            # exactly how a stray apostrophe killed code-review builds 856/857.
+                            # Fail the download stage up front with bash -n / py_compile instead.
                             case "\$script" in
                                 *.py) grep -q '^#!/usr/bin/env python3' "\$script" || { echo "FATAL: \$script not a valid python script"; exit 1; } ;;
                                 *.sh) grep -q '^#!.*sh'            "\$script" || { echo "FATAL: \$script not a valid shell script"; exit 1; } ;;
+                            esac
+                            case "\$script" in
+                                *.py) python3 -m py_compile "\$script" || { echo "FATAL: \$script has a Python syntax error"; exit 1; } ;;
+                                *.sh) bash -n "\$script"           || { echo "FATAL: \$script has a shell syntax error"; exit 1; } ;;
                             esac
                         done
                         chmod +x *.sh *.py 2>/dev/null || true
