@@ -61,14 +61,14 @@ PRS_JSON=$(retry curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" \
 
 # ── Step 3: load reviewed-state ──
 declare -A REVIEWED
-[ -f "$STATE_FILE" ] && eval "$(python3 -c "
+[ -f "$STATE_FILE" ] && eval "$(python3 -c '
 import json,sys
 try:
-    d=json.load(open('$STATE_FILE'))
+    d=json.load(open(sys.argv[1]))
     for k,v in d.items():
-        print('REVIEWED[%s]=%s' % (repr(k), repr(str(v))))
+        print("REVIEWED[%s]=%s" % (repr(k), repr(str(v))))
 except Exception: pass
-")"
+' "$STATE_FILE")"
 
 # ── Step 4: pick the first PR whose head.sha hasn't been reviewed ──
 CHOSEN=$(echo "$PRS_JSON" | python3 -c "

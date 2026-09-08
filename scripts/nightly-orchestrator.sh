@@ -287,18 +287,18 @@ phase_summary() {
 
     if [[ -f "$DATA_FILE" ]]; then
         echo "Data: ${DATA_FILE}"
-        python3 -c "
-import json
-with open('${DATA_FILE}') as f:
+        python3 - "$DATA_FILE" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
     d = json.load(f)
 s = d.get('summary', {})
-fact_pct = (s.get('fact_passed',0)/s.get('fact_total',1)*100) if s.get('fact_total',0) > 0 else 0
-print(f'  DLLs:       {d.get(\"total_dlls\",0)}')
-print(f'  Fact:       {s.get(\"fact_passed\",0)}/{s.get(\"fact_total\",0)} ({fact_pct:.1f}%)')
-print(f'  Benchmark:  {s.get(\"benchmark_methods\",0)} methods')
-print(f'  HotUpdate:  {s.get(\"hotupdate_passed\",0)}/{s.get(\"hotupdate_total\",0)}')
-print(f'  Memory:     {s.get(\"memory_methods_profiled\",0)} methods profiled')
-"
+fact_pct = (s.get('fact_passed', 0)/s.get('fact_total', 1)*100) if s.get('fact_total', 0) > 0 else 0
+print(f'  DLLs:       {d.get("total_dlls", 0)}')
+print(f'  Fact:       {s.get("fact_passed", 0)}/{s.get("fact_total", 0)} ({fact_pct:.1f}%)')
+print(f'  Benchmark:  {s.get("benchmark_methods", 0)} methods')
+print(f'  HotUpdate:  {s.get("hotupdate_passed", 0)}/{s.get("hotupdate_total", 0)}')
+print(f'  Memory:     {s.get("memory_methods_profiled", 0)} methods profiled')
+PYEOF
     fi
 
     if [[ -f "$REPORT_FILE" ]]; then

@@ -39,14 +39,14 @@ retry git fetch origin 2>/dev/null || { echo "git fetch failed (after retries)";
 git update-ref refs/heads/main origin/main 2>/dev/null || true
 
 # ── Step 2: Compare HEAD with last reviewed commit ──
-LAST_REVIEWED=$(python3 -c "
+LAST_REVIEWED=$(python3 -c '
 import json, sys
 try:
-    with open('$STATE_FILE') as f:
-        print(json.load(f)['last_reviewed_commit'])
+    with open(sys.argv[1]) as f:
+        print(json.load(f)["last_reviewed_commit"])
 except Exception:
-    sys.stdout.write('')
-" 2>/dev/null) || LAST_REVIEWED=""
+    sys.stdout.write("")
+' "$STATE_FILE" 2>/dev/null) || LAST_REVIEWED=""
 
 CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null) || CURRENT_HEAD=""
 

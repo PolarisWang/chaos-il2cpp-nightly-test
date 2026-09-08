@@ -327,11 +327,13 @@ def _embedded_python_regions(body):
             regions.append(('python3 -c "..." at offset %d' % start, code))
             break
 
-    # quoted heredocs fed to python (python3 ... <<'TAG'), allowing an optional
-    # space between << and the quote. Anchored on the python invocation so plain
-    # `cat <<'TAG'` heredocs (e.g. the prompt templates in review-with-claude.sh,
-    # which contain Chinese markdown, not python) are never mistaken for python.
-    for m in re.finditer(r"(?m)^[ \t]*[A-Za-z0-9_/.-]*python3[^\n]*<<\s?'?([A-Za-z0-9_]+)'", body):
+    # quoted heredocs fed to python (python3 ... <<'TAG' or <<- 'TAG'), allowing an
+    # optional space between << and the quote, and an optional `-` prefix (bash's
+    # <<- strips leading tabs from the heredoc body). Anchored on the python
+    # invocation so plain `cat <<'TAG'` heredocs (e.g. the prompt templates in
+    # review-with-claude.sh, which contain Chinese markdown, not python) are never
+    # mistaken for python.
+    for m in re.finditer(r"(?m)^[ \t]*[A-Za-z0-9_/.-]*python3[^\n]*<<[-]?\s?'?([A-Za-z0-9_]+)'", body):
         tag = m.group(1)
         body_start = m.end()
         marker = "\n" + tag
