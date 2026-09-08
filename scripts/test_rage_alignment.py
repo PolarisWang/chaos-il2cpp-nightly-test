@@ -23,6 +23,7 @@ Run:
 import json
 import os
 import re
+import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -248,6 +249,95 @@ def test_renderer_mirrors_ghost_guard():
     assert "flines.append" in region
     # region must contain a blank/whitespace message skip so a dangling "— " can't render
     assert ".strip()" in region
+
+
+# ── 2c. Shell / embedded-Python syntax guard ────────────────────────────────
+#
+# History: a stray ASCII apostrophe in a COMMENT inside a single-quoted
+# `python3 -c '...'` block (`they'd`) terminated bash's quote early; the orphaned
+# Python was then parsed as shell and raised `line N: syntax error near ... (')`.
+# That silently passed the text-grep tests and only exploded once the real
+# pipeline ran the script on the Jenkins agent (builds 856/857 went red).
+#
+# These two tests pin the fix at BOTH layers the failure can live in:
+#   - test_A (bash -n):  validates the whole shell syntax tree. Catches the
+#     unbalanced-quote/paren class the original bug belonged to.
+#   - test_B (compile):  extracts every LITERAL embedded Python region that bash
+#     will feed verbatim to python3 — single-quoted `-c '…'` bodies and `<<'PY'`
+#     heredocs — and compiles each. Catches syntax errors INSIDE the Python that
+#     bash -n cannot see (balanced shell quoting, bad Python).
+#
+# Deliberately NOT compiled: double-quoted `-c "…"` bodies — those routinely embed
+# shell var refs (`$HOME`, `${env.X}`) that are not valid literal Python and would
+# be false positives. A single-quoted body or `'PY'` heredoc that contains an
+# apostrophe/shell-special char is already unbalanced and fails test_A first, so
+# test_B only ever sees well-formed quoting.
+
+def _embedded_python_regions(body):
+    """Yield (label, code) for every literal Python region in a shell script:
+    single-quoted `python3 -c '...'` bodies and `<<'PY'` (quoted) heredocs."""
+    regions = []
+
+    # single-quoted -c bodies: python3 -c '<code>'
+    for m in re.finditer(r"python3 -c '", body):
+        start = m.end()
+        end = body.find("'", start)
+        if end == -1:
+            continue  # unterminated; test_A will already have flagged it
+        code = body[start:end]
+        # sanity: a lone ' that closes the string is the LAST one; inner quotes
+        # like \" or '' handled elsewhere. Only accept if no further unbalanced '.
+        if code.count("'") > code.count("\\'") + code.count('"'):
+            # ambiguous unterminated region — defer to test_A
+            continue
+        regions.append((f"python3 -c '...' at offset {start}", code))
+
+    # quoted heredocs:  python3 - <<'PY'\n<code>\nPY
+    for m in re.finditer(r"python3 - <<'([A-Za-z0-9_]+)'\s*$", body, re.M):
+        tag = m.group(1)
+        body_start = m.end()
+        marker = "\n" + tag
+        end = body.find(marker, body_start)
+        if end == -1:
+            continue
+        code = body[body_start:end]
+        regions.append((f"python3 - <<'{tag}' heredoc", code))
+
+    return regions
+
+
+def test_review_script_passes_bash_syntax_check():
+    """review-with-claude.sh must pass `bash -n`. Guards against unbalanced
+    quotes/parens in embedded python -c blocks (the builds-856/857 regression):
+    a stray apostrophe breaking a single-quoted bash string surfaces here, not
+    only after the job runs on the Jenkins agent."""
+    result = subprocess.run(
+        ["bash", "-n", REVIEW_SCRIPT],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        "Shell syntax error in review-with-claude.sh (bash -n):\n"
+        + result.stderr.strip()
+    )
+
+
+def test_embedded_python_chunks_are_valid_python():
+    """Every literal Python region embedded in the review script must compile()
+    cleanly. Catches syntax errors inside the Python itself (bad indentation /
+    parens) that bash -n cannot see because the surrounding shell quoting is
+    balanced."""
+    body = _read(REVIEW_SCRIPT)
+    regions = _embedded_python_regions(body)
+    assert regions, "expected to find at least one embedded python region"
+    for label, code in regions:
+        try:
+            compile(code, "<" + label + ">", "exec")
+        except SyntaxError as e:
+            lineno = e.lineno or "?"
+            raise AssertionError(
+                f"Python syntax error in {label} (line {lineno}): "
+                f"{e.msg}. Code was:\n{code[:400]}"
+            )
 
 
 # ── 3. Full-flow simulation (schema contract end-to-end) ───────────────────
