@@ -753,7 +753,7 @@ if obj is None:
 # any required field (or carrying an invalid severity) is a model glitch — drop it
 # rather than render a broken card line (#1 [None] None (None)).
 # NOTE: check uses .strip() so whitespace-only / blank messages are also dropped
-# (they'd render as a dangling "— " with no content on the Feishu card).
+# (they would otherwise render as a dangling "— " with no content on the card).
 REQUIRED = {"severity", "file", "message"}
 SEVERITIES = {"严重", "中", "轻", "建议"}
 _findings = obj.get("findings", [])
