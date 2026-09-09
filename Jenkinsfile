@@ -187,17 +187,13 @@ pipeline {
         // ─────────────────────────────────────────────────────
         // x64 + Windows x64 — Full Pipeline (diagonal parallel)
         // ─────────────────────────────────────────────────────
-        // Linux x64 runs the full nightly_runner + publish pipeline, as before.
-        // Windows x64 runs the SAME nightly_runner module on the same source
-        // (synced by sync-to-windows.sh on the Linux side before triggering) but
-        // writes to an independent report dir (nightly-run-windows) that stays OUT
-        // of the Linux nightly-data baseline — different hardware would otherwise
-        // corrupt Linux trend data.
-        //
-        // Agents: chaos-agent-x64 (linux-x64) plus a user-managed Windows node
-        // (windows-x64) that connects outbound via JNLP to this master. Windows
-        // build steps use bat() not sh(). The nightly_runner Python takes forward
-        // slashes and CMake accepts them on Windows too, so no path juggling.
+        // ALIGNED TO REMOTE-main ROAD-① nightly CLI (Route 3 engine),
+        // NOT the legacy verification.nightly_runner preserved only in the
+        // dirty local worktree.  Both branches run the cmdline-identical
+        // module `verification.nightly.cli` from the engine's tests/e2e dir
+        // so `verification` resolves on both OSes.  `--report-dir` is set
+        // independently per branch (Linux keeps its baseline; Windows writes
+        // into nightly-run-windows so it does not corrupt Linux trend data).
         stage('Full Pipeline (x64 + Windows)') {
             when { expression { env.DISPATCHED != 'true' } }
             parallel {
@@ -208,22 +204,22 @@ pipeline {
 sh """
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
-                        cd "${BOOMING_DIR}/testing/foundation-dll"
+                        # New nightly (Route 3) runs from tests/e2e and auto-detects
+                        # the foundation-dll dir; publish-stage is inside the engine now.
+                        cd "${BOOMING_DIR}/tests/e2e"
 
-                        echo "=== [x64] Full Pipeline = nightly_runner ==="
+                        echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
-                        python3 -m verification.nightly_runner.main \
+                        python3 -m verification.nightly.cli \
                             --report-dir "${ARTIFACTS_DIR}/nightly-run" \
                             --max-workers 4 \
-                            --bench-workers 2 \
                             --native-config "${BUILD_CONFIG}" \
-                            --stage-timeout 600 \
-                            2>&1 || echo "WARNING: nightly_runner had failures"
+                            2>&1 || echo "WARNING: nightly cli had failures"
 
-                        echo "=== [x64] Publish Results ==="
+                        echo "=== [x64] Publish Results (collect nightly-run/latest) ==="
                         python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
                             --report-dir "${ARTIFACTS_DIR}/nightly-run/latest" \
-                            --foundation-dir "${BOOMING_DIR}/testing/foundation-dll" \
+                            --foundation-dir "${BOOMING_DIR}/tests/e2e/translation" \
                             --output-dir "${ARTIFACTS_DIR}" \
                             --date-tag "${DATE_TAG}" \
                             --run-tag "${RUN_TAG}" \
@@ -246,20 +242,18 @@ sh """
                             // was set during Init on the linux-x64 agent to a Linux path
                             // that means nothing on a Windows node, so recompute here.
                             def winArtifacts = "${env.WORKSPACE}\\artifacts".replaceAll('\\\\','/')
-                            // Source sync'd by Linux to D:/agent/workspace/booming-il2cpp (forward
-                            // slashes: consumable by Python and CMake on Windows).
+                            // Engine is synced/cloned under D:/agent/workspace/booming-il2cpp.
                             def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'D:/agent/workspace/booming-il2cpp'
                             bat """
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
-                                cd /d "${winBoomin}/testing/foundation-dll"
+                                cd /d "${winBoomin}/tests/e2e"
 
-                                echo === [win-x64] Full Pipeline = nightly_runner ===
+                                echo === [win-x64] Full Pipeline = verification.nightly.cli ===
 
-                                python -m verification.nightly_runner.main ^
+                                python -m verification.nightly.cli ^
                                     --report-dir "${winArtifacts}/nightly-run-windows" ^
                                     --max-workers %NUMBER_OF_PROCESSORS% ^
-                                    --native-config "${BUILD_CONFIG}" ^
-                                    --stage-timeout 600
+                                    --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
                             """
