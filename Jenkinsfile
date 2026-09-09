@@ -730,6 +730,10 @@ def runCodeReview(Map params = [:]) {
                     "\$RAWT/scripts/notify-feishu-text.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu.sh' \
                     "\$RAWT/scripts/notify-feishu.sh"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-code-review-card.sh' \
+                    "\$RAWT/scripts/send-code-review-card.sh"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/code-review-card.py' \
+                    "\$RAWT/scripts/code-review-card.py"
                 chmod +x '${SCRIPT_DIR}/'*.sh
                 # Sanity: the review script must carry the docs-reviewable marker (the
                 # EXTS_KEEP-with-.md fix that makes the docs path actually run). Without it
@@ -743,6 +747,17 @@ def runCodeReview(Map params = [:]) {
                         echo "ERROR: review script still lacks docs marker after re-pull"
                         exit 1
                     }
+                }
+                # Syntax-validate the extracted card-send scripts (layer 3) so a
+                # main-pushed syntax error aborts here at download, not silently at
+                # send time (the fault that made cards silently not arrive).
+                bash -n '${SCRIPT_DIR}/send-code-review-card.sh' || {
+                    echo "ERROR: send-code-review-card.sh has a shell syntax error"
+                    exit 1
+                }
+                python3 -m py_compile '${SCRIPT_DIR}/code-review-card.py' || {
+                    echo "ERROR: code-review-card.py has a Python syntax error"
+                    exit 1
                 }
                 echo "Scripts synced to ${SCRIPT_DIR}"
             """
@@ -933,278 +948,29 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
 
                 sh """
-set -euo pipefail
-python3 -c "
-import json, os, urllib.request, subprocess
+                    set -euo pipefail
+                    # code-review card render + Feishu send, extracted to a
+                    # real on-disk script (layer 3) so stdout is visible.
+                    bash '${SCRIPT_DIR}/send-code-review-card.sh' \\
+                        --repo-dir    '${boomingDir}' \\
+                        --workspace   '${workspaceDir}' \\
+                        --findings    '${findingsFile}' \\
+                        --jenkins-url '${JENKINS_EXT_URL}' \\
+                        --job         '${env.JOB_NAME}' \\
+                        --build-num   '${env.BUILD_NUMBER}' \\
+                        --date-tag    '${DATE_TAG}'
+                """
 
-
-# Extract commits from git log (not findings JSON — Claude may omit them)
-booming_dir = '${boomingDir}'
-from_commit = '${env.REVIEW_FROM}'
-to_commit = '${env.REVIEW_TO}'
-is_pr = '${isPrReview}' == 'true'
-pr_number = '${prNumber}'
-pr_title = '${prTitle}'
-# Blob links should point at the PR head's code, not main's CURRENT_COMMIT.
-file_sha = '${isPrReview ? prHead : env.CURRENT_COMMIT}'
-commits = []
-try:
-    # Capture the FULL commit message (subject + body), not just %s title.
-    # Emit each commit as <sha40> NUL <full-message> NUL (NUL = ASCII 0x00). Splitting
-    # on NUL is safe because git forbids NUL bytes inside messages, and %B strips the
-    # trailing newline, so parts come out [sha1, msg1, sha2, msg2, ...]. NOTE: this block
-    # lives inside a Groovy sh triple-quote string, so NO literal backslash may appear
-    # here (Groovy would turn it into an escape and break the build). We use chr(0) /
-    # chr(10) / splitlines() instead of backslash escapes on purpose — stable + safe.
-    result = subprocess.run(
-        ['git', '-C', booming_dir, 'log',
-         '--format=%H%x00%B%x00',
-         from_commit + '..' + to_commit],
-        capture_output=True, timeout=30
-    )
-    out = result.stdout.decode('utf-8', errors='replace')
-    parts = out.split(chr(0))
-    i = 0
-    n = len(parts)
-    while i + 1 < n:
-        sha = parts[i].strip()
-        full_msg = parts[i + 1].strip()
-        i += 2
-        if not sha or not full_msg:
-            continue
-        lines = full_msg.splitlines()
-        subject = lines[0].strip() if lines else full_msg
-        body_lines = lines[1:]
-        # Strip a git TRALER block (Co-Authored-By / Signed-off-by / Reviewed-by, ...).
-        # Real git trailers are a trailing run of `Key: value` lines that git parses ONLY
-        # because they are separated from the message prose by a blank line. We mirror git:
-        #   * walk body_lines from the END;
-        #   * collect the contiguous trailing run of `Key: value` lines;
-        #   * if that run is empty, or it is NOT preceded by a blank separator, keep everything.
-        # This avoids dropping ordinary prose that merely ends in `foo: bar` with no blank above.
-        def is_trailer_line(s):
-            if ':' not in s:
-                return False
-            head = s.split(':', 1)[0].strip()
-            return bool(head) and all(c.isalnum() or c in '-/_' for c in head)
-        trailing = 0
-        for ln in reversed(body_lines):
-            if is_trailer_line(ln.strip()):
-                trailing += 1
-            else:
-                break
-        if trailing > 0:
-            j = len(body_lines) - trailing - 1
-            separated = (j >= 0 and body_lines[j].strip() == '')   # blank right before the run
-            preceded_by_header = (trailing == len(body_lines))      # subject-only + trailers
-            if separated or preceded_by_header:
-                body_lines = body_lines[:j + 1] if j >= 0 else []
-        body = chr(10).join(l.strip() for l in body_lines if l.strip())
-        commits.append({'sha': sha, 'subject': subject, 'body': body})
-except Exception:
-    pass
-
-# Also read findings JSON for finding details
-try:
-    with open('${findingsFile}') as f:
-        d = json.load(f)
-except Exception:
-    d = {}
-flist = d.get('findings', [])
-
-# ── Render commit list (shared between PR mode and main-branch mode) ──
-# Priorities substantive commits (those with a body worth explaining); pure
-# changelog/chore commits that carry no body are NOT given their own slot (they'd
-# crowd out real changes) but are folded into a compact single trailing line. This
-# keeps the card readable while making every commit discoverable via its link.
-MAX_COMMITS = 5            # max individually-rendered substantive commits
-MAX_BODY_LINES_PER_COMMIT = 3
-MAX_BODY_LINES_TOTAL = 15
-MAX_NOBODY_CHAINED = 5     # up to 5 body-less commits shown on the fold line
-def render_commit_lines(commits, prefix='  • '):
-    substantives = [c for c in commits if (c.get('body') or '').strip()]
-    nobodies     = [c for c in commits if not (c.get('body') or '').strip()]
-    out = []
-    budget = MAX_BODY_LINES_TOTAL
-    # Render substantive commits first, each with up to 3 body lines within the budget.
-    for c in substantives[:MAX_COMMITS]:
-        sha = c.get('sha', '')[:7]
-        subj = c.get('subject', '')
-        url = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-        out.append(prefix + u'[[' + sha + u'] ' + subj + u'](' + url + u')')
-        blines = (c.get('body') or '').splitlines()
-        keep = min(len(blines), MAX_BODY_LINES_PER_COMMIT, budget)
-        for bl in blines[:keep]:
-            out.append('       ' + bl.strip())
-        budget -= keep
-        if budget <= 0:
-            break
-    # Fold body-less commits into one compact line (they have no prose to show).
-    shown_nobodies = nobodies[:MAX_NOBODY_CHAINED]
-    if shown_nobodies:
-        parts = []
-        for c in shown_nobodies:
-            u = 'https://github.com/PolarisWang/booming-il2cpp/commit/' + c.get('sha', '')
-            parts.append(u'[[' + c.get('sha', '')[:7] + u'] ' + (c.get('subject') or '') + u'](' + u + u')')
-        line = u'  • ' + u' ; '.join(parts)
-        if len(nobodies) > MAX_NOBODY_CHAINED:
-            line = u'  • ' + ' ; '.join(parts) + u' … (+%d)' % (len(nobodies) - MAX_NOBODY_CHAINED)
-        out.append(line)
-    return out
-
-# PR mode: show the PR header + individual commits with full messages.
-if is_pr and pr_number:
-    pr_url = 'https://github.com/PolarisWang/booming-il2cpp/pull/' + pr_number
-    pr_header = u'• [PR #' + pr_number + u'] ' + (pr_title or '') + u'  —  ' + pr_url
-    cl = [pr_header] + render_commit_lines(commits, prefix='    • ')
-else:
-    cl = render_commit_lines(commits, prefix='  • ')
-ct = chr(10).join(cl) if cl else ('  （无新提交）' if not is_pr else '  PR #' + pr_number)
-
-# Build findings list — rage-standard 4-tier lines: #N [严重] [Repo] file:line_range
-severity_icons = {'严重': '🔴', '中': '🟠', '轻': '⚪', '建议': '🟢'}
-sel_order = {'严重': 0, '中': 1, '轻': 2, '建议': 3}
-# severity-sort (严重 first), stable
-flist_sorted = sorted(flist, key=lambda f: sel_order.get(f.get('severity', '建议'), 9))
-# Defense in depth: drop ghost findings whose message carries no real content
-# (blank / whitespace-only). The generator now drops these at the source, but a
-# poisoned cache entry or a legacy findings.json could still carry one — never
-# render a "file:line — " line with a dangling dash and nothing after it.
-meaningful = []
-for f in flist_sorted:
-    _m = f.get('message')
-    if isinstance(_m, str) and _m.strip():
-        meaningful.append(f)
-flist_sorted = meaningful
-flines = []
-for ndx, fx in enumerate(flist_sorted, start=1):
-    sev = fx.get('severity') or '建议'
-    icon = severity_icons.get(sev, '⚪')
-    repo = fx.get('repo', 'il2cpp')
-    fp = fx.get('file', '')
-    ln = fx.get('line', 0)
-    lr = fx.get('line_range')
-    # Model may emit line_range as a bare number; normalize to a string so the
-    # .split('-') below never raises AttributeError and takes the whole card down.
-    if lr is None or lr == '':
-        lr = str(ln) if ln else ''
-    else:
-        lr = str(lr).strip()
-    loc = ':' + lr if lr else ''
-    msg = fx.get('message', '')
-    fname = fp.split('/')[-1] if '/' in fp else fp
-    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + ('#L' + str(lr.split('-')[0]) if lr else '')
-    # rage line: #N [严重] [il2cpp] fname:line_range — filename is the Feishu link
-    flines.append('{0} **#{1} [{2}] [{3}]** [{4}]({5}) — {6}'.format(
-        icon, ndx, sev, repo, fname + loc, furl, msg))
-ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
-
-bu = '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/'
-
-# Build risk overview line with emoji icons (rage 4-tier: 严重 中 轻 建议)
-risk_line = ''
-total = ${totalFindings}
-if total > 0:
-    parts = []
-    if ${sevCount} > 0:
-        parts.append('🔴 **' + str(${sevCount}) + '** 严重')
-    if ${medCount} > 0:
-        parts.append('🟠 **' + str(${medCount}) + '** 中')
-    if ${lightCount} > 0:
-        parts.append('⚪ **' + str(${lightCount}) + '** 轻')
-    if ${advCount} > 0:
-        parts.append('🟢 **' + str(${advCount}) + '** 建议')
-    risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
-else:
-    if ${env.REVIEW_DOCS_ONLY}:
-        risk_line = '📄 **纯文档变更**（本次仅改动 .md/.txt 文档，已按文档维度审查；如有代码改动请单独 review code 变更）'
-    elif ${env.REVIEW_INCOMPLETE}:
-        risk_line = '⚠️ **审查不完整**（部分文件因模型异常未能覆盖，建议稍后重跑以获得完整结果）'
-    elif ${env.REVIEW_LOW_CONF}:
-        risk_line = '⚠️ **0 发现 — 低置信**（在实质性代码上得到 0 条，可能是模型异常，建议人工复核）'
-    else:
-        risk_line = '✅ 本次未发现代码问题'
-
-commit_count = len(commits)
-if is_pr and pr_number:
-    scope_line = '📋 **审查范围:** PR #' + pr_number + '（' + str(commit_count) + ' 个提交）' + (' — ' + pr_title if pr_title else '')
-else:
-    scope_line = '📋 **审查范围:** ' + str(commit_count) + ' 个提交'
-lines = [
-    scope_line,
-    '',
-    '**新提交:**',
-    ct,
-    '',
-    '**风险概览:**',
-    risk_line,
-    '',
-]
-if flines:
-    lines.append('**问题列表:**')
-    lines.append(ft)
-lines.append('')
-lines.append('🔗 [查看完整报告](' + bu + ')')
-
-msg = chr(10).join(lines)
-
-with open('${workspaceDir}/feishu_card_msg.txt', 'w') as f:
-    f.write(msg)
-
-# Build and send Feishu card directly from Python
-webhook = os.environ.get('FEISHU_WEBHOOK_URL', '')
-card_color = '${colorTag}'
-
-card = {
-    'msg_type': 'interactive',
-    'card': {
-        'header': {
-            'title': {'tag': 'plain_text', 'content': '${feishuTitle}'},
-            'template': card_color
-        },
-        'elements': [
-            {'tag': 'div', 'text': {'tag': 'lark_md', 'content': msg}},
-            {'tag': 'hr'},
-            {
-                'tag': 'action',
-                'actions': [
-                    {
-                        'tag': 'button',
-                        'text': {'tag': 'plain_text', 'content': '🔧 查看完整报告'},
-                        'url': '${JENKINS_EXT_URL}/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/',
-                        'type': 'default'
-                    }
-                ]
-            },
-            {'tag': 'hr'},
-            {
-                'tag': 'note',
-                'elements': [
-                    {'tag': 'plain_text', 'content': 'chaos-il2cpp Code Review · ${DATE_TAG}'}
-                ]
+                // Layer 1: release the trigger lock EARLY (right after review+card are
+                // complete), NOT only in the Update State stage. If the card-send or a
+                // later stage hangs (the observed silent "no card since yesterday" fault
+                // was a build that ran review + card but never finished), the lock would
+                // otherwise stay until LOCK_TIMEOUT and block every subsequent review.
+                // Releasing here means the poller can start the next review immediately.
+                sh "rm -f /var/lib/report-server/daily/cr-trigger.lock 2>/dev/null || true"
+                echo "Trigger lock released early (after review+card)"
             }
-        ]
-    }
-}
-
-payload = json.dumps(card, ensure_ascii=False).encode('utf-8')
-if webhook:
-    req = urllib.request.Request(
-        webhook, data=payload,
-        headers={'Content-Type': 'application/json'},
-        method='POST')
-    try:
-        resp = urllib.request.urlopen(req, timeout=30)
-        print('Feishu card sent (HTTP ' + str(resp.status) + ')')
-    except Exception as e:
-        print('WARNING: Feishu webhook failed: ' + str(e))
-else:
-    print('WARNING: FEISHU_WEBHOOK_URL not set')
-
-print('ok')
-"
-"""
-            }
+        }
     }
 
     stage('Code Review: Notify Feishu') {

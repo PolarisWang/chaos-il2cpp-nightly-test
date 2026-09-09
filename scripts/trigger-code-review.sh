@@ -19,7 +19,10 @@ LOCK_FILE="/var/lib/report-server/daily/cr-trigger.lock"
 BOOMING_DIR="/home/debian/agent/booming-il2cpp"
 JENKINS_URL="http://localhost:8080"
 JOB_NAME="chaos-il2cpp-code-review"
-LOCK_TIMEOUT=1800  # 30 minutes — lock expires after this
+LOCK_TIMEOUT=1200  # 20 minutes — reduce from 30 to bound how long a stuck build can
+                   # hold the trigger lock and silently suppress all later reviews.
+                   # (A legit 4-chunk review usually finishes <10 min; 20 gives headroom
+                   # without letting a hung claude build block the poller all afternoon.)
 
 # Retry helper — GitHub TLS handshakes fail intermittently from this box
 # (GnuTLS "non-properly terminated"), so retry with a short backoff.

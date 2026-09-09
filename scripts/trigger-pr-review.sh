@@ -26,7 +26,7 @@ LOCK_FILE="/var/lib/report-server/daily/cr-pr-trigger.lock"
 BOOMING_DIR="/home/debian/agent/booming-il2cpp"
 JENKINS_URL="http://localhost:8080"
 JOB_NAME="chaos-il2cpp-code-review"
-LOCK_TIMEOUT=1800  # 30 minutes
+LOCK_TIMEOUT=1200  # 20 minutes — reduce from 30 to bound stuck-build lock blockage
 REPO="PolarisWang/booming-il2cpp"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }

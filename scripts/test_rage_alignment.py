@@ -239,10 +239,13 @@ def test_review_script_validator_is_strip_aware():
 
 
 def test_renderer_mirrors_ghost_guard():
-    """The shipped Jenkinsfile renderer must skip blank-message findings as a defense
-    in depth even if one slips past source validation (old cache, legacy file)."""
-    body = _read(JENKINSFILE)
-    # Look at the render loop region (from findings-list build to the em-dash line).
+    """The shipped card renderer must skip blank-message findings as a defense
+    in depth even if one slips past source validation (old cache, legacy file).
+    The render loop was extracted out of the Jenkinsfile inline python into
+    scripts/code-review-card.py (layer 3), so that file is what we pin to."""
+    card_script = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
+    body = _read(card_script)
+    # Look at the render region: findings-list build + ghost skip, up to em-dash.
     start = body.find("severity_icons = ")
     end = body.find("# Build risk overview line", start)
     region = body[start:end]
@@ -390,6 +393,7 @@ def _compile_embedded_python(path, require_region=True):
 _SCRIPT_DIR = os.path.join(REPO_ROOT, "scripts")
 _SHELL_SCRIPTS_WITH_PYTHON = [
     "review-with-claude.sh",      # single-quote -c + python heredocs (856/857 case)
+    "send-code-review-card.sh",   # shell wrapper for the extracted card-send python
     # cron, every 1 minute:
     "trigger-code-review.sh",
     "trigger-pr-review.sh",
@@ -403,6 +407,21 @@ _SHELL_SCRIPTS_WITH_PYTHON = [
     "nightly-orchestrator.sh",
     "startup.sh",
 ]
+
+
+def test_code_review_card_python_compiles():
+    """The standalone card-render script (moved out of the Jenkinsfile inline
+    python in layer 3) must compile cleanly, so a future edit there can't
+    slip a SyntaxError past the review flow. This is the file that now owns the
+    commit-parse + ghost-filter + card build."""
+    card = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
+    assert os.path.isfile(card), "code-review-card.py missing"
+    result = subprocess.run(
+        ["python3", "-m", "py_compile", card], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        "code-review-card.py has a Python syntax error:\n" + result.stderr.strip()
+    )
 
 
 def test_review_script_passes_bash_syntax_check():
@@ -599,12 +618,17 @@ def test_review_script_emits_low_confidence_marker():
 
 
 def test_jenkinsfile_consumes_low_confidence():
-    """Jenkinsfile must read the top-level low_confidence flag and render a
-    low-confidence '0 发现' card instead of '✅ 本次未发现代码问题'."""
-    body = _read(JENKINSFILE)
-    assert "low_confidence" in body
-    assert "REVIEW_LOW_CONF" in body
+    """The low-confidence '0 发现' fallback card text must be produced instead of
+    '✅ 本次未发现代码问题' when the review is low-confidence. Since the card
+    render loop (incl. the low_confidence risk line) moved out of the Jenkinsfile
+    inline python into scripts/code-review-card.py (layer 3), check that file."""
+    card = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
+    body = _read(card)
+    assert "REVIEW_LOW_CONF" in body or "low_confidence" in body
     assert "低置信" in body  # the card fallback text when low-confidence
+    # Jenkinsfile still gates on the flag before deciding to send a docs/lc card:
+    jbody = _read(JENKINSFILE)
+    assert "REVIEW_LOW_CONF" in jbody
 
 
 def test_review_script_never_caches_empty_result():
@@ -634,22 +658,19 @@ def test_review_script_skips_not_fails_on_glitch():
 
 
 def test_jenkinsfile_commit_parse_region_has_no_backslash():
-    """THE COMMIT-PARSE EMBEDDED PYTHON LIVES INSIDE A Groovy sh triple-quote string
-    (\"\"\"). ANY literal backslash there is interpreted by Groovy as an escape — an
-    invalid one like '\\x00' raises 'unexpected char' and kills EVERY code-review/job
-    build at compile time, before review runs (this is exactly how the pipeline went
-    dark in 2026-09-04 build #814). The parse must therefore use chr(0)/chr(10)/
-    splitlines() and carry NO backslash. This test fails loudly if one gets edited in."""
-    body = _read(JENKINSFILE)
+    """THE COMMIT-PARSE PYTHON MOVED OUT OF THE Groovy sh triple-quote string into
+    scripts/code-review-card.py (layer 3), so the Groovy '\\  is an escape and
+    breaks the build' hazard no longer applies to it. Before that move, a backslash
+    in the Jenkinsfile inline python killed every code-review build at compile
+    time (2026-09-04 build #814, and 2026-09-08 builds 856/857).  This now checks
+    the standalone card parser still uses the safe chr(0)/chr(10)/splitlines()
+    constructs.  (In a real .py a backslash is harmless python, but keeping the
+    parser consistent avoids subtle NUL/newline bugs.)"""
+    card = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
+    body = _read(card)
     start = body.index('commits = []')
-    end = body.index('# PR mode: show the PR', start)   # end of the parse+render block
+    end = body.index('# Also read findings JSON', start)   # end of the parse+render block
     region = body[start:end]
-    assert '\\' not in region, (
-        "commit-parse embedded python must not contain a backslash (Groovy escape "
-        "hazard breaks the build). Use chr(0)/chr(10)/splitlines() instead."
-    )
-    # The code should actually use the safe constructs (guard against someone swapping
-    # back to backslash escapes via a partial revert):
     assert 'chr(0)' in region, "must split on NUL via chr(0), not backslash escape"
     assert 'splitlines()' in region or 'chr(10)' in region, (
         "must split/join newlines via splitlines()/chr(10), not backslash escapes")
