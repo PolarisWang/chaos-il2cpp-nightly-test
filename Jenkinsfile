@@ -204,21 +204,22 @@ pipeline {
 sh """
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
-                        # New nightly (Route 3) runs from tests/e2e and auto-detects
-                        # the foundation-dll dir; publish-stage is inside the engine now.
+                        # New nightly (Route 3): runs from tests/e2e. report_dir is
+                        # NOT a CLI flag — it comes from the engine (defaults to
+                        # tests/e2e/nightly-build-report).  We bind it to the engine
+                        # worktree path so the later publish step can read it.
                         cd "${BOOMING_DIR}/tests/e2e"
 
                         echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
                         python3 -m verification.nightly.cli \
-                            --report-dir "${ARTIFACTS_DIR}/nightly-run" \
                             --max-workers 4 \
                             --native-config "${BUILD_CONFIG}" \
                             2>&1 || echo "WARNING: nightly cli had failures"
 
-                        echo "=== [x64] Publish Results (collect nightly-run/latest) ==="
+                        echo "=== [x64] Publish Results (collect tests/e2e report) ==="
                         python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
-                            --report-dir "${ARTIFACTS_DIR}/nightly-run/latest" \
+                            --report-dir "${BOOMING_DIR}/tests/e2e/nightly-build-report/summary" \
                             --foundation-dir "${BOOMING_DIR}/tests/e2e/translation" \
                             --output-dir "${ARTIFACTS_DIR}" \
                             --date-tag "${DATE_TAG}" \
@@ -251,7 +252,6 @@ sh """
                                 echo === [win-x64] Full Pipeline = verification.nightly.cli ===
 
                                 python -m verification.nightly.cli ^
-                                    --report-dir "${winArtifacts}/nightly-run-windows" ^
                                     --max-workers %NUMBER_OF_PROCESSORS% ^
                                     --native-config "${BUILD_CONFIG}"
 
