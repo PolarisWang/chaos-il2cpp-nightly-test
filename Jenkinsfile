@@ -971,7 +971,6 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 echo "Trigger lock released early (after review+card)"
             }
         }
-    }
 
     stage('Code Review: Notify Feishu') {
         script {
