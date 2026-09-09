@@ -32,6 +32,7 @@ param(
     [string]$JenkinsUrl = 'http://10.10.1.173:8080',
     [string]$AgentRoot  = 'C:\agent',
     [string]$AgentUser  = 'agent',
+    [switch]$SkipOpenSSH,
     [switch]$BootstrapFromLinux
 )
 
@@ -162,22 +163,27 @@ if (-not $hasCpp) {
 
 # ══════════════════════════════════════════════════════════════════
 # 4. 启用 OpenSSH Server + 创建 agent 用户 + 防火墙
+#    (可以 -SkipOpenSSH 跳过, 如果你已手动配好)
 # ══════════════════════════════════════════════════════════════════
-Write-Step "启用 OpenSSH Server"
-try {
-    $ssh = Get-WindowsCapability -Online -Name OpenSSH.Server 2>$null
-    if ($ssh -and $ssh.State -ne 'Installed') {
-        Add-WindowsCapability -Online -Name OpenSSH.Server 2>$null | Out-Null
-    }
-    if (Test-Path 'C:\Program Files\OpenSSH\sshd.exe') {
-        Start-Service sshd -ErrorAction SilentlyContinue
-        Set-Service -Name sshd -StartupType Automatic
-        if (-not (Get-NetFirewallRule -DisplayGroup 'OpenSSH Server' -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule -Name 'OpenSSH-Server' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+if (-not $SkipOpenSSH) {
+    Write-Step "启用 OpenSSH Server"
+    try {
+        $ssh = Get-WindowsCapability -Online -Name OpenSSH.Server 2>$null
+        if ($ssh -and $ssh.State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name OpenSSH.Server 2>$null | Out-Null
         }
-        Write-Ok "OpenSSH Server 已启动, 22 端口已放行"
-    } else { Write-Fail "OpenSSH Server 安装失败(需要 Windows 10+)"; Write-Warn "请手动: Add-WindowsCapability -Online -Name OpenSSH.Server" }
-} catch { Write-Fail "OpenSSH 配置异常: $_" }
+        if (Test-Path 'C:\Program Files\OpenSSH\sshd.exe') {
+            Start-Service sshd -ErrorAction SilentlyContinue
+            Set-Service -Name sshd -StartupType Automatic
+            if (-not (Get-NetFirewallRule -DisplayGroup 'OpenSSH Server' -ErrorAction SilentlyContinue)) {
+                New-NetFirewallRule -Name 'OpenSSH-Server' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+            }
+            Write-Ok "OpenSSH Server 已启动, 22 端口已放行"
+        } else { Write-Fail "OpenSSH Server 安装失败(需要 Windows 10+)"; Write-Warn "请手动: Add-WindowsCapability -Online -Name OpenSSH.Server" }
+    } catch { Write-Fail "OpenSSH 配置异常: $_" }
+} else {
+    Write-Ok "已跳过 OpenSSH 安装 (参数 -SkipOpenSSH)"
+}
 
 Write-Step "创建 agent 用户: $AgentUser"
 try {
