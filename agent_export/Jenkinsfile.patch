@@ -1,0 +1,39 @@
+diff --git a/Jenkinsfile b/Jenkinsfile
+index b9df0e0..9f5c60b 100644
+--- a/Jenkinsfile
++++ b/Jenkinsfile
+@@ -176,6 +176,34 @@ sh """
+             }
+         }
+ 
++        // ─────────────────────────────────────────────────────
++        // windows-x64 — Full Pipeline
++        // ─────────────────────────────────────────────────────
++        stage('windows-x64 Full Pipeline') {
++            when { expression { env.DISPATCHED != 'true' } }
++            agent { label 'windows-x64' }
++            steps {
++                script {
++                    bat """
++                        if not exist "${ARTIFACTS_DIR}" mkdir "${ARTIFACTS_DIR}"
++                        cd /d "${BOOMING_DIR}/testing/foundation-dll"
++
++                        echo === [win-x64] Full Pipeline — nightly_runner (parallel) ===
++
++                        python -m verification.nightly_runner.main ^
++                            --report-dir "${ARTIFACTS_DIR}/nightly-run-windows" ^
++                            --max-workers 4 ^
++                            --bench-workers 2 ^
++                            --native-config "${BUILD_CONFIG}" ^
++                            --stage-timeout 600 ^
++                            2>&1
++
++                        echo === [win-x64] Pipeline Complete ===
++                    """
++                }
++            }
++        }
++
+         // ─────────────────────────────────────────────────────
+         // linux-arm64 — Smoke Test
+         // ─────────────────────────────────────────────────────

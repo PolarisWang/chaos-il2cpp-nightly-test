@@ -51,6 +51,8 @@ pipeline {
         string(name: 'REVIEW_HEAD', defaultValue: '', description: 'PR head SHA (head of diff)')
         string(name: 'REVIEW_PR_NUMBER', defaultValue: '', description: 'GitHub PR number')
         string(name: 'REVIEW_PR_TITLE', defaultValue: '', description: 'GitHub PR title')
+        string(name: 'WINDOWS_BOOMING_DIR', defaultValue: 'C:/agent/booming-il2cpp',
+               description: 'Windows agent: path to booming-il2cpp source (forward slashes)')
     }
 
     environment {
@@ -60,6 +62,11 @@ pipeline {
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"
+        // Windows agent uses a separate source path (C:\agent\booming-il2cpp) — the
+        // existing BOOMING_DIR is a Linux path that makes no sense on Windows.
+        // This is pulled from the buildWithParameters call or falls back to a sensible
+        // Windows default, and is only meaningful inside a `windows-x64` node context.
+        WINDOWS_BOOMING_DIR = "${params.WINDOWS_BOOMING_DIR}"
     }
 
     stages {
@@ -177,19 +184,33 @@ pipeline {
         }
 
         // ─────────────────────────────────────────────────────
-        // linux-x64 — Full Pipeline
         // ─────────────────────────────────────────────────────
-        stage('linux-x64 Full Pipeline') {
+        // x64 + Windows x64 — Full Pipeline (diagonal parallel)
+        // ─────────────────────────────────────────────────────
+        // Linux x64 runs the full nightly_runner + publish pipeline, as before.
+        // Windows x64 runs the SAME nightly_runner module on the same source
+        // (synced by sync-to-windows.sh on the Linux side before triggering) but
+        // writes to an independent report dir (nightly-run-windows) that stays OUT
+        // of the Linux nightly-data baseline — different hardware would otherwise
+        // corrupt Linux trend data.
+        //
+        // Agents: chaos-agent-x64 (linux-x64) plus a user-managed Windows node
+        // (windows-x64) that connects outbound via JNLP to this master. Windows
+        // build steps use bat() not sh(). The nightly_runner Python takes forward
+        // slashes and CMake accepts them on Windows too, so no path juggling.
+        stage('Full Pipeline (x64 + Windows)') {
             when { expression { env.DISPATCHED != 'true' } }
-            agent { label 'linux-x64' }
-            steps {
-                script {
+            parallel {
+                stage('linux-x64') {
+                    agent { label 'linux-x64' }
+                    steps {
+                        script {
 sh """
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
                         cd "${BOOMING_DIR}/testing/foundation-dll"
 
-                        echo "=== [x64] Full Pipeline \u2014 nightly_runner (parallel) ==="
+                        echo "=== [x64] Full Pipeline = nightly_runner ==="
 
                         python3 -m verification.nightly_runner.main \
                             --report-dir "${ARTIFACTS_DIR}/nightly-run" \
@@ -213,9 +234,41 @@ sh """
 
                         echo "=== [x64] Pipeline Complete ==="
                     """
+                        }
+                    }
+                }
+
+                stage('windows-x64') {
+                    agent { label 'windows-x64' }
+                    steps {
+                        script {
+                            // A workspace-local artifacts dir — the Linux ARTIFACTS_DIR
+                            // was set during Init on the linux-x64 agent to a Linux path
+                            // that means nothing on a Windows node, so recompute here.
+                            def winArtifacts = "${env.WORKSPACE}\\artifacts".replaceAll('\\\\','/')
+                            // Source sync'd by Linux to C:/agent/booming-il2cpp (forward
+                            // slashes: consumable by Python and CMake on Windows).
+                            def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'C:/agent/booming-il2cpp'
+                            bat """
+                                if not exist "${winArtifacts}" mkdir "${winArtifacts}"
+                                cd /d "${winBoomin}/testing/foundation-dll"
+
+                                echo === [win-x64] Full Pipeline = nightly_runner ===
+
+                                python -m verification.nightly_runner.main ^
+                                    --report-dir "${winArtifacts}/nightly-run-windows" ^
+                                    --max-workers %NUMBER_OF_PROCESSORS% ^
+                                    --native-config "${BUILD_CONFIG}" ^
+                                    --stage-timeout 600
+
+                                echo === [win-x64] Pipeline Complete ===
+                            """
+                        }
+                    }
                 }
             }
         }
+
 
         // ─────────────────────────────────────────────────────
         // linux-arm64 — Smoke Test
