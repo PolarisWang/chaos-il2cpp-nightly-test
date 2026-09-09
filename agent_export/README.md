@@ -34,7 +34,7 @@
 > | 1 | 脚本结束无红色 `[FAIL]` | 看最后一段「部署完成」摘要 |
 > | 2 | Jenkins UI → Nodes → `windows-x64` 绿灯 | `http://10.10.1.173:8080/computer/windows-x64/` |
 > | 3 | 从 Linux 能 SSH 连 Windows | `ssh agent@<本机IP>`（密码是你设的） |
-> | 4 | 引擎源码已同步 | 确认 `C:\agent\booming-il2cpp\testing\foundation-dll\` 有内容 |
+> | 4 | 引擎源码已同步 | 确认 `D:\agent\workspace\booming-il2cpp\testing\foundation-dll\` 有内容 |
 > | 5 | Windows nightly 分支可执行 | 以下表格「触发一次验证」 |
 
 ... (the rest of the original README follows) ...
@@ -63,7 +63,7 @@
 │                                                                          │
 │  OpenSSH Server  (Linux 远程进入: ssh agent@<win-ip>)                     │
 │  agent.jar → Jenkins agent "windows-x64"  (label: windows-x64)           │
-│  C:\agent\booming-il2cpp   ← 由 Linux rsync/同步, 引擎源码副本            │
+│  D:\agent\workspace\booming-il2cpp   ← 由 Linux rsync/同步, 引擎源码副本            │
 │                                                                          │
 │  跑 nightly_runner.main → 产物回传/归档                                    │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -99,7 +99,7 @@ powershell -ExecutionPolicy Bypass -File enable-remoting.ps1             # 启�
 ```
 
 > `install-agent-tools.ps1` 已包含 OpenSSH Server 安装（Windows 可选功能 Win 10/11/Server）。
-> `enable-remoting.ps1` 创建 `agent` 用户、建 `C:\agent` 目录结构、配置 SSH。
+> `enable-remoting.ps1` 创建 `agent` 用户、建 `D:\agent` 目录结构、配置 SSH。
 
 ### 1.2 VS Build Tools（C++ 工具链）手动安装
 
@@ -134,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File verify-tools.ps1    # 全绿再继续
 
 ### 2.1 Windows 侧只需准备空目录
 
-`enable-remoting.ps1` 已建好 `C:\agent\booming-il2cpp`。确保 Windows 的 git 有 `core.autocrlf false`：
+`enable-remoting.ps1` 已建好 `D:\agent\workspace\booming-il2cpp`。确保 Windows 的 git 有 `core.autocrlf false`：
 （此设置由 enable-remoting.ps1 写入 agent 用户的 git 全局配置）
 
 ### 2.2 从 Linux 同步源码到 Windows
@@ -145,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File verify-tools.ps1    # 全绿再继续
 bash agent_export/sync-to-windows.sh <windows-ip>
 ```
 
-它会 rsync `/home/debian/agent/booming-il2cpp/` → `C:\agent\booming-il2cpp`，
+它会 rsync `/home/debian/agent/booming-il2cpp/` → `D:\agent\workspace\booming-il2cpp`，
 排除 `.git`、`_dll/`、`artifacts/`、CMake 缓存。Windows 上若无 rsync 则退化为 scp。
 
 > **工作流**：在 Linux 改引擎代码 → git commit/push → `sync-to-windows.sh` 推副本 → 触发构建。
@@ -161,7 +161,7 @@ bash agent_export/sync-to-windows.sh <windows-ip>
 2. **Manage Jenkins → Nodes → New Node**：
    - Name: `windows-x64`
    - Type: `Permanent Agent`
-   - Remote root: `C:\agent\workspace`
+   - Remote root: `D:\agent\workspace`
    - Labels: `windows-x64`
    - Usage: `Only build jobs with label expressions matching this node`
    - Launch: `Launch agent by connecting it to the controller`（JNLP）
@@ -201,13 +201,13 @@ bash agent_export/trigger-windows-build.sh <windows-ip>   # 触发 Jenkins night
 ### 4.3 查看构建开始前的实时日志（Linux 上 tail Windows 上的执行日志）
 
 ```bash
-ssh agent@<windows-ip> "Get-Content C:\agent\workspace\logs\run.log -Wait"
+ssh agent@<windows-ip> "Get-Content D:\agent\workspace\logs\run.log -Wait"
 ```
 
 ### 4.4 拉取构建产物（Linux 上从 Windows 拉回）
 
 ```bash
-rsync -av -e ssh agent@<windows-ip>:'C:/agent/workspace/artifacts/' /home/debian/agent/win-artifacts/
+rsync -av -e ssh agent@<windows-ip>:'D:/agent/workspace/artifacts/' /home/debian/agent/win-artifacts/
 ```
 
 ---
@@ -226,8 +226,8 @@ rsync -av -e ssh agent@<windows-ip>:'C:/agent/workspace/artifacts/' /home/debian
 1. Linux 侧 `ssh agent@<win-ip>` 进入 Windows。
 2. 到失败目录手, 手动跑同一条命令复现：
    ```powershell
-   cd C:\agent\booming-il2cpp\testing\foundation-dll
-   python -m verification.nightly_runner.main --report-dir C:\agent\dbg --native-config profile
+   cd D:\agent\workspace\booming-il2cpp\testing\foundation-dll
+   python -m verification.nightly_runner.main --report-dir D:\agent\dbg --native-config profile
    ```
 3. 修源码（在 Linux）→ `sync-to-windows.sh` → 重跑。
 
@@ -265,7 +265,7 @@ rsync -av -e ssh agent@<windows-ip>:'C:/agent/workspace/artifacts/' /home/debian
 | agent 掉线/服务死 | JNLP 断连 | `ssh ... "Restart-Service JenkinsAgent-windows-x64"` |
 | `sh()` 报 command not found | Windows 无 bash | stage 已用 `bat()` |
 | `cl` 找不到 / C++ 失败 | 缺 MSVC | 重装 VS Build Tools C++ 工作负载 |
-| python import 失败 | 缺依赖 | `ssh ... "cd C:\agent\booming-il2cpp\testing\foundation-dll; pip install -r requirements.txt"` |
+| python import 失败 | 缺依赖 | `ssh ... "cd D:\agent\workspace\booming-il2cpp\testing\foundation-dll; pip install -r requirements.txt"` |
 | 源码不同步 | 改在 Linux 但未推 | 记得 `sync-to-windows.sh` |
 | CRLF 报错 | autocrlf | `enable-remoting.ps1` 已写 `core.autocrlf false` |
 | Windows 基准与 Linux 差异 | 硬件不同 | 设计如此; 用 nightly-run-windows 独立看趋势 |

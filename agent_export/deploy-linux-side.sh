@@ -120,7 +120,7 @@ fi
 # ════════════════════════════════════════════════════════════════
 if [[ "$SKIP_SYNC" == "false" ]]; then
     echo -e "${CYAN}[3/5]${NC} 同步引擎源码到 Windows..."
-    WIN_PATH="C:/agent/booming-il2cpp"
+    WIN_PATH="D:/agent/workspace/booming-il2cpp"
     eval "$SSH_CMD cmd /c if not exist '${WIN_PATH}' mkdir '${WIN_PATH}'" 2>/dev/null
 
     # 有 sshpass 时用 rsync (更快)
@@ -146,18 +146,18 @@ fi
 echo -e "${CYAN}[4/5]${NC} 配置 Jenkins agent 服务..."
 
 if [[ -n "$JENKINS_SECRET" ]]; then
-    NSSM_EXE="C:\agent\nssm\nssm.exe"
+    NSSM_EXE="D:\agent\nssm\nssm.exe"
     SERVICE_NAME="JenkinsAgent-${JENKINS_NODE}"
 
     # 更新 NSSM 服务参数 (填入 secret)
-    eval "$SSH_CMD \"& '${NSSM_EXE}' set ${SERVICE_NAME} AppParameters '-jar C:\\agent\\agent.jar -url ${JENKINS_URL} -secret ${JENKINS_SECRET} -name ${JENKINS_NODE} -workDir C:\\agent\\workspace'\"" 2>&1
+    eval "$SSH_CMD \"& '${NSSM_EXE}' set ${SERVICE_NAME} AppParameters '-jar D:\\agent\\agent.jar -url ${JENKINS_URL} -secret ${JENKINS_SECRET} -name ${JENKINS_NODE} -workDir D:\\agent\\workspace'\"" 2>&1
     eval "$SSH_CMD \"& '${NSSM_EXE}' start ${SERVICE_NAME}\"" 2>&1
     log "Jenkins agent 服务已启动 (secret 已设置)"
 else
     warn "未提供 --jenkins-secret, 请手动更新:"
     warn "  ssh ${SSH_USER}@${WIN_HOST}"
-    warn "  & 'C:\agent\nssm\nssm.exe' set JenkinsAgent-windows-x64 AppParameters \"-jar C:\agent\agent.jar -url http://10.10.1.173:8080 -secret <SECRET> -name windows-x64 -workDir C:\agent\workspace\""
-    warn "  & 'C:\agent\nssm\nssm.exe' start JenkinsAgent-windows-x64"
+    warn "  & 'D:\agent\nssm\nssm.exe' set JenkinsAgent-windows-x64 AppParameters \"-jar D:\agent\agent.jar -url http://10.10.1.173:8080 -secret <SECRET> -name windows-x64 -workDir D:\agent\workspace\""
+    warn "  & 'D:\agent\nssm\nssm.exe' start JenkinsAgent-windows-x64"
 fi
 
 # ════════════════════════════════════════════════════════════════
@@ -168,7 +168,7 @@ JENKINS_CRED="${JENKINS_CRED:-}"
 HTTP_CODE=$(curl -s -o /tmp/jenkins_trigger.log -w "%{http_code}" \
     -u "$JENKINS_CRED" \
     -X POST "${JENKINS_URL}/job/chaos-il2cpp-nightly/buildWithParameters" \
-    --data-urlencode "BOOMING_REPO=C:/agent/booming-il2cpp" \
+    --data-urlencode "BOOMING_REPO=D:/agent/workspace/booming-il2cpp" \
     --data-urlencode "BUILD_CONFIG=profile" 2>&1 || echo "000")
 
 if [[ "$HTTP_CODE" == "201" || "$HTTP_CODE" == "200" ]]; then
@@ -208,5 +208,5 @@ echo "  重启 agent 服务:"
 echo "    ssh ${SSH_USER}@${WIN_HOST} \"& 'C:\\agent\\nssm\\nssm.exe' restart JenkinsAgent-windows-x64\""
 echo ""
 echo "  拉取 Windows 构建产物:"
-echo "    rsync -av -e ssh ${SSH_USER}@${WIN_HOST}:'C:/agent/workspace/artifacts/' /tmp/win-artifacts/"
+echo "    rsync -av -e ssh ${SSH_USER}@${WIN_HOST}:'D:/agent/workspace/artifacts/' /tmp/win-artifacts/"
 echo ""

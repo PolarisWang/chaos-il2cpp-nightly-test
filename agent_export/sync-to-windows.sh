@@ -13,14 +13,14 @@
 # 参数(可选覆盖):
 #   WIN_HOST   Windows agent 的 IP / 主机
 #   WIN_USER   SSH 用户名 (默认 agent; 由镜像内 provision 脚本创建)
-#   WIN_PATH   Windows 上的引擎源码路径 (默认 C:\agent\booming-il2cpp)
+#   WIN_PATH   Windows 上的引擎源码路径 (默认 D:\agent\workspace\booming-il2cpp)
 # ==============================================================
 
 set -euo pipefail
 
 WIN_HOST="${1:-${WIN_HOST:-}}"
 WIN_USER="${WIN_USER:-agent}"
-WIN_PATH="${WIN_PATH:-C:/agent/booming-il2cpp}"
+WIN_PATH="${WIN_PATH:-D:/agent/workspace/booming-il2cpp}"
 LOCAL_DIR="${LOCAL_DIR:-/home/debian/agent/booming-il2cpp}"
 
 if [[ -z "$WIN_HOST" ]]; then

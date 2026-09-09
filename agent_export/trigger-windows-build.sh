@@ -8,7 +8,7 @@
 #   #   JENKINS_URL   http://10.10.1.173:8080
 #   #   JENKINS_USER  qa004
 #   #   JENKINS_PASS  <密码>     (或用 JENKINS_TOKEN 用 API token)
-#   #   BOOMING_REPO  传参默认 C:\agent\booming-il2cpp
+#   #   BOOMING_REPO  传参默认 D:\agent\workspace\booming-il2cpp
 # ==============================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ JENKINS_URL="${JENKINS_URL:-http://10.10.1.173:8080}"
 JENKINS_USER="${JENKINS_USER:-qa004}"
 JENKINS_PASS="${JENKINS_PASS:-}"
 JENKINS_TOKEN="${JENKINS_TOKEN:-}"
-BOOMING_REPO="${BOOMING_REPO:-C:/agent/booming-il2cpp}"
+BOOMING_REPO="${BOOMING_REPO:-D:/agent/workspace/booming-il2cpp}"
 BUILD_CONFIG="${BUILD_CONFIG:-profile}"
 JOB="${JOB:-chaos-il2cpp-nightly}"
 

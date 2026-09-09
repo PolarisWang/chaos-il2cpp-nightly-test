@@ -1,5 +1,5 @@
 # chaos-il2cpp Windows Nightly Agent — 启用远程管理 (在 Windows 上一次性执行)
-# 用途: 开启 OpenSSH Server, 创建 agent 用户, 建 C:\agent 目录结构, 配置 git autocrlf
+# 用途: 开启 OpenSSH Server, 创建 agent 用户, 建 D:\agent 目录结构, 配置 git autocrlf
 # 运行: 管理员 PowerShell:
 #   powershell -ExecutionPolicy Bypass -File enable-remoting.ps1
 # 说明: 这是"从 Linux 无头管理 Windows"的关键一步。跑完本机后, 日常只需 ssh agent@<ip>。
@@ -7,7 +7,7 @@
 param(
     [string]$AgentUser = 'agent',
     [string]$AgentPwd  = '<请改为强密码>',   # : 修改为你的强密码后再运行!
-    [string]$AgentRoot = 'C:\agent'
+    [string]$AgentRoot = 'D:\agent'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,7 +55,7 @@ Step "建目录结构 $AgentRoot"
 foreach ($d in @('', 'workspace', 'booming-il2cpp', 'logs')) {
     New-Item -ItemType Directory -Path (Join-Path $AgentRoot $d) -Force | Out-Null
 }
-Ok "C:\agent\{,workspace,booming-il2cpp,logs} 已建"
+Ok "D:\agent\{,workspace,booming-il2cpp,logs} 已建"
 
 # ── 4. 配置 agent 用户的 git autocrlf=false ─────────────────────────
 Step "配置 git core.autocrlf=false (引擎源码同步前提)"

@@ -6,13 +6,13 @@
 param(
     [Parameter(Mandatory=$true)] [string]$Secret,
     [string]$JenkinsUrl = 'http://10.10.1.173:8080',
-    [string]$WorkDir     = 'C:\agent\workspace',
+    [string]$WorkDir     = 'D:\agent\workspace',
     [string]$JavaExe     = 'java',
     [switch]$Foreground
 )
 
 $ErrorActionPreference = 'Stop'
-$agentJar = 'C:\agent\agent.jar'
+$agentJar = 'D:\agent\agent.jar'
 
 # 1. 确保 workDir
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -40,11 +40,11 @@ if ($Foreground) {
     Write-Host "[INFO] 前台运行 agent (Ctrl+C 停止)..."
     & $JavaExe @argsList
 } else {
-    Write-Host "[INFO] 后台启动 agent... 日志: C:\agent\agent.log"
+    Write-Host "[INFO] 后台启动 agent... 日志: D:\agent\agent.log"
     try {
         Start-Process -FilePath $JavaExe -ArgumentList $argsList -WindowStyle Hidden `
-            -RedirectStandardOutput C:\agent\agent.log -RedirectStandardError C:\agent\agent.err.log
-        Write-Host "[OK] agent 已后台启动。查看日志: C:\agent\agent.log"
+            -RedirectStandardOutput D:\agent\agent.log -RedirectStandardError D:\agent\agent.err.log
+        Write-Host "[OK] agent 已后台启动。查看日志: D:\agent\agent.log"
     } catch {
         Write-Host "[FAIL] 后台启动失败: $_`n      请尝试 -Foreground 前台运行查看报错。"
     }

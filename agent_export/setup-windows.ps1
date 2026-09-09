@@ -5,7 +5,7 @@
 
 param(
     [string]$AgentUser = 'agent',
-    [string]$AgentRoot = 'C:\agent',
+    [string]$AgentRoot = 'D:\agent',
     [string]$JenkinsUrl = 'http://10.10.1.173:8080',
     [string]$JenkinsNodeName = 'windows-x64'
 )
@@ -275,13 +275,13 @@ Write-Host "  Jenkins 节点: $JenkinsNodeName"
 Write-Host "  Jenkins URL:  $JenkinsUrl"
 Write-Host ""
 Write-Host "  ├─ 下一步: 在 Jenkins 创建节点 $JenkinsNodeName"
-Write-Host "  │    (JNLP 方式, 标签 windows-x64, 根目录 C:\agent\workspace)"
+Write-Host "  │    (JNLP 方式, 标签 windows-x64, 根目录 D:\agent\workspace)"
 Write-Host "  │    记下 secret, 然后:"
 Write-Host "  │"
 Write-Host "  │  & `"$nssmExe`" set $serviceName AppParameters ^"
-Write-Host '     "-jar C:\agent\agent.jar -url http://10.10.1.173:8080 ^'
+Write-Host '     "-jar D:\agent\agent.jar -url http://10.10.1.173:8080 ^'
 Write-Host '       -secret <SECRET> -name windows-x64 ^'
-Write-Host '       -workDir C:\agent\workspace"'
+Write-Host '       -workDir D:\agent\workspace"'
 Write-Host "  │  & `"$nssmExe`" start $serviceName"
 Write-Host "  │"
 Write-Host "  ├─ 从 Linux 远程管理:"

@@ -8,13 +8,13 @@
 param(
     [Parameter(Mandatory=$true)] [string]$Secret,
     [string]$JenkinsUrl = 'http://10.10.1.173:8080',
-    [string]$WorkDir     = 'C:\agent\workspace',
+    [string]$WorkDir     = 'D:\agent\workspace',
     [string]$JavaExe     = 'java'
 )
 
 $ErrorActionPreference = 'Stop'
-$agentJar  = 'C:\agent\agent.jar'
-$nssmDir   = 'C:\agent\nssm'
+$agentJar  = 'D:\agent\agent.jar'
+$nssmDir   = 'D:\agent\nssm'
 $nssmExe   = "$nssmDir\nssm.exe"
 $serviceName = 'JenkinsAgent-windows-x64'
 
@@ -24,7 +24,7 @@ if (-not (Get-Command $JavaExe -ErrorAction SilentlyContinue)) {
 }
 
 # 2. 确保 agent.jar
-New-Item -ItemType Directory -Path C:\agent -Force | Out-Null
+New-Item -ItemType Directory -Path D:\agent -Force | Out-Null
 if (-not (Test-Path $agentJar)) {
     Write-Host "[INFO] 下载 agent.jar $JenkinsUrl ..."
     Invoke-WebRequest -Uri "$JenkinsUrl/jnlpJars/agent.jar" -OutFile $agentJar
@@ -61,9 +61,9 @@ $agentArgs = @(
 # 新建服务
 & $nssmExe install $serviceName $javaFull
 & $nssmExe set $serviceName AppParameters ($agentArgs -join ' ')
-& $nssmExe set $serviceName AppDirectory C:\agent
-& $nssmExe set $serviceName AppStdout C:\agent\agent-service.log
-& $nssmExe set $serviceName AppStderr C:\agent\agent-service.err.log
+& $nssmExe set $serviceName AppDirectory D:\agent
+& $nssmExe set $serviceName AppStdout D:\agent\agent-service.log
+& $nssmExe set $serviceName AppStderr D:\agent\agent-service.err.log
 & $nssmExe set $serviceName AppRestartDelay 5000          # 5秒后自动重启
 & $nssmExe set $serviceName Start SERVICE_AUTO_START      # 开机自启
 & $nssmExe set $serviceName ObjectName LocalSystem         # 管理员身份运行
@@ -74,6 +74,6 @@ Write-Host "[INFO] 启动服务 $serviceName ..."
 
 Write-Host "[OK] 服务 $serviceName 已启动 (开机自启)"
 Write-Host "    查看状态:  sc query $serviceName"
-Write-Host "    查看日志:  C:\agent\agent-service.log"
+Write-Host "    查看日志:  D:\agent\agent-service.log"
 Write-Host "    停止服务:  nssm stop $serviceName"
 Write-Host "    卸载服务:  nssm remove $serviceName confirm"

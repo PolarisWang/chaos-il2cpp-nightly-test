@@ -15,7 +15,7 @@ def agents = [
     [name:"linux-arm64",   labels:"linux arm64 qemu",           executors:1, remoteFS:"/home/jenkins"],
     [name:"android-arm64", labels:"android arm64 ndk",          executors:1, remoteFS:"/home/jenkins"],
     [name:"linux-x64-cr",  labels:"linux-x64-cr code-review",   executors:1, remoteFS:"/home/jenkins"],
-    [name:"windows-x64",   labels:"windows-x64 windows x64 msvc", executors:1, remoteFS:"C:\\agent\\workspace"],
+    [name:"windows-x64",   labels:"windows-x64 windows x64 msvc", executors:1, remoteFS:"D:\\agent\\workspace"],
 ]
 
 def nodesDir = new File(Jenkins.instance.getRootDir(), "nodes")

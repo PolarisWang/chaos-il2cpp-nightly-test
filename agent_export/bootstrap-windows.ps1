@@ -16,7 +16,7 @@
 
     参数:
       -JenkinsUrl  (默认 http://10.10.1.173:8080, 本机 CI 控制台)
-      -AgentRoot   (默认 C:\agent)
+      -AgentRoot   (默认 D:\agent)
       -AgentUser   (默认 agent, 用于 SSH 远程管理)
       -BootstrapFromLinux (开关, 从 Linux 启动服务器向 Windows 传送脚本; 默认 false)
 
@@ -30,7 +30,7 @@
 
 param(
     [string]$JenkinsUrl = 'http://10.10.1.173:8080',
-    [string]$AgentRoot  = 'C:\agent',
+    [string]$AgentRoot  = 'D:\agent',
     [string]$AgentUser  = 'agent',
     [switch]$SkipOpenSSH,
     [switch]$BootstrapFromLinux
@@ -320,7 +320,7 @@ if (Test-Path $nssmExe -and $nodeSecret) {
     } catch { Write-Fail "NSSM 服务注册失败: $_" }
 } else {
     Write-Warn "NSSM/JNLP secret 不可用, 跳过服务注册。后续手动:"
-    Write-Warn "  java -jar C:\agent\agent.jar -url $JenkinsUrl -secret <SECRET> -name $nodeName -workDir C:\agent\workspace"
+    Write-Warn "  java -jar D:\agent\agent.jar -url $JenkinsUrl -secret <SECRET> -name $nodeName -workDir D:\agent\workspace"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -335,7 +335,7 @@ try {
     } else {
         Write-Host "  [INFO] 引擎目录尚未同步, 同步后再安装 pip 依赖:"
         Write-Host "  Linux 上: bash agent_export/sync-to-windows.sh <本机IP>"
-        Write-Host "  然后手动: pip install -r C:\agent\booming-il2cpp\testing\foundation-dll\requirements.txt"
+        Write-Host "  然后手动: pip install -r D:\agent\workspace\booming-il2cpp\testing\foundation-dll\requirements.txt"
     }
 } catch { Write-Warn "pip 安装异常: $_" }
 
@@ -382,7 +382,7 @@ Write-Host "  (连接时会问密码, 输入你刚才设置的那个)"
 Write-Host ""
 Write-Host "  ── 日常操作 (全部在 Linux 上执行) ─────────"
 Write-Host "  同步源码:   bash sync-to-windows.sh $MY_IP"
-Write-Host "  尾日志:     ssh $AgentUser@$MY_IP 'Get-Content C:\agent\agent-service.log -Tail 20'"
+Write-Host "  尾日志:     ssh $AgentUser@$MY_IP 'Get-Content D:\agent\agent-service.log -Tail 20'"
 Write-Host "  重启服务:   ssh $AgentUser@$MY_IP 'Restart-Service JenkinsAgent-$nodeName'"
 Write-Host "  查节点:     $JenkinsUrl/computer/$nodeName/"
 Write-Host ""

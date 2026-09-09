@@ -41,7 +41,7 @@ if (Test-Path $vswhere) {
 Out 'MSVC C++ 工具链' $hasCpp
 
 # --- agent.jar 存在 ---
-Out 'C:\agent\agent.jar 存在' (Test-Path 'C:\agent\agent.jar')
+Out 'D:\agent\agent.jar 存在' (Test-Path 'D:\agent\agent.jar')
 
 Write-Host ''
 $allOk = $dotnetSdks -match '10\.0' -and $dotnetSdks -match '8\.0' -and $pyOk -and $hasCpp

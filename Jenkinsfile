@@ -51,7 +51,7 @@ pipeline {
         string(name: 'REVIEW_HEAD', defaultValue: '', description: 'PR head SHA (head of diff)')
         string(name: 'REVIEW_PR_NUMBER', defaultValue: '', description: 'GitHub PR number')
         string(name: 'REVIEW_PR_TITLE', defaultValue: '', description: 'GitHub PR title')
-        string(name: 'WINDOWS_BOOMING_DIR', defaultValue: 'C:/agent/booming-il2cpp',
+        string(name: 'WINDOWS_BOOMING_DIR', defaultValue: 'D:/agent/workspace/booming-il2cpp',
                description: 'Windows agent: path to booming-il2cpp source (forward slashes)')
     }
 
@@ -62,7 +62,7 @@ pipeline {
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"
-        // Windows agent uses a separate source path (C:\agent\booming-il2cpp) — the
+        // Windows agent uses a separate source path (D:/agent/workspace/booming-il2cpp) — the
         // existing BOOMING_DIR is a Linux path that makes no sense on Windows.
         // This is pulled from the buildWithParameters call or falls back to a sensible
         // Windows default, and is only meaningful inside a `windows-x64` node context.
@@ -246,9 +246,9 @@ sh """
                             // was set during Init on the linux-x64 agent to a Linux path
                             // that means nothing on a Windows node, so recompute here.
                             def winArtifacts = "${env.WORKSPACE}\\artifacts".replaceAll('\\\\','/')
-                            // Source sync'd by Linux to C:/agent/booming-il2cpp (forward
+                            // Source sync'd by Linux to D:/agent/workspace/booming-il2cpp (forward
                             // slashes: consumable by Python and CMake on Windows).
-                            def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'C:/agent/booming-il2cpp'
+                            def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'D:/agent/workspace/booming-il2cpp'
                             bat """
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
                                 cd /d "${winBoomin}/testing/foundation-dll"
