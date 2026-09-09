@@ -1,14 +1,43 @@
 # chaos-il2cpp — Windows Nightly Agent 部署与运维文档
 
 > **目标**: 把您的 Windows 机器变成一台"无头 build 节点"，只负责跑 nightly 核心流水线
-> （build → fact → benchmark → hotupdate）。**所有控制、调试、修改都在 Linux 侧完成**，
+>（build → fact → benchmark → hotupdate）。**所有控制、调试、修改都在 Linux 侧完成**，
 > Windows 不需要 RDP / 日常操作。
 >
 > 架构 = **Linux 主控 + Windows 执行**：
 > - **Linux (10.10.1.173)**: 编排 (Jenkins)、源码单一事实源、远程触发/调试/编排。
-> - **Windows (您的机器)**: 只跑 `nightly_runner.main`，产物交给 Jenkins 归档，或经 SSH/rsync 拉回。
+> - **Windows (您的机器)**: 只跑 `nightly_runner.main`，产物独立留存。
 >
-> 本目录即 "agent_export 套件"，请复制到 Windows 侧可访问位置，按本 README 执行。
+> ## 🚀 一键部署（Windows 上管理员 PowerShell）
+>
+> 从空机器开始，只需要**一行命令**：
+>
+> ```powershell
+> Set-ExecutionPolicy Bypass -Scope Process; iex (iwr -UseBasicParsing https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/agent_export/bootstrap-windows.ps1)
+> ```
+>
+> 本脚本会自动完成以下全部步骤（约 20-30 分钟）：
+> 1. 安装 Python / CMake / Git / JDK 17 / .NET SDK 10+8
+> 2. 安装 VS Build Tools 2022 (C++ 桌面包, 编译 entry.exe 必需)
+> 3. 启用 OpenSSH Server + 创建 `agent` 用户（供 Linux 远程管理）
+> 4. **自动在 Jenkins master 创建 `windows-x64` 节点**（不需要打开 Jenkins UI）
+> 5. **自动获取 JNLP secret 并注入 agent 服务**
+> 6. 下载 NSSM + 注册 Jenkins agent 为开机自启 Windows 服务
+> 7. 启动 agent → 节点上线
+>
+> ---
+>
+> ## 验收标准（跑完后逐条确认）
+>
+> | # | 标准 | 确认方法 |
+> |---|------|----------|
+> | 1 | 脚本结束无红色 `[FAIL]` | 看最后一段「部署完成」摘要 |
+> | 2 | Jenkins UI → Nodes → `windows-x64` 绿灯 | `http://10.10.1.173:8080/computer/windows-x64/` |
+> | 3 | 从 Linux 能 SSH 连 Windows | `ssh agent@<本机IP>`（密码是你设的） |
+> | 4 | 引擎源码已同步 | 确认 `C:\agent\booming-il2cpp\testing\foundation-dll\` 有内容 |
+> | 5 | Windows nightly 分支可执行 | 以下表格「触发一次验证」 |
+
+... (the rest of the original README follows) ...
 
 ---
 
