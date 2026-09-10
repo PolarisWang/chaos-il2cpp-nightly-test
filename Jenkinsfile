@@ -277,7 +277,7 @@ sh """
                                 REM (the nightly CLI only prints a generic "presets may not
                                 REM support Windows" catch-all). Non-fatal: nightly still runs.
                                 echo === [win-x64] SDK preflight (build_presets windows-x64-reference) ===
-                                python tests\\e2e\\translation\\artifacts\\build_presets.py --preset windows-x64-reference
+                                python translation\\artifacts\\build_presets.py --preset windows-x64-reference
                                 echo === [win-x64] SDK preflight exit=%ERRORLEVEL% ===
 
                                 python -m verification.nightly.cli ^
