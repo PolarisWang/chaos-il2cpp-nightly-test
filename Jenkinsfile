@@ -250,7 +250,8 @@ sh """
                             // missing).  Prepend the standard install locations so the engine's
                             // toolchain is discoverable from this bat step.
                             bat """
-                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\CMake\\bin;%ProgramFiles(x86)%\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build;%ProgramFiles%\\Git\\cmd;%PATH%"
+                                call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
+                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\CMake\\bin;%PATH%"
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
                                 cd /d "${winBoomin}/tests/e2e"
 
