@@ -299,14 +299,14 @@ sh """
                                 REM checkout, never a place for local edits.  fetch --depth=1 keeps
                                 REM it fast; if fetch fails we keep the existing tree and continue.
                                 echo === [win-x64] syncing engine from origin/main ===
-                                git -C "${winBoomin}" fetch origin main --depth=1
+                                git config --global --add safe.directory "${winBoomin}"
+                                git -C "${winBoomin}" fetch --depth=1 origin main
                                 if not errorlevel 1 (
                                     git -C "${winBoomin}" reset --hard origin/main
                                     git -C "${winBoomin}" log -1 --oneline
                                     echo === [win-x64] engine synced ===
                                 ) else (
                                     echo === [win-x64] WARNING: engine sync failed; using existing tree ===
-                                    git -C "${winBoomin}" log -1 --oneline
                                 )
 
                                 cd /d "${winBoomin}/tests/e2e"
