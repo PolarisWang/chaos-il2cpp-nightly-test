@@ -327,11 +327,21 @@ if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
             echo "WARNING: merged chunk (${_merged_total_lines} lines) exceeds ${MERGED_CHUNK_MAX_LINES} — dropping overflow files; review will be partial" >&2
             INCOMPLETE=1
             # Drop the largest files one by one until the total fits.
-            _reduced=$(FROM_COMMIT="$FROM_COMMIT" TO_COMMIT="$TO_COMMIT" REPO_DIR="$REPO_DIR" python3 - "$_merged_files" "$MERGED_CHUNK_MAX_LINES" <<'PY'
-import sys, subprocess, os
-repo = os.environ.get('REPO_DIR', '')
-files = sys.argv[1].strip().split()
-limit = int(sys.argv[2])
+            # Write the merged file list to a temp file and feed it to Python
+            # via env (not argv) — when many small files overflow into the merged
+            # chunk, the concatenated path string exceeds ARG_MAX and kills the
+            # script with "Argument list too long".
+            _MERGED_FILES_TMP=$(mktemp)
+            printf '%s\n' "$_merged_files" > "$_MERGED_FILES_TMP"
+            _reduced=$(FROM_COMMIT="$FROM_COMMIT" TO_COMMIT="$TO_COMMIT" \
+                       REPO_DIR="$REPO_DIR" \
+                       MERGED_FILES_TMP="$_MERGED_FILES_TMP" \
+                       python3 - "$MERGED_CHUNK_MAX_LINES" <<'PY'
+import os, sys, subprocess
+repo = os.environ['REPO_DIR']
+limit = int(sys.argv[1])
+with open(os.environ['MERGED_FILES_TMP']) as _f:
+    files = _f.read().strip().split()
 # compute each file's diff line count
 sizes = {}
 for f in files:
@@ -358,6 +368,7 @@ for f, sz in sorted_files:
 print(' '.join(kept))
 PY
 )
+            rm -f "$_MERGED_FILES_TMP"
             if [ -n "$_reduced" ]; then
                 _merged_files="$_reduced"
                 echo "  reduced to $(echo $_merged_files | wc -w | tr -d ' ') files"
