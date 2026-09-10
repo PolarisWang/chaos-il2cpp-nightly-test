@@ -287,7 +287,7 @@ sh """
                                 echo === [win-x64] SDK preflight exit=%ERRORLEVEL% ===
 
                                 REM dotnet diagnostics: the chunk build resolves the target DLL
-                                REM from DOTNET_ROOT\shared\**\<Assembly>.dll. Print what dotnet
+                                REM from the dotnet runtime shared folder. Print what dotnet
                                 REM the build will see and where its runtime lives, so a
                                 REM 'DLL not found' can be diagnosed from the console.
                                 echo === [win-x64] dotnet diag ===
