@@ -277,15 +277,22 @@ sh """
                                     --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
-                                REM Surface the per-chunk failure detail into the Jenkins console.
-                                REM The nightly CLI captures each chunk's stderr into its own
-                                REM run.log under the report dir; without this the console only
-                                REM shows "FAIL exit=1" with no cause and the failure is
-                                REM undebuggable from the controller.
-                                echo === [win-x64] last nightly summary ===
-                                if exist "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md" type "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md"
-                                echo === [win-x64] first failing chunk log (head) ===
-                                for /r "${winBoomin}\\tests\\e2e\\nightly-build-report\\logs" %%f in (run.log) do if not defined SHOWN_LOG set SHOWN_LOG=1 & type "%%f"
+                                REM ---- Debug surface (controller cannot SSH into this box) ----
+                                REM 1) where did the report land? 2) dump the summary; 3) dump the
+                                REM per-chunk result json which carries the error_class; 4) dump the
+                                REM newest .log anywhere under the report tree (that is where the
+                                REM nightly CLI puts each chunk's captured stderr).
+                                set "REPORT=${winBoomin}\\tests\\e2e\\nightly-build-report"
+                                echo === [win-x64] report tree ===
+                                if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
+                                echo === [win-x64] nightly-summary.md ===
+                                if exist "%REPORT%\\summary\\nightly-summary.md" type "%REPORT%\\summary\\nightly-summary.md"
+                                echo === [win-x64] nightly-result.json ===
+                                if exist "%REPORT%\\summary\\nightly-result.json" type "%REPORT%\\summary\\nightly-result.json"
+                                echo === [win-x64] newest captured log ===
+                                set "NEWEST="
+                                for /f "delims=" %%f in ('dir /s /b /o-d "%REPORT%\\*.log" 2^>nul') do if not defined NEWEST set "NEWEST=%%f"
+                                if defined NEWEST (echo --- %NEWEST% --- & type "%NEWEST%") else (echo [win-x64] no .log files found under %REPORT%)
                             """
                         }
                     }
