@@ -245,7 +245,12 @@ sh """
                             def winArtifacts = "${env.WORKSPACE}\\artifacts".replaceAll('\\\\','/')
                             // Engine is synced/cloned under D:/agent/workspace/booming-il2cpp.
                             def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'D:/agent/workspace/booming-il2cpp'
+                            // The Jenkins agent runs as a Windows service whose PATH doesn't
+                            // inherit your interactive shell's PATH (python/cmake/MSVC may be
+                            // missing).  Prepend the standard install locations so the engine's
+                            // toolchain is discoverable from this bat step.
                             bat """
+                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\CMake\\bin;%ProgramFiles(x86)%\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build;%ProgramFiles%\\Git\\cmd;%PATH%"
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
                                 cd /d "${winBoomin}/tests/e2e"
 
