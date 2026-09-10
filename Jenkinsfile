@@ -286,6 +286,18 @@ sh """
                                 python translation\\artifacts\\build_presets.py --preset windows-x64-reference
                                 echo === [win-x64] SDK preflight exit=%ERRORLEVEL% ===
 
+                                REM dotnet diagnostics: the chunk build resolves the target DLL
+                                REM from DOTNET_ROOT\shared\**\<Assembly>.dll. Print what dotnet
+                                REM the build will see and where its runtime lives, so a
+                                REM 'DLL not found' can be diagnosed from the console.
+                                echo === [win-x64] dotnet diag ===
+                                where dotnet
+                                echo DOTNET_ROOT=%DOTNET_ROOT%
+                                if defined DOTNET_ROOT (dir /b "%DOTNET_ROOT%\\shared\\Microsoft.NETCore.App" 2>nul)
+                                if defined DOTNET_ROOT (dir /s /b "%DOTNET_ROOT%\\shared\\System.Collections.Immutable.dll" 2>nul)
+                                echo === [win-x64] dotnet --info ===
+                                dotnet --info
+
                                 python -m verification.nightly.cli ^
                                     --max-workers %NUMBER_OF_PROCESSORS% ^
                                     --native-config "${BUILD_CONFIG}"
