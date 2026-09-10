@@ -277,6 +277,15 @@ sh """
                                     --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
+                                REM Surface the per-chunk failure detail into the Jenkins console.
+                                REM The nightly CLI captures each chunk's stderr into its own
+                                REM run.log under the report dir; without this the console only
+                                REM shows "FAIL exit=1" with no cause and the failure is
+                                REM undebuggable from the controller.
+                                echo === [win-x64] last nightly summary ===
+                                if exist "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md" type "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md"
+                                echo === [win-x64] first failing chunk log (head) ===
+                                for /r "${winBoomin}\\tests\\e2e\\nightly-build-report\\logs" %%f in (run.log) do @if not defined SHOWN_LOG (set SHOWN_LOG=1 & echo --- %%f --- & more /e +1 "%%f" | findstr /n "^" | more +1 & echo --- end %%f ---)
                             """
                         }
                     }
