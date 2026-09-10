@@ -219,6 +219,22 @@ pipeline {
                                 echo "=== [x64] materialising pristine origin/main -> ${engTree} ==="
                                 git --git-dir='${engSrc}/.git' archive --format=tar origin/main | tar -x -C '${engTree}'
                                 echo "  engine tree files: \$(find '${engTree}' -type f | wc -l)"
+                                # Probe the exact conditions build.py uses to locate the target
+                                # DLL, so a "DLL not found" is diagnosable from the console.
+                                python3 - <<'PY'
+import os, sys
+from pathlib import Path
+dr = os.environ.get("DOTNET_ROOT")
+print(f"[dll-probe] DOTNET_ROOT={dr!r}")
+rb = Path(dr) / "shared" if dr else None
+print(f"[dll-probe] runtime_base={rb} is_dir={rb.is_dir() if rb else None}")
+if rb and rb.is_dir():
+    print(f"[dll-probe] shared children={[p.name for p in rb.iterdir()][:10]}")
+    hits = list(rb.rglob("**/System.Collections.Immutable.dll"))
+    print(f"[dll-probe] rglob hits={[str(h) for h in hits]}")
+else:
+    print("[dll-probe] NO runtime_base — DOTNET_ROOT unset or wrong")
+PY
                             """
                             env.NIGHTLY_ENGINE_TREE = engTree
 sh """
