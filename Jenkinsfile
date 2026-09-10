@@ -291,6 +291,24 @@ sh """
                                 REM "DLL not found for <Assembly>".
                                 if not defined DOTNET_ROOT if exist "C:\\Program Files\\dotnet\\dotnet.exe" set "DOTNET_ROOT=C:\\Program Files\\dotnet"
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
+
+                                REM Sync the engine to the latest origin/main before every run.
+                                REM The agent's engine checkout must not drift from main, and the
+                                REM controller cannot SSH in to update it — so do it here.
+                                REM reset --hard (not pull): the agent tree is a disposable build
+                                REM checkout, never a place for local edits.  fetch --depth=1 keeps
+                                REM it fast; if fetch fails we keep the existing tree and continue.
+                                echo === [win-x64] syncing engine from origin/main ===
+                                git -C "${winBoomin}" fetch origin main --depth=1
+                                if not errorlevel 1 (
+                                    git -C "${winBoomin}" reset --hard origin/main
+                                    git -C "${winBoomin}" log -1 --oneline
+                                    echo === [win-x64] engine synced ===
+                                ) else (
+                                    echo === [win-x64] WARNING: engine sync failed; using existing tree ===
+                                    git -C "${winBoomin}" log -1 --oneline
+                                )
+
                                 cd /d "${winBoomin}/tests/e2e"
 
                                 REM Locate the MSVC environment (cl.exe needs vcvars64). Use the
