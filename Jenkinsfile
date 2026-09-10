@@ -283,7 +283,7 @@ sh """
                             // missing).  Prepend the standard install locations so the engine's
                             // toolchain is discoverable from this bat step.
                             bat """
-                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\dotnet;C:\\Program Files\\CMake\\bin;%PATH%"
+                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\dotnet;C:\\Program Files\\CMake\\bin;C:\\Program Files\\Git\\cmd;%PATH%"
                                 REM DOTNET_ROOT must be explicit: build.py auto-detects it by
                                 REM running `dotnet --info`, which fails silently if dotnet is
                                 REM not on PATH under the Jenkins service account — that leaves
