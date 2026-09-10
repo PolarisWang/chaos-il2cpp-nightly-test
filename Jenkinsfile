@@ -201,14 +201,31 @@ pipeline {
                     agent { label 'linux-x64' }
                     steps {
                         script {
+                            // Clean-checkout engine tree for this run (方案A):
+                            // the shared /home/debian/agent/booming-il2cpp is a
+                            // long-lived DEVELOPER worktree (thousands of dirty
+                            // files + coredumps), so running nightly there both
+                            // fails the provenance guard (HEAD churn) and risks
+                            // clobbering uncommitted work.  Instead, materialise a
+                            // pristine copy of origin/main under the Jenkins
+                            // workspace via `git archive` (no worktree lock, no
+                            // .git copy) and run nightly entirely inside it.
+                            def engSrc  = "${BOOMING_DIR}"
+                            def engTree = "${env.WORKSPACE}/engine-src"
+                            sh """
+                                set -euo pipefail
+                                rm -rf '${engTree}'
+                                mkdir -p '${engTree}'
+                                echo "=== [x64] materialising pristine origin/main -> ${engTree} ==="
+                                git --git-dir='${engSrc}/.git' archive --format=tar origin/main | tar -x -C '${engTree}'
+                                echo "  engine tree files: \$(find '${engTree}' -type f | wc -l)"
+                            """
+                            env.NIGHTLY_ENGINE_TREE = engTree
 sh """
                         set -euo pipefail
                         mkdir -p "${ARTIFACTS_DIR}"
-                        # New nightly (Route 3): runs from tests/e2e. report_dir is
-                        # NOT a CLI flag — it comes from the engine (defaults to
-                        # tests/e2e/nightly-build-report).  We bind it to the engine
-                        # worktree path so the later publish step can read it.
-                        cd "${BOOMING_DIR}/tests/e2e"
+                        # Run the Route-3 nightly CLI inside the pristine engine tree.
+                        cd "${engTree}/tests/e2e"
 
                         echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
@@ -219,8 +236,8 @@ sh """
 
                         echo "=== [x64] Publish Results (collect tests/e2e report) ==="
                         python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
-                            --report-dir "${BOOMING_DIR}/tests/e2e/nightly-build-report/summary" \
-                            --foundation-dir "${BOOMING_DIR}/tests/e2e/translation" \
+                            --report-dir "${engTree}/tests/e2e/nightly-build-report/summary" \
+                            --foundation-dir "${engTree}/tests/e2e/translation" \
                             --output-dir "${ARTIFACTS_DIR}" \
                             --date-tag "${DATE_TAG}" \
                             --run-tag "${RUN_TAG}" \
