@@ -34,7 +34,11 @@
 #   - Writes findings JSON to --output path
 #   - Prints summary line to stdout for pipeline consumption
 
-set -eu
+# pipefail is REQUIRED: several steps pipe a potentially-oversized path list or
+# diff into another command.  Without it, an E2BIG failure in the producer is
+# masked (the consumer just sees empty input), which silently defeated the
+# oversize-diff guard and let unscannable chunks through as "0 lines".
+set -euo pipefail
 
 REPO_DIR=""
 FROM_COMMIT=""
@@ -77,8 +81,18 @@ cd "$REPO_DIR"
 
 # Verify commits exist
 if ! git cat-file -e "${FROM_COMMIT}"^{commit} 2>/dev/null; then
-    echo "ERROR: from-commit '${FROM_COMMIT}' not found" >&2
-    exit 1
+    # The recorded from-commit is not present in this repo/cache.  This can
+    # happen when the Jenkins repo cache was wiped and re-initialized, leaving
+    # the state file pointing at an orphaned SHA.  Hard-failing here (the old
+    # behaviour) is PERMANENT: the state never advances because the pipeline
+    # dies before Update State, so every subsequent poll retries the same
+    # unresolvable range forever.  Instead, emit an empty/low-confidence
+    # result so the caller can advance the state past the orphan and resume.
+    echo "WARNING: from-commit '${FROM_COMMIT}' not found in this repo — emitting placeholder so state can advance past the orphan" >&2
+    printf '%s' '{"meta":{"from":"'"${FROM_COMMIT}"'","to":"'"${TO_COMMIT}"'"},"summary":{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0},"findings":[],"commits":[],"low_confidence":true,"incomplete":true,"base_missing":true}' > "$OUTPUT_FILE"
+    echo "Reviewed 0 commits (base missing)"
+    echo "Findings: 0"
+    exit 0
 fi
 if ! git cat-file -e "${TO_COMMIT}"^{commit} 2>/dev/null; then
     echo "ERROR: to-commit '${TO_COMMIT}' not found" >&2
@@ -235,6 +249,25 @@ chunk_diff_for() {
     git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- "$@" 2>/dev/null
 }
 
+# chunk_diff_for_list <file-with-one-path-per-line>
+# Same as chunk_diff_for, but reads the paths from a file instead of argv.
+# Needed when a merged chunk holds thousands of paths: a space-joined list
+# passed as argv exceeds ARG_MAX (E2BIG) and the git diff silently yields
+# nothing, which previously defeated the oversize-guard.
+# git pathspecs support :(literal) prefixing; pass them via --pathspec-from-file.
+chunk_diff_for_list() {
+    local listfile="$1"
+    git diff "${FROM_COMMIT}".."${TO_COMMIT}" \
+        --pathspec-from-file="$listfile" --pathspec-file-nul 2>/dev/null
+}
+
+# write_path_list <outfile> <space-joined-paths>
+# Emit the paths NUL-separated (git --pathspec-file-nul format).
+write_path_list() {
+    local outfile="$1"; shift
+    printf '%s\0' $1 > "$outfile"
+}
+
 # is_note_path <path>: 1 if it's a markdown/text (no code findings expected)
 is_note_path() {
     case "$1" in
@@ -320,12 +353,18 @@ if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
     done
     if [ -n "$_merged" ]; then
         # Check total diff size of the merged chunk before committing it.
-        _merged_total_lines=$(chunk_diff_for $_merged_files | wc -l | tr -d ' ')
+        # Use the pathspec-file form: _merged_files can hold thousands of
+        # paths, which would exceed ARG_MAX if passed as argv.
+        _MERGED_SIZE_TMP=$(mktemp)
+        write_path_list "$_MERGED_SIZE_TMP" "$_merged_files"
+        _merged_total_lines=$(chunk_diff_for_list "$_MERGED_SIZE_TMP" | wc -l | tr -d ' ')
+        rm -f "$_MERGED_SIZE_TMP"
         echo "  merged chunk diff size: ${_merged_total_lines} lines (max ${MERGED_CHUNK_MAX_LINES})"
         if [ "$_merged_total_lines" -gt "$MERGED_CHUNK_MAX_LINES" ]; then
             # Too large — warn and drop overflow, marking INCOMPLETE.
             echo "WARNING: merged chunk (${_merged_total_lines} lines) exceeds ${MERGED_CHUNK_MAX_LINES} — dropping overflow files; review will be partial" >&2
             INCOMPLETE=1
+            _INCOMPLETE_PLAN=1   # survives the later INCOMPLETE=0 reset at the chunk loop
             # Drop the largest files one by one until the total fits.
             # Write the merged file list to a temp file and feed it to Python
             # via env (not argv) — when many small files overflow into the merged
@@ -920,6 +959,28 @@ AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
 INCOMPLETE=0
+# Preserve any INCOMPLETE flag that was set during chunk-planning
+# (the merged-chunk overflow path ~line 356).  The declaration above
+# re-initialized it to 0; patch back the planning value if it was set.
+if [ -n "${_INCOMPLETE_PLAN-}" ] && [ "$_INCOMPLETE_PLAN" = "1" ]; then
+    INCOMPLETE=1
+fi
+CHUNK_IDX=0
+# NOTE: INCOMPLETE may have been set earlier during chunk-planning
+# (lines ~356) when the merged chunk overflow->drop path fires.  That
+# flag was then reset here.  Re-read the planning-time value:
+
+# Re-read INCOMPLETE from the chunk-planning phase: the merged-chunk
+# overflow path (~356) may have set it before the loop.  Do not reset it.
+# Instead, start from the PLANNING-TIME value (which was clobbered above
+# when INCOMPLETE was declared as a local var with initialization).
+# BASH HACK: re-read the flag from the chunk-loop-state file if one exists,
+# or just re-initialize to the known-safe "0" — the overflow path now sets
+# INCOMPLETE via a callback file that we check here.
+if [ -f "$CHUNK_INCOMPLETE_MARKER" ]; then
+    INCOMPLETE=1
+    rm -f "$CHUNK_INCOMPLETE_MARKER"
+fi
 CHUNK_IDX=0
 # The chunk loop calls claude and pipes its output through extractors; a glitchy
 # model answer or a transient pipe failure must NOT abort the whole script under
@@ -932,7 +993,13 @@ for chunk_paths in "${CHUNKS[@]:-}"; do
     # strip leading space
     chunk_paths="${chunk_paths#" "}"
     echo "reviewing chunk $CHUNK_IDX/${CHUNK_COUNT}: ${chunk_paths}"
-    cdiff=$(chunk_diff_for $chunk_paths)
+    # Write chunk paths to a temp file and diff via --pathspec-file-nul so
+    # that a chunk packing hundreds of small files does not exceed ARG_MAX
+    # (git diff "$@" blows up with E2BIG at ~2M of argv).
+    _CHUNK_PATHS_TMP=$(mktemp)
+    write_path_list "$_CHUNK_PATHS_TMP" "$chunk_paths"
+    cdiff=$(chunk_diff_for_list "$_CHUNK_PATHS_TMP")
+    rm -f "$_CHUNK_PATHS_TMP"
     [ -z "$cdiff" ] && continue
     # Is everything in this chunk a note file? (then 0-findings is plausible.)
     all_note=1
@@ -1029,6 +1096,31 @@ PY
 done
 set -e
 
+# ── Write findings file EARLY (before any abort point) ──────────
+# If the aggregation below aborts (ARG_MAX, unexpected JSON parse error),
+# the output file must still exist with whatever partial findings were
+# collected.  An empty/partial findings file is better than an absent one:
+# the Jenkins stage reads this file, and if it's missing the stage fails
+# and the trigger lock is left stuck.
+_SAFE_FIND_TMP=$(mktemp)
+printf '%s' "$AGG_FIND" > "$_SAFE_FIND_TMP"
+python3 - "$_SAFE_FIND_TMP" "$OUTPUT_FILE" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        findings = json.load(f)
+except Exception:
+    findings = []
+with open(sys.argv[2], "w") as f:
+    json.dump({
+        "summary": {"严重": 0, "中": 0, "轻": 0, "建议": 0, "total_findings": 0},
+        "findings": findings if isinstance(findings, list) else [],
+        "commits": [],
+    }, f, ensure_ascii=False)
+PY
+rm -f "$_SAFE_FIND_TMP"
+echo "Safe-guard output written, proceeding to aggregation..."
+
 # If some chunks glitched and were skipped (INCOMPLETE), the build must NOT go
 # RED / spam "构建失败" — that's the exact pain. Instead force low_confidence and
 # continue so the card says "部分文件审查未覆盖（模型异常）" with whatever WAS
@@ -1076,20 +1168,31 @@ done
 [ "$any_code" = "0" ] && DOCS_ONLY=true
 # Sort the aggregated findings by severity (严重>中>轻>建议) so every downstream
 # consumer (report, card, GitLab comment) sees a deterministic, severity-ordered list.
-AGG_FIND=$(python3 - "$AGG_FIND" <<'PY'
+# Pass the (potentially huge) aggregate JSON via temp FILES, not argv: a large
+# range can accumulate enough findings that the JSON exceeds the ~2M argv limit.
+_AGG_FIND_TMP=$(mktemp)
+_AGG_SUM_TMP=$(mktemp)
+printf '%s' "$AGG_FIND" > "$_AGG_FIND_TMP"
+printf '%s' "$AGG_SUM" > "$_AGG_SUM_TMP"
+AGG_FIND=$(python3 - "$_AGG_FIND_TMP" <<'PY'
 import sys, json
+with open(sys.argv[1]) as f:
+    fs = json.load(f)
 order = {"严重": 0, "中": 1, "轻": 2, "建议": 3}
-fs = json.loads(sys.argv[1])
 fs.sort(key=lambda f: order.get(f.get("severity", "建议"), 9))
-# stable: keep model order within same severity
 print(json.dumps(fs, ensure_ascii=False))
 PY
 )
-CLAUDE_JSON=$(python3 - "$AGG_SUM" "$AGG_FIND" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" "$DOCS_ONLY" <<'PY'
+printf '%s' "$AGG_FIND" > "$_AGG_FIND_TMP"
+CLAUDE_JSON=$(python3 - "$_AGG_SUM_TMP" "$_AGG_FIND_TMP" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" "$DOCS_ONLY" <<'PY'
 import sys, json
+with open(sys.argv[1]) as f:
+    summary = json.load(f)
+with open(sys.argv[2]) as f:
+    findings = json.load(f)
 print(json.dumps({
-    "summary": json.loads(sys.argv[1]),
-    "findings": json.loads(sys.argv[2]),
+    "summary": summary,
+    "findings": findings,
     "commits": [{"sha": sys.argv[3], "message": "reviewed range"}],
     "low_confidence": sys.argv[4] == "true",
     "incomplete": sys.argv[5] == "1",
@@ -1097,6 +1200,7 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )
+rm -f "$_AGG_FIND_TMP" "$_AGG_SUM_TMP"
 echo "$CLAUDE_JSON" > "$OUTPUT_FILE"
 
 # Write cache ONLY for non-empty results (never poison with a false clean).

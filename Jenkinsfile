@@ -548,6 +548,14 @@ sh """
                     cleanWs notFailBuild: true, cleanWhenAborted: true,
                             cleanWhenFailure: true, cleanWhenSuccess: true,
                             cleanWhenUnstable: true
+                    // Release trigger lock on ANY exit path (success, failure, abort).
+                    // The lock is also released inside the Review stage (catch block and
+                    // Update State), but those are skipped on early-exit paths (skip guard,
+                    // script abort, etc.).  The post block runs unconditionally and is the
+                    // ultimate safety net.  Only the code-review job touches this lock.
+                    if (env.JOB_NAME?.contains('code-review')) {
+                        sh "rm -f /var/lib/report-server/daily/cr-trigger.lock 2>/dev/null || true"
+                    }
                 }
             }
         }
@@ -1160,8 +1168,12 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 // was a build that ran review + card but never finished), the lock would
                 // otherwise stay until LOCK_TIMEOUT and block every subsequent review.
                 // Releasing here means the poller can start the next review immediately.
-                sh "rm -f /var/lib/report-server/daily/cr-trigger.lock 2>/dev/null || true"
-                echo "Trigger lock released early (after review+card)"
+                // Only release the main lock when NOT in PR mode — PR builds have their
+                // own separate lock (cr-pr-trigger.lock) managed by trigger-pr-review.sh.
+                if (!isPrReview) {
+                    sh "rm -f /var/lib/report-server/daily/cr-trigger.lock 2>/dev/null || true"
+                    echo "Trigger lock released early (after review+card)"
+                }
             }
         }
 

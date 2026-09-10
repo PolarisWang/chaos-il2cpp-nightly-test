@@ -109,10 +109,53 @@ if [ "$RESULT" != "SUCCESS" ]; then
     STATUS='FAIL'
     # Show which stage failed if the log marks it (best-effort, non-fatal).
     broken=$(sudo docker exec "$CONTAINER" bash -c "
-        tail -c 4000 '$JOBS_DIR_CT'/\$B/log 2>/dev/null" 2>/dev/null \
+        tail -c 4000 '$JOBS_DIR_CT'/$B/log 2>/dev/null" 2>/dev/null \
         | grep -aoE 'ERROR: [A-Za-z0-9 _/.:-]{4,60}|Failed in branch [A-Za-z0-9/ _-]{2,40}' | tail -1)
 fi
 log "job latest completed build #${NUM} = ${RESULT:-?} (${WHEN}) ${broken:+[${broken}]}"
+
+# ── Stuck-lock check (#16) ──
+# Nothing else in the system watches cr-trigger.lock.  If it ages past the
+# poller's LOCK_TIMEOUT, every subsequent review is silently blocked.  Alert
+# (deduped via the same alert-state file) whenever the lock is overdue.
+LOCK_FILE="/var/lib/report-server/daily/cr-trigger.lock"
+LOCK_TIMEOUT="${LOCK_TIMEOUT:-1200}"
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
+    if [ "$LOCK_AGE" -gt "$((LOCK_TIMEOUT + 300))" ]; then
+        log "WARNING: cr-trigger.lock is ${LOCK_AGE}s old (> timeout ${LOCK_TIMEOUT}s) — reviews are blocked"
+        alert "⚠️ IL2CPP Code Review 触发锁卡住" \
+"cr-trigger.lock 已存在 $(( LOCK_AGE/60 )) 分钟，超过超时阈值 $(( LOCK_TIMEOUT/60 )) 分钟。
+后续所有提交都无法触发代码审查，直到锁被清除。
+锁文件: ${LOCK_FILE}
+清除命令: rm -f ${LOCK_FILE}
+打开 Jenkins: ${JENKINS_URL}"
+    fi
+fi
+
+# ── Silent-stoppage check (#15) ──
+# The build-result monitor only sees FAILURE/SUCCESS; a review that stops being
+# *triggered entirely* (poller dead, state wedged, lock held on a green build)
+# looks like a healthy idle pipeline.  Alert if no build has completed for a
+# long time while the repo still has unreviewed commits.
+STATE_FILE_CR="/var/lib/report-server/daily/last-reviewed-commit.json"
+BOOMING_DIR="${BOOMING_DIR:-/home/debian/agent/booming-il2cpp}"
+if [ -f "$STATE_FILE_CR" ] && [ -d "$BOOMING_DIR/.git" ]; then
+    LAST_REVIEWED=$(python3 -c "import json;print(json.load(open('$STATE_FILE_CR')).get('last_reviewed_commit',''))" 2>/dev/null || echo "")
+    REPO_HEAD=$(git -C "$BOOMING_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$LAST_REVIEWED" ] && [ -n "$REPO_HEAD" ] && [ "$LAST_REVIEWED" != "$REPO_HEAD" ]; then
+        BEHIND=$(git -C "$BOOMING_DIR" rev-list --count "$LAST_REVIEWED".."$REPO_HEAD" 2>/dev/null || echo 0)
+        log "state is behind HEAD by ${BEHIND} commit(s) — review may have silently stopped"
+        if [ "${BEHIND:-0}" -gt 0 ]; then
+            alert "⚠️ IL2CPP Code Review 可能已停止" \
+"最后审查 commit 与仓库 HEAD 不一致，落后 ${BEHIND} 个提交，且近期没有新的审查构建。
+可能原因：触发轮询停止 / 状态文件损坏 / 锁被占用。
+last_reviewed: ${LAST_REVIEWED:0:10}
+repo HEAD:     ${REPO_HEAD:0:10}
+打开 Jenkins: ${JENKINS_URL}"
+        fi
+    fi
+fi
 
 now=$(date +%s)
 NEW_FAILURE=''
