@@ -370,6 +370,13 @@ sh """
                                 set "NEWEST="
                                 for /f "delims=" %%f in ('dir /s /b /o-d "%REPORT%\\*.log" 2^>nul') do if not defined NEWEST set "NEWEST=%%f"
                                 if defined NEWEST (echo --- %NEWEST% --- & type "%NEWEST%") else (echo [win-x64] no .log files found under %REPORT%)
+                                REM Cache-busted: also dump the SDK fingerprint + the first
+                                REM chunk run.log from the CURRENT run + cmake's own error, so
+                                REM the chunk-level SDK failure is visible without SSH.
+                                echo === [win-x64] chunk-pipeline log of current run ===
+                                for /f "delims=" %%d in ('dir /b /ad /o-d "%REPORT%\\logs" 2^>nul') do if not defined CUR run set "CUR=%%d"
+                                if defined CUR (echo current run dir: %CUR%)
+                                if defined CUR for /f "delims=" %%f in ('dir /s /b "%REPORT%\\logs\\%CUR%\\*.log" 2^>nul') do @if not defined SHOWN2 set SHOWN2=1 & (echo ===== %%f ===== & type "%%f")
                             """
                         }
                     }
