@@ -77,6 +77,44 @@ fi
 
 echo "New commits detected: ${LAST_REVIEWED:-none} -> $CURRENT_HEAD"
 
+# ── Step 3b: diff-size safety valve ──
+# A review of an enormous range (e.g. a 70-commit batch containing whole-tree
+# "restore from backup" commits) cannot succeed: the review script chunks it
+# down but the merged chunk still runs to hundreds of thousands of diff lines,
+# the model times out, the build goes red, and — before the lock-release fix —
+# the stuck lock silently blocked every subsequent review.  Guards:
+#   * if the unreviewed diff exceeds DIFF_MAX_LINES, do NOT trigger;
+#   * fast-forward the state to HEAD so the poller doesn't re-detect the same
+#     oversized range every 60 seconds forever.
+# Small, reviewable ranges continue to be triggered normally.
+DIFF_MAX_LINES="${DIFF_MAX_LINES:-40000}"
+if [ -n "$LAST_REVIEWED" ]; then
+    DIFF_LINES=$(git diff "$LAST_REVIEWED".."$CURRENT_HEAD" 2>/dev/null | wc -l | tr -d ' ')
+else
+    # First run / unknown base: use the last 200 commits as a sane probe.
+    DIFF_LINES=$(git diff "$CURRENT_HEAD~200".."$CURRENT_HEAD" 2>/dev/null | wc -l | tr -d ' ')
+fi
+DIFF_LINES="${DIFF_LINES:-0}"
+if [ "$DIFF_LINES" -gt "$DIFF_MAX_LINES" ]; then
+    echo "WARNING: unreviewed diff is ${DIFF_LINES} lines (> ${DIFF_MAX_LINES}) — too large to review; advancing state to ${CURRENT_HEAD:0:10} and skipping"
+    python3 - "$STATE_FILE" "$CURRENT_HEAD" <<'PY' 2>/dev/null || true
+import json, sys, datetime
+path, head = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+d["last_reviewed_commit"] = head
+d["last_reviewed_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+d.setdefault("findings_last_run", {"严重": 0, "中": 0, "轻": 0, "建议": 0})
+d["skipped_oversize"] = True
+json.dump(d, open(path, "w"), indent=2, ensure_ascii=False)
+print("state advanced to", head[:10])
+PY
+    exit 0
+fi
+echo "Diff size: ${DIFF_LINES} lines (limit ${DIFF_MAX_LINES})"
+
 # ── Step 4: Create lock and trigger Jenkins ──
 touch "$LOCK_FILE"
 

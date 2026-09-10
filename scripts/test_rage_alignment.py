@@ -338,7 +338,12 @@ def _embedded_python_regions(body):
     # mistaken for python.
     for m in re.finditer(r"(?m)^[ \t]*[A-Za-z0-9_/.-]*python3[^\n]*<<[-]?\s?'?([A-Za-z0-9_]+)'", body):
         tag = m.group(1)
-        body_start = m.end()
+        # content starts on the NEXT line (the same line after the heredoc
+        # delimiter may have shell redirections like "2>/dev/null || true"
+        # that are NOT part of the python source).
+        body_start = body.find('\n', m.end()) + 1
+        if body_start <= 0:
+            continue
         marker = "\n" + tag
         end = body.find(marker, body_start)
         if end == -1:

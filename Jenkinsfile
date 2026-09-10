@@ -99,6 +99,14 @@ pipeline {
                             // cascade into the untouched nightly stages. Rethrow so the job
                             // turns red with the actual review cause visible.
                             echo "Code review failed: ${err.message}"
+
+                            // Release lock so subsequent commits can trigger a new review.
+                            // Without this, any exception before Update State (script crash,
+                            // model timeout, ARG_MAX, etc.) leaves the lock stuck and
+                            // silently blocks ALL future reviews until LOCK_TIMEOUT.
+                            sh "rm -f /var/lib/report-server/daily/cr-trigger.lock 2>/dev/null || true"
+                            echo "Trigger lock released (catch path)"
+
                             throw err
                         }
                     }
@@ -1119,6 +1127,23 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                     set -euo pipefail
                     # code-review card render + Feishu send, extracted to a
                     # real on-disk script (layer 3) so stdout is visible.
+                    # NOTE: the CARD_* env vars MUST be passed here — the renderer
+                    # reads them from the environment (it no longer gets values via
+                    # Groovy interpolation).  Omitting them made every card render
+                    # "✅ 本次未发现代码问题" with a blue header and a broken blob
+                    # link even when findings existed (regression from 6341ae2).
+                    export CARD_TOTAL='${totalFindings}'
+                    export CARD_SEV='${sevCount}'
+                    export CARD_MED='${medCount}'
+                    export CARD_LIGHT='${lightCount}'
+                    export CARD_ADV='${advCount}'
+                    export CARD_TITLE='${feishuTitle}'
+                    export CARD_COLOR='${colorTag}'
+                    export CARD_FILE_SHA='${isPrReview ? prHead : env.CURRENT_COMMIT}'
+                    export CARD_IS_PR='${isPrReview}'
+                    export REVIEW_DOCS_ONLY='${docsOnly ? "1" : "0"}'
+                    export REVIEW_INCOMPLETE='${inComplete ? "1" : "0"}'
+                    export REVIEW_LOW_CONF='${lowConf ? "1" : "0"}'
                     bash '${SCRIPT_DIR}/send-code-review-card.sh' \\
                         --repo-dir    '${boomingDir}' \\
                         --workspace   '${workspaceDir}' \\
