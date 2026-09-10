@@ -1,101 +1,114 @@
-# Windows Nightly Build — 问题交接文档 (v2)
+# Windows Nightly Build — 问题交接文档 (v3)
 
-> 给接手修复的 agent。**截止 2026-09-10，build 258 已修复了 ATG 并发锁问题**，目前 Windows nightly 跑到了新的阻塞点——**native 链接器错误**。本文档包含完整架构、8 项已修复内容、当前根因、以及观测通道。
+> 给接手修复的 agent。**截止 2026-09-10，build 260/261 错误分布稳定：native-linker-error=39, unknown=5, atg-combined-cs=1**。SSH 通道可用。本机 batch review 正在跑 73 个未审提交的补审。本文档包含完整架构、已修复项、当前根因、复现方法和观测通道。
 
 ---
 
 ## 0. 一句话总结
 
-Windows nightly（`chaos-il2cpp-nightly` 的 `windows-x64` 分支）**45/45 chunk 全红**，当前阻塞点是 **25 个 native-linker-error**（MSVC 链接 `entry.exe` 时找不到 Windows 特有符号），加上 **14 个 csharp-error**（ATG codegen 生成的主题 DLL 在 net8.0 下编译不过）和 **1 个 atg-combined-cs**（CombinedSubjects 合成问题）。
+Windows nightly（`chaos-il2cpp-nightly` 的 `windows-x64` 分支）**45/45 chunk 全红**，当前阻塞点是 **39 个 native-linker-error**（MSVC 链接 `entry.exe` 时找不到 Windows CRT 符号）+ 5 个 unknown + 1 个 atg-combined-cs。ATG 并发锁和 DOTNET_ROOT 均已修复，C# 编译问题（csharp-error）已在引擎侧修掉。剩下唯一的阻塞是 **TPG 内嵌的 cmake 调用没有加载 vcvars64**。
 
 ---
 
 ## 1. 系统架构
 
 ```
-Linux master 10.10.1.173  (Jenkins, docker: chaos-master)
+Linux master 10.10.1.173  (Jenkins, docker: chaos-master, 总调度)
  ├─ linux-x64 agent  (docker: chaos-agent-x64)
- └─ windows-x64 agent (物理机/VM 10.10.9.197, JNLP 反连)
+ └─ windows-x64 agent (物理机/VM 10.10.9.197, JNLP 反连, SSH 已打通)
 ```
 
-- **Jenkins job**: `chaos-il2cpp-nightly`
-- **Jenkinsfile**: 仓库 `PolarisWang/chaos-il2cpp-nightly-test` 的 `Jenkinsfile`
-- **引擎仓库**: `PolarisWang/booming-il2cpp`（Linux: `/home/debian/agent/booming-il2cpp`；Windows: `D:\agent\workspace\booming-il2cpp`）
-- **nightly 入口**（Route-3 新 CLI）: `python -m verification.nightly.cli`，从 `<repo>/tests/e2e` 运行
-- **引擎数据**: `tests/e2e/translation/`（29 个 System.* family，每个有 `_dll/namespace-partition.json`）
+| 组件 | 路径/地址 |
+|------|----------|
+| Jenkins job | `chaos-il2cpp-nightly` |
+| Jenkinsfile | `PolarisWang/chaos-il2cpp-nightly-test` 仓库 |
+| 引擎仓库 | `PolarisWang/booming-il2cpp` |
+| Engine (Linux) | `/home/debian/agent/booming-il2cpp`（注意：曾重度污染，已 reset + clean） |
+| Engine (Windows) | `D:\agent\workspace\booming-il2cpp`（自动 git fetch origin/main 同步） |
+| nightly 入口 | `python -m verification.nightly.cli`，从 `<repo>/tests/e2e` 运行 |
+| 引擎数据 | `tests/e2e/translation/`（29 个 System.* family） |
+| Windows agent 用户名 | `booming\admin140`（**注意不是** haochuan.wang） |
 
 ### nightly 关键路径
-- Linux 分支：Jenkinsfile 用 `git archive origin/main | tar -x` 抽一份**纯净引擎树**到 workspace，再跑 nightly。
-- Windows 分支：`bat` 脚本里 **git fetch+reset --hard origin/main 自动同步** → 建 workspace 产物目录 → 加载 MSVC 环境(vcvars) → 跑 nightly SDK 预检 → `python -m verification.nightly.cli`。
+- Linux 分支：Jenkinsfile 用 `git archive origin/main | tar -x` 抽纯净引擎树→跑 nightly→publish
+- Windows 分支：bat 脚本自动 `git fetch --depth=1 + reset --hard origin/main` → 加载 vcvars64 → SDK 预检 → `python -m verification.nightly.cli`
 
 ---
 
-## 2. ✅ 已修复的（勿重复排查）
+## 2. ✅ 已修复的（共 9 项，勿重复排查）
 
 | # | 问题 | 修复 | 位置 |
 |---|------|------|------|
-| 1 | Windows agent 注册/上线 | init.groovy 加 windows-x64 节点 + NSSM 服务 | `jenkins/init.groovy`, `agent_export/*` |
-| 2 | `'python' is not recognized` | bat 里 prepend `C:\Program Files\Python312` 等 | Jenkinsfile windows branch |
-| 3 | `vcvars64.bat` 找不到（VS 装在 Professional 非 BuildTools） | vswhere 自发现 + fallback 硬编码路径 | Jenkinsfile windows branch |
-| 4 | `DLL not found for <Assembly>` | **引擎修复**：DOTNET_ROOT 环境变量 fallback + 已知路径探测 | 引擎 `build.py`（commit `e54277476`） |
-| 5 | engine 树陈旧（Windows agent 不 pull） | bat 里自动 `git fetch --depth=1 + reset --hard origin/main` | Jenkinsfile windows branch |
-| 6 | cstdio 缺失（SDK 构建失败） | **引擎修复**：`pal_eh_posix.cpp` 加 `#include <cstdio>` | commit `0f661d621` |
-| 7 | cmake 子进程无 MSVC 环境 | **引擎修复**：`build_presets.py` 用 vcvars64.cmd 包裹 cmake 调用 | commit `abc57c561` |
-| 8 | AutoTestGenerator 多进程并发锁 | **引擎修复**：`ensure_tool_built` 加跨进程锁（contributor 已完成） | 引擎 `tool_helpers.py` |
-| 9 | SSH 通道（master→Windows） | 配 ed25519 公钥到 `administrators_authorized_keys` | 私钥 `/root/.ssh/id_win_agent` |
+| 1 | Windows agent 注册/上线 | init.groovy + NSSM 服务 | `jenkins/init.groovy`, `agent_export/*` |
+| 2 | `'python' is not recognized` | bat 里 prepend PATH | Jenkinsfile |
+| 3 | `vcvars64.bat` 找不到（VS Professional 非 BuildTools） | vswhere 自发现 + fallback | Jenkinsfile |
+| 4 | `DLL not found for <Assembly>` | **引擎修复**：DOTNET_ROOT fallback 路径探测 | `build.py` (commit `e54277476`) |
+| 5 | engine 树陈旧（不 pull） | bat 里 `git fetch --depth=1 + reset --hard origin/main` | Jenkinsfile |
+| 6 | cstdio 缺失（SDK build fail） | **引擎修复**：`#include <cstdio>` | `pal_eh_posix.cpp` (commit `0f661d621`) |
+| 7 | cmake 无 MSVC 环境(SDK 预构建) | **引擎修复**：`build_presets.py` 用 vcvars64 包裹 cmake | `build_presets.py` (commit `abc57c561`) |
+| 8 | ATG 多进程并发锁 | **引擎修复**：`ensure_tool_built` 加跨进程锁 | `tool_helpers.py` (build 258 起生效) |
+| 9 | `Argument list too long` (code-review) | 超长文件列表改走 temp file 避免 ARG_MAX | `review-with-claude.sh` (commit `bd5e836`) |
 
 ---
 
 ## 3. 🔴 当前未解根因
 
-Build 258 结果分布：
+Build 260/261 结果分布（连续 3 次一致）：
 
 | Error class | 数量 | 含义 |
 |---|---|---|
-| **native-linker-error** | **25** | TPG 成功编译 `entry.exe` 的 .obj，但 MSVC linker 报错——**这是当前主要阻塞** |
-| **csharp-error** | **14** | ATG 生成的 `CombinedSubjects.cs` 在 net8.0 编译时引用了 net10 才有的 API（如 `AggregateBy`/`CountBy`） |
-| **atg-combined-cs** | **1** | CombinedSubjects 合成步骤异常 |
-| 总计 | 45 | ✅ ATG 并发锁修复有效（之前完全卡在 ATG 构建） |
+| **native-linker-error** | **39** | TPG 成功编译 `entry.exe` 的 .obj，但 MSVC linker 报错——**唯一主要阻塞** |
+| **unknown** | **5** | 其他原因（待确认） |
+| **atg-combined-cs** | **1** | CombinedSubjects 合成异常 |
 
-### 3.1 native-linker-error（25 个 — 主要阻塞）
+### 3.1 native-linker-error（39 个 — 唯一阻塞）
 
-原始错误（从 Windows chunk run.log 提取）：
+**根因：TPG（`chaos-il2cpp convert-to-cpp`，引擎的 C# 代码生成工具）在生成 `entry.exe` 时自己调用 cmake，但这条 cmake 调用路径没有加载 MSVC/vcvars 环境。**
+
+四次构建（258~261）的日志完全一致：
 
 ```
+chaos_pch.h(24): fatal error C1083: Cannot open include file: 'corecrt_terminate.h'
+
 chaos_runtime_core.lib : error LNK2001: unresolved external symbol _Thrd_sleep_for
 chaos_runtime_core.lib : error LNK2001: unresolved external symbol _Cnd_timedwait_for_unchecked
 chaos_runtime_core.lib : error LNK2019: unresolved external symbol __std_find_last_trivial_1
 chaos_runtime_core.lib : error LNK2019: unresolved external symbol __std_find_end_1
 ```
 
-这些是引擎 C++ 代码在 MSVC（Visual Studio 2022）上链接时找不到的 Windows CRT 符号：
-- `_Thrd_sleep_for` / `_Cnd_timedwait_for_unchecked`——C11/C17 threads.h 符号，MSVC 实现为 `_Thrd_sleep` 等不同名，或需要特定 Windows SDK 版本
-- `__std_find_last_trivial_1` / `__std_find_end_1`——VS 2022 标准库内部实现符号，链接时找不到，可能是新 CRT 版本不兼容
+**根因链条：**
+1. `chaos_pch.h` 在 `#ifdef _MSC_VER` 内 `#include <corecrt_terminate.h>`（绕开 MSVC `<exception>` C2039 的 workaround）
+2. TPG 调用的 cmake 子进程没有继承 MSVC 的 `INCLUDE`/`LIB` 环境变量（因为没加载 vcvars64）
+3. → UCRT include 目录(`C:\Program Files (x86)\Windows Kits\10\Include\*\ucrt\`) 不在 `INCLUDE` 中
+4. → `corecrt_terminate.h` 找不到 → PCH 编译失败 → CRT 声明缺失 → 链接时 4 个符号无法解析
+5. → `chaos_entry.exe` 链接失败 → 所有 39 个 chunk 卡在此处
 
-**修复方向**（需引擎 C++ 团队）：
-1. 在 Windows/MSVC 条件编译中提供这些符号的替代实现
-2. 或更换 CMake 配置以链接正确的 Windows CRT 库
-3. 或升级/锁定 VS 2022 工具链版本到匹配标准库的版本
+⚠️ 注意：`build_presets.py` 已在 SDK 预构建时用 vcvars64 包裹（commit `abc57c561`，**已修复**），但 **TPG 内部的 entry.exe cmake 是另一条 call path，没有做同样处理**。
 
-### 3.2 csharp-error（14 个）
-
+**该文件在 Windows 上确实存在**（已 SSH 确认）：
 ```
-error CS0117: “Enumerable”未包含“AggregateBy”的定义
-error CS0117: “Enumerable”未包含“CountBy”的定义
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt\corecrt_terminate.h
 ```
 
-ATG 为 net10 API 生成了主题代码，但 `CombinedSubjects.csproj` 的 net8.0 目标框架没有这些 API。两边一致（Linux 也同问题），需要决策：是放弃 net8.0 兼容只跑 net10？还是让 ATG 不生成 net10 特有方法的 wrapper？
+**修复方向（需引擎 C++/C# 团队）**：
+1. **让 TPG 生成 entry.exe 前加载 vcvars64**：TPG 用 `cmd /c "call vcvars64.bat && cmake --build ..."` 替代裸 cmake 调用。`vswhere` 路径已确认可用。
+2. 或在 TPG 生成的 `chaos_entry.vcxproj` 中显式设置 `WindowsTargetPlatformVersion=10.0.22621.0`。
 
-### 3.3 已知的其它约束
-- **cstdio 修复在 origin/main 上**（commit `0f661d621`）
-- **Linux 端**同样受 csharp-error(14) 影响，但 Linux 没有 native-linker-error（走的 gcc）
-- Windows 上 MSVC 的 `cl.exe` 路径：`C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.38.33130\bin\Hostx64\x64\cl.exe`
+### 3.2 csharp-error（14→0，已修）
+C# ATG 编译错误（`Enumerable.AggregateBy`/`CountBy` 在 net8.0 不存在）已在引擎侧修复。build 260 起 csharp-error = 0。
+
+### 3.3 unknown（5 个）
+待确认。可能与 `atg-combined-cs(1)` 同源或由那 1 个级联引起。
+
+### 3.4 已知约束
+- **引擎工作树卫生**：`/home/debian/agent/booming-il2cpp` 曾被 10000+ 脏文件污染，误推过 main。`git reset --hard origin/main && git clean -fdx` 已清理。改引擎代码请先在干净 checkout 上做。
+- **bat 环境变量不传递到 python 子进程**：修引擎侧比修 bat 更可靠。
+- **code-review 已恢复**：ARG_MAX 修复（`bd5e836`）已推送，锁已清。本机正逐个 review 73 个未审提交（`/tmp/batch_review.sh`），完成后汇总。
 
 ---
 
 ## 4. 复现方法
 
-在 Jenkins 触发：
 ```bash
 curl -u admin:admin -X POST \
   'http://10.10.1.173:8080/job/chaos-il2cpp-nightly/buildWithParameters' \
@@ -104,41 +117,45 @@ curl -u admin:admin -X POST \
   --data-urlencode 'BUILD_CONFIG=profile'
 ```
 
+或在 Linux 干净树上手动跑（观察同样的 39 个 linker error）：
+```bash
+cd /home/debian/agent/booming-il2cpp/tests/e2e
+CHAOS_FOUNDATION_DLL=$PWD/translation python3 -m verification.nightly.cli \
+  --max-workers 4 --native-config profile
+```
+
 ---
 
-## 5. 观测通道（关键，不用求人贴日志）
+## 5. 观测通道
 
 **master → Windows SSH 已打通**（公钥免密）：
 ```bash
 ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197' "hostname"
 ```
-- Windows 用户名：`booming\admin140`（**注意不是** haochuan.wang）
+- Windows 用户名：`booming\admin140`
 - 引擎树：`D:\agent\workspace\booming-il2cpp`
 - 日志：`D:\agent\workspace\booming-il2cpp\tests\e2e\nightly-build-report\logs\<run_id>\<Assembly>\<chunk>\run.log`
-- 汇总：`...\nightly-build-report\summary\nightly-summary.md` + `nightly-result.json`
+- 汇总：`...nightly-build-report\summary\nightly-summary.md` + `nightly-result.json`
 
 读最新失败日志：
 ```bash
 RID=$(ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197' \
   "cmd /c dir /b /o-d D:\\agent\\workspace\\booming-il2cpp\\tests\\e2e\\nightly-build-report\\logs" | head -1)
 ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197' \
-  "type \"D:\\agent\\workspace\\booming-il2cpp\\tests\\e2e\\nightly-build-report\\logs\\$RID\\System.Collections.Immutable\\global-ns\\run.log\""
+  "type \"D:\\agent\\workspace\\booming-il2cpp\\tests\\e2e\\nightly-build-report\\logs\\$RID\\System.Collections.Immutable\\global-ns\\run.log\"" 2>/dev/null | grep -aE "unresolved external|fatal error|LNK|error CS" | sort -u
 ```
 
 ---
 
-## 6. 相关约束
+## 6. 状态快照（2026-09-10 21:20 CST）
 
-- **引擎仓库工作树不能当开发目录用**：`/home/debian/agent/booming-il2cpp` 曾被 10000+ 脏文件污染，误推过 main。**改引擎代码请在干净 checkout 上做**（`git reset --hard origin/main && git clean -fdx` 后再改，或单独 clone）。Jenkinsfile 的 Linux 分支已改用 `git archive` 抽干净树。
-- **Jenkins `bat` 不传递环境变量到 python 子进程**（DOTNET_ROOT 因此多次丢失）；修引擎侧比修 jenkinsfile 更可靠。
-- **Windows ATG 锁已修**，如果在 Linux 上看到类似 ATG 并发挂起，那是 Linux 端沿用旧 `ensure_tool_built` 代码——commit `abc57c561`（已内含锁）需要 pull 过来。
-- Windows 分支的 Jenkinsfile 依赖在 `chaos-il2cpp-nightly-test` 仓库。
-
----
-
-## 7. 状态快照
-
-- 最近 Windows run: **build 258**（`20260910_101552-e57607759`）— 0/45 passed
-- 错误分布：native-linker-error=25, csharp-error=14, atg-combined-cs=1
-- Linux 端：同样受 csharp-error 影响，但无 native-linker-error
-- 引擎 main 最新：`e57607759`（hotupdate patch-host-arrays）、`1b6df696b`（atg: drop unstable XPath）
+| 项 | 值 |
+|---|---|
+| 最近 Windows build | **261**（FAILURE, 0/45 passed） |
+| 错误分布 | native-linker-error=39, unknown=5, atg-combined-cs=1 |
+| Linux 端 | 受 ATG/csharp-error 影响（6/45 passed，后续引擎修复待验证） |
+| 引擎 main 最新 | `5beb64de3`（fix tests stub DLL path） |
+| 补审 73 个 commit | 进行中（12/73 完成） |
+| code-review 锁 | 已清，ARG_MAX 修复已推送 |
+| SSH 通道 | ✅ 通（`booming\admin140@10.10.9.197`，公钥） |
+| 交接文档 | v3 版，本文件 |
