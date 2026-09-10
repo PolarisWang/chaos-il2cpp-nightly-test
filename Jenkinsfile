@@ -250,10 +250,25 @@ sh """
                             // missing).  Prepend the standard install locations so the engine's
                             // toolchain is discoverable from this bat step.
                             bat """
-                                call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
                                 set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\CMake\\bin;%PATH%"
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
                                 cd /d "${winBoomin}/tests/e2e"
+
+                                REM Locate the MSVC environment (cl.exe needs vcvars64). Use the
+                                REM VS installer's vswhere first (always present with any VS/BuildTools
+                                REM install), then fall back to the common hard-coded path. If neither
+                                REM exists we still continue — the engine degrades gracefully on a
+                                REM toolchain without MSVC.
+                                set "VSWHERE=%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+                                set "VCVARS="
+                                if exist "%VSWHERE%" for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VCVARS=%%i\\VC\\Auxiliary\\Build\\vcvars64.bat"
+                                if not defined VCVARS if exist "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" set "VCVARS=C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
+                                if defined VCVARS (
+                                    echo === [win-x64] loading MSVC env from "%VCVARS%" ===
+                                    call "%VCVARS%"
+                                ) else (
+                                    echo === [win-x64] WARNING: MSVC vcvars64.bat not found; native codegen may be skipped ===
+                                )
 
                                 echo === [win-x64] Full Pipeline = verification.nightly.cli ===
 
