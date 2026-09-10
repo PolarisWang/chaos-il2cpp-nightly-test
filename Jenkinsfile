@@ -285,7 +285,7 @@ sh """
                                 echo === [win-x64] last nightly summary ===
                                 if exist "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md" type "${winBoomin}\\tests\\e2e\\nightly-build-report\\summary\\nightly-summary.md"
                                 echo === [win-x64] first failing chunk log (head) ===
-                                for /r "${winBoomin}\\tests\\e2e\\nightly-build-report\\logs" %%f in (run.log) do @if not defined SHOWN_LOG (set SHOWN_LOG=1 & echo --- %%f --- & more /e +1 "%%f" | findstr /n "^" | more +1 & echo --- end %%f ---)
+                                for /r "${winBoomin}\\tests\\e2e\\nightly-build-report\\logs" %%f in (run.log) do if not defined SHOWN_LOG set SHOWN_LOG=1 & type "%%f"
                             """
                         }
                     }
