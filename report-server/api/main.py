@@ -188,12 +188,18 @@ def ingest_data(date_tag: str = Query(..., description="Date tag e.g. 20260614")
     entry_maps = data.get("entry_maps", {})
     date_tag_val = data.get("date_tag", date_tag)
 
-    # Build summary row
-    has_data = sum(
-        1 for v in dlls.values()
-        if any(c.get("fact", {}).get("total", 0) > 0
-               for c in v.get("chunks", {}).values())
-    )
+    # Build summary row.
+    # Prefer the publish step's data_dlls (computed from the nightly CLI's
+    # byAssembly) over recomputing here: the two definitions had drifted, and
+    # this recomputation yields 0 for every payload produced by the Route-3
+    # CLI, which no longer emits a per-chunk/ tree with fact blocks.
+    has_data = summary.get("data_dlls")
+    if has_data is None:
+        has_data = sum(
+            1 for v in dlls.values()
+            if any(c.get("fact", {}).get("total", 0) > 0
+                   for c in v.get("chunks", {}).values())
+        )
 
     db.upsert_report({
         "date_tag": date_tag_val,
@@ -209,6 +215,15 @@ def ingest_data(date_tag: str = Query(..., description="Date tag e.g. 20260614")
         "memory_gc_pause_ns": summary.get("memory_gc_pause_ns", 0),
         "memory_fast_path_rate": summary.get("memory_fast_path_rate", 0.0),
     })
+
+    # Failure attribution (new in v4).  A "*-win" date tag marks the Windows
+    # branch so the two platforms' error classes do not overwrite each other.
+    if summary.get("error_classes"):
+        db.upsert_error_classes(
+            date_tag_val,
+            summary["error_classes"],
+            platform="windows" if date_tag.endswith("-win") else "linux",
+        )
 
     # Per-DLL rows
     for dll_name, dll_data in dlls.items():
@@ -480,6 +495,35 @@ def deep_compare(
 
 
 # ── Coverage Data ─────────────────────────────────────────────────
+@app.get("/api/error-classes")
+def list_error_classes(
+    date_tag: str | None = Query(None, description="Filter by date tag"),
+    platform: str | None = Query(None, description="linux | windows"),
+):
+    """Failure attribution by error class.
+
+    Powers "is the native-linker-error count going down?" without grepping
+    run.log on the build machine.
+    """
+    rows = db.get_error_classes(date_tag=date_tag, platform=platform)
+    return {"error_classes": rows, "total": len(rows)}
+
+
+@app.get("/api/error-classes/trends")
+def error_class_trends(
+    days: int = Query(30, ge=1, le=365),
+    platform: str | None = Query(None, description="linux | windows"),
+):
+    """Per-date error-class counts, oldest first, for trend charts."""
+    rows = db.get_error_classes(platform=platform)
+    limited = rows[: max(days * 20, days)]
+    by_date: dict[str, dict[str, int]] = {}
+    for r in limited:
+        by_date.setdefault(r["date_tag"], {})[r["error_class"]] = r["count"]
+    series = [{"date_tag": d, "classes": c} for d, c in sorted(by_date.items())][-days:]
+    return {"trends": series, "total": len(series)}
+
+
 @app.get("/api/coverage")
 def list_coverage():
     """Return coverage data across all dates."""

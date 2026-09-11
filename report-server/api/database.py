@@ -40,6 +40,19 @@ def init_db():
             created_at     TEXT DEFAULT (datetime('now'))
         );
 
+        -- Failure attribution, keyed by (date, error class).
+        -- Populated from nightly-data-*.json `summary.error_classes`, which the
+        -- publish step derives from the nightly CLI's byErrorClass.  Without
+        -- this, "39 native-linker-error -> 5" style trends could only be
+        -- obtained by hand-grepping run.log on the build machine.
+        CREATE TABLE IF NOT EXISTS error_classes (
+            date_tag       TEXT NOT NULL,
+            error_class    TEXT NOT NULL,
+            count          INTEGER DEFAULT 0,
+            platform       TEXT DEFAULT 'linux',
+            PRIMARY KEY (date_tag, error_class, platform)
+        );
+
         CREATE TABLE IF NOT EXISTS dll_results (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             report_date    TEXT NOT NULL,
@@ -97,8 +110,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_cov_date ON coverage_audit(date_tag);
         CREATE INDEX IF NOT EXISTS idx_bc_date_dll ON benchmark_comparison(date_tag, dll_name);
 
-        CREATE TABLE IF NOT EXISTS chunk_summaries (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT EXISTS chunk_summaries (            id             INTEGER PRIMARY KEY AUTOINCREMENT,
             date_tag       TEXT NOT NULL,
             dll_name       TEXT NOT NULL,
             chunk_name     TEXT NOT NULL,
@@ -174,6 +186,45 @@ def upsert_report(summary: dict) -> None:
     ))
     conn.commit()
     conn.close()
+
+
+def upsert_error_classes(date_tag: str, error_classes: dict, platform: str = "linux") -> None:
+    """Replace the failure-attribution rows for a given date.
+
+    Deletes first so a re-ingest of the same date (or a run that fixed some
+    classes) does not leave stale rows behind with inflated counts.
+    """
+    if not isinstance(error_classes, dict):
+        return
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM error_classes WHERE date_tag = ? AND platform = ?",
+        (date_tag, platform),
+    )
+    conn.executemany(
+        "INSERT OR REPLACE INTO error_classes (date_tag, error_class, count, platform) "
+        "VALUES (?,?,?,?)",
+        [(date_tag, str(k), int(v), platform) for k, v in error_classes.items()],
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_error_classes(date_tag: str | None = None, platform: str | None = None) -> list[dict]:
+    """Return failure attribution rows, optionally filtered by date/platform."""
+    conn = get_db()
+    q = "SELECT date_tag, error_class, count, platform FROM error_classes WHERE 1=1"
+    args: list = []
+    if date_tag:
+        q += " AND date_tag = ?"
+        args.append(date_tag)
+    if platform:
+        q += " AND platform = ?"
+        args.append(platform)
+    q += " ORDER BY date_tag DESC, count DESC"
+    rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+    conn.close()
+    return rows
 
 
 def upsert_dll_results(date_tag: str, dll_name: str, metrics: dict) -> None:
