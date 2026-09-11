@@ -15,6 +15,7 @@ Exit code 0 = all passed.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -423,11 +424,37 @@ def main() -> int:
                   f"count={jf.count('generate-nightly-report.py')}")
             # Bug seen on the real Windows agent: `set "PUBRC=%ERRORLEVEL%"`
             # inside a parenthesised block expanded at parse time, so the exit
-            # code came back empty and failures were invisible.
-            check("windows uses delayed expansion for the exit code",
-                  "EnableDelayedExpansion" in jf and "!ERRORLEVEL!" in jf)
+            # code came back empty and failures were invisible. Delayed
+            # expansion must be enabled at SCRIPT level — a mid-script
+            # setlocal does not survive the endlocal&set idiom (verified on the
+            # agent: that form still captured nothing).
+            check("windows enables delayed expansion",
+                  "EnableDelayedExpansion" in jf)
+            check("windows reads exit code with !ERRORLEVEL!",
+                  "!ERRORLEVEL!" in jf)
+            # Assert on CODE, not comments: the broken idiom is described in a
+            # REM (and the fix's rationale references it), so a bare substring
+            # test would fail on its own documentation.
+            bat_code = "\n".join(
+                l for l in re.findall(r'bat """(.*?)"""', jf, re.S)[0].splitlines()
+                if not l.strip().upper().startswith("REM")
+            )
+            check("no broken endlocal&set idiom in bat code",
+                  "endlocal & set" not in bat_code)
+            check("delayed expansion enabled in bat code",
+                  "setlocal EnableDelayedExpansion" in bat_code)
             check("windows forwards --skip-report-server",
                   "--skip-report-server" in jf)
+            # Groovy parses backslash escapes even inside triple-quoted strings,
+            # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
+            # a parse error once already). Only single backslashes are hazards;
+            # doubled ones are the correct escaping.
+            bad_escapes = [
+                "\\" + c for c in "nrtbfv$u0"
+                if re.search(r'(?<!\\)\\' + c, bat_code)
+            ]
+            check("no unescaped Groovy backslash escapes in bat block",
+                  not bad_escapes, f"found {bad_escapes}")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

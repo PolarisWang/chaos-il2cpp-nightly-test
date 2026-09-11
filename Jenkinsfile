@@ -343,6 +343,13 @@ sh """
                             // missing).  Prepend the standard install locations so the engine's
                             // toolchain is discoverable from this bat step.
                             bat """
+                                REM EnableDelayedExpansion at SCRIPT level is required to read
+                                REM %ERRORLEVEL% inside a parenthesised block further down
+                                REM (the publish step). A bare `setlocal
+                                REM EnableDelayedExpansion` there does not work: the
+                                REM endlocal & set "VAR=%VAR%" idiom re-expands at parse
+                                REM time and captures nothing. Verified on the agent.
+                                setlocal EnableDelayedExpansion
                                 set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\dotnet;C:\\Program Files\\CMake\\bin;C:\\Program Files\\Git\\cmd;%PATH%"
                                 REM DOTNET_ROOT must be explicit: build.py auto-detects it by
                                 REM running `dotnet --info`, which fails silently if dotnet is
@@ -457,19 +464,26 @@ sh """
                                     REM archiveArtifacts below to reach the controller.
                                     REM --skip-report-server: that option's default is the
                                     REM LINUX path /var/lib/report-server/daily, so on
-                                    REM Windows the copy would create a bogus \var\lib\...
-                                    REM tree on the current drive and still report success.
+                                    REM Windows the copy would create a bogus
+                                    REM var/lib tree at the drive root and still
+                                    REM report success.
                                     REM Single-line continuations (^): Jenkins' bat treats
                                     REM each physical line as its own command, so a
                                     REM multi-line construct here is a known failure mode.
-                                    REM EnableDelayedExpansion is scoped to this script and
-                                    REM makes !ERRORLEVEL! expand at RUN time — the only
-                                    REM reliable way to read it inside a parenthesised
-                                    REM block (%ERRORLEVEL% expands when the block is
-                                    REM PARSED, yielding a stale value; a `set` inside the
-                                    REM block has the same problem, which is how the exit
-                                    REM code came back empty).
-                                    setlocal EnableDelayedExpansion
+                                    REM
+                                    REM Exit-code capture: %ERRORLEVEL% inside a
+                                    REM parenthesised block expands at PARSE time and
+                                    REM yields a stale value, so it cannot be read
+                                    REM directly (this is how `publish exit=` came out
+                                    REM empty on the real agent). Delayed expansion is
+                                    REM required — and it must be enabled at SCRIPT
+                                    REM level. Enabling it mid-script with setlocal
+                                    REM does not survive: the usual
+                                    REM   endlocal & set "PUBRC=%PUBRC%"
+                                    REM idiom re-expands %PUBRC% at PARSE time BEFORE
+                                    REM endlocal runs, so it captures nothing. Verified
+                                    REM on the agent: only script-level enablement with
+                                    REM a plain !PUBRC! read gives the real code.
                                     python "%PUB%" ^
                                         --report-dir "%REPORT%\\summary" ^
                                         --foundation-dir "%winBoomin%\\tests\\e2e\\translation" ^
@@ -478,9 +492,7 @@ sh """
                                         --run-tag "${RUN_TAG}" ^
                                         --build-number "%BUILD_NUMBER%" ^
                                         --skip-ingest --skip-minio --skip-report-server
-                                    set "PUBRC=!ERRORLEVEL!"
-                                    endlocal & set "PUBRC=%PUBRC%"
-                                    echo === [win-x64] publish exit=%PUBRC% ===
+                                    echo === [win-x64] publish exit=!ERRORLEVEL! ===
                                 )
 
                                 REM ---- Debug surface (controller cannot SSH into this box,
