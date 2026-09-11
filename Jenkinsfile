@@ -420,6 +420,27 @@ sh """
                                 git -C "${winBoomin}" fetch --depth=1 origin main
                                 if not errorlevel 1 (
                                     git -C "${winBoomin}" reset --hard origin/main
+                                    REM reset --hard does NOT remove untracked leftovers, and
+                                    REM one of those is a hard gate: the deprecated
+                                    REM "testing/foundation-dll/verification/" tree. The
+                                    REM engine moved that package to tests/e2e/verification
+                                    REM (323e8c279) but a stale copy on this agent revives
+                                    REM on every checkout, and
+                                    REM preflight/check_verification_tree_singular.py
+                                    REM fails the chunk when it exists on disk even
+                                    REM untracked (it can shadow the real engine via
+                                    REM stale __pycache__). That single leftover failed
+                                    REM every chunk and pinned the run at 0/45 with the
+                                    REM opaque error class "unknown".
+                                    REM
+                                    REM Drop just that deprecated path rather than
+                                    REM `git clean -fdx`: a full clean would wipe the
+                                    REM build artefacts this agent caches between runs
+                                    REM and make every nightly a cold build.
+                                    if exist "${winBoomin}/testing/foundation-dll/verification" (
+                                        echo === [win-x64] removing deprecated zombie verification tree ===
+                                        rmdir /s /q "${winBoomin}/testing/foundation-dll/verification"
+                                    )
                                     git -C "${winBoomin}" log -1 --oneline
                                     echo === [win-x64] engine synced ===
                                 ) else (
