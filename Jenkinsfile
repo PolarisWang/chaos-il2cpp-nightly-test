@@ -151,7 +151,7 @@ pipeline {
                             RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
                         fi
                         echo "Downloading nightly scripts from \$RAWT"
-                        for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh; do
+                        for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh test-publish-nightly.py; do
                             # curl can return rc=0 even on a GnuTLS handshake failure (this box's flaky
                             # link to GitHub), so ALWAYS sanity-check the downloaded content rather than
                             # trusting rc alone. A corrupt/empty script would otherwise silently break
@@ -186,6 +186,44 @@ pipeline {
                         done
                         chmod +x *.sh *.py 2>/dev/null || true
                         ls -la
+                    """
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────
+        // Publish-Chain Self-Test — fail fast on report-pipeline breakage
+        // ─────────────────────────────────────────────────────
+        // The publish chain (nightly CLI summary → nightly-data JSON → HTML →
+        // ingest) is what every downstream consumer reads, and it broke SILENTLY
+        // once already: the publisher kept reading a directory the engine had
+        // stopped writing, so every nightly published a well-formed but EMPTY
+        // report — the build stayed green and nobody noticed. This stage runs
+        // the regression suite for that chain before the expensive build, so a
+        // bad script fails here (fast, with a clear message) instead of
+        // corrupting another night of results.
+        stage('Publish-Chain Self-Test') {
+            when { expression { env.DISPATCHED != 'true' } }
+            agent { label 'linux-x64' }
+            steps {
+                script {
+                    // `checkout scm` is REQUIRED, not incidental: the Init stage
+                    // only curl's scripts/ into the workspace, so without a
+                    // checkout the suite silently SKIPs its Jenkinsfile and
+                    // report-server assertions — the two that guard this very
+                    // gate.  A checkout also means the suite tests the code at
+                    // THIS commit rather than whatever raw.githubusercontent
+                    // happens to serve.
+                    checkout scm
+                    // BOOMING_DIR is a developer worktree on the agent; used here
+                    // only so the end-to-end section can run against a real
+                    // foundation dir. --require-e2e fails the stage if that
+                    // section silently skips, so the gate cannot pass vacuously.
+                    sh """
+                        set -eu
+                        cd "\${WORKSPACE}"
+                        export CHAOS_ENGINE_DIR="${BOOMING_DIR}"
+                        python3 scripts/test-publish-nightly.py --require-e2e
                     """
                 }
             }
@@ -376,16 +414,82 @@ sh """
                                     --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
+                                set "REPORT=${winBoomin}\\tests\\e2e\\nightly-build-report"
+
+                                REM ---- Publish Windows results ----
+                                REM Previously this branch only echoed the summary to the
+                                REM console: the 45 chunk results stayed on D:\\ and never
+                                REM reached the Report API, the HTML report, or Feishu. The
+                                REM Linux branch publishes its own tree; this one now does
+                                REM the same for its own, under a "-win" date tag so the two
+                                REM platforms never overwrite each other's trend data.
+                                REM
+                                REM The helper scripts are downloaded in Init on the
+                                REM linux-x64 agent, which this node cannot read — so fetch
+                                REM this one here, pinned to GIT_COMMIT for the same
+                                REM CDN-staleness reason documented in Init.
+                                set "PUB=%winArtifacts%\\publish-nightly-results.py"
+                                set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/%GIT_COMMIT%"
+                                if "%GIT_COMMIT%"=="" set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                                echo === [win-x64] fetching publish helper from %RAWT% ===
+                                curl -sfL --max-time 60 -o "%PUB%" "%RAWT%/scripts/publish-nightly-results.py"
+                                REM Verify with `call python`, NOT `python`, and capture the
+                                REM exit code into a variable immediately. Two bat traps:
+                                REM  1. A bare `python -m py_compile` re-parses against
+                                REM     %RAWT%'s definition and clobbers the real exit code
+                                REM     with its own; `call` forces a second parse after
+                                REM     the block is entered, which is what we want here.
+                                REM  2. %ERRORLEVEL% inside a parenthesised block expands
+                                REM     when the block is PARSED, not when each line runs,
+                                REM     so reading it after the python call yields the
+                                REM     pre-block value. Copying it to a plain variable
+                                REM     right after the call works because that line is
+                                REM     still parsed lazily within the block.
+                                echo === [win-x64] verify publish helper ===
+                                call python -m py_compile "%PUB%"
+                                set "PYCHECK=%ERRORLEVEL%"
+                                if not "%PYCHECK%"=="0" (
+                                    echo === [win-x64] WARNING: publish helper is not valid Python; skipping publish ===
+                                ) else (
+                                    echo === [win-x64] Publishing Windows results ===
+                                    REM --report-dir: config.report_dir defaults to a
+                                    REM cwd-relative "nightly-build-report", and the bat
+                                    REM cd's into tests/e2e, so the summary lands there.
+                                    REM --skip-ingest/--skip-minio: the Report API container
+                                    REM reads its own mounted data dir on the Linux side, so
+                                    REM Windows publishes a JSON artifact and relies on
+                                    REM archiveArtifacts below to reach the controller.
+                                    REM Single-line continuations (^): Jenkins' bat treats
+                                    REM each physical line as its own command, so a
+                                    REM multi-line construct here is a known failure mode.
+                                    python "%PUB%" ^
+                                        --report-dir "%REPORT%\\summary" ^
+                                        --foundation-dir "%winBoomin%\\tests\\e2e\\translation" ^
+                                        --output-dir "%winArtifacts%" ^
+                                        --date-tag "%DATE_TAG%-win" ^
+                                        --run-tag "${RUN_TAG}" ^
+                                        --build-number "%BUILD_NUMBER%" ^
+                                        --skip-ingest --skip-minio
+                                    set "PUBRC=%ERRORLEVEL%"
+                                    echo === [win-x64] publish exit=%PUBRC% ===
+                                )
+
                                 REM ---- Debug surface (controller cannot SSH into this box,
                                 REM but the maintainer can — keep this minimal & robust). ----
-                                set "REPORT=${winBoomin}\\tests\\e2e\\nightly-build-report"
                                 echo === [win-x64] report tree ===
                                 if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
-                                echo === [win-x64] nightly-summary.md ===
-                                if exist "%REPORT%\\summary\\nightly-summary.md" type "%REPORT%\\summary\\nightly-summary.md"
-                                echo === [win-x64] nightly-result.json ===
-                                if exist "%REPORT%\\summary\\nightly-result.json" type "%REPORT%\\summary\\nightly-result.json"
+                                echo === [win-x64] published artifacts ===
+                                if exist "%winArtifacts%" (dir /b "%winArtifacts%" 2>nul)
                             """
+                            // Archive on THIS node: the post block's archiveArtifacts
+                            // runs on the linux-x64 agent and cannot see a Windows
+                            // workspace, so without this the windows-x64
+                            // nightly-data-*.json never reaches the controller. The
+                            // Windows payload uses a "<date>-win" tag, so it does not
+                            // collide with the Linux artifact of the same build.
+                            archiveArtifacts artifacts: "artifacts/**/*",
+                                           allowEmptyArchive: true,
+                                           fingerprint: true
                         }
                     }
                 }
@@ -489,8 +593,11 @@ sh """
                         // Noon run: compare against this morning's run
                         prevFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-run1.json"
                     } else {
-                        // Morning run: compare against yesterday's last run
-                        def yesterday = sh(script: "date -d '${DATE_TAG} 1 day ago' +%Y%mdd", returnStdout: true).trim()
+                        // Morning run: compare against yesterday's last run.
+                        // NOTE the format is %Y%m%d — it was %Y%mdd, which emits
+                        // a literal "dd" (e.g. 202609dd), so prevFile never
+                        // matched and --baseline was silently never applied.
+                        def yesterday = sh(script: "date -d '${DATE_TAG} 1 day ago' +%Y%m%d", returnStdout: true).trim()
                         prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run2.json"
                         if (!fileExists(prevFile)) {
                             prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run1.json"
