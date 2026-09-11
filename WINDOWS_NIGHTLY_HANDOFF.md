@@ -53,57 +53,42 @@ Linux master 10.10.1.173  (Jenkins, docker: chaos-master, 总调度)
 
 ## 3. 🔴 当前未解根因
 
-Build 260/261 结果分布（连续 3 次一致）：
+Build 262（2026-09-11，引擎 HEAD `13cc2c55d`）结果分布：
 
 | Error class | 数量 | 含义 |
 |---|---|---|
-| **native-linker-error** | **39** | TPG 成功编译 `entry.exe` 的 .obj，但 MSVC linker 报错——**唯一主要阻塞** |
-| **unknown** | **5** | 其他原因（待确认） |
-| **atg-combined-cs** | **1** | CombinedSubjects 合成异常 |
+| **native-linker-error** | **5** (from 39) | ✅ P1 `corecrt_terminate.h` 修复显著见效 —— 剩余 5 个属于新的不同符号 |
+| **csharp-error** | **8** | ATG 生成的 `CombinedSubjects.cs` 引用 net10 API 但 net8.0 不存在 |
+| **atg-combined-cs** | **7** | CombinedSubjects 合成异常 |
+| **unknown** | **5** | 其他原因 |
+| **总计** | **20/45 passed** | ⬆️ 从 0/45 大幅提升 |
 
-### 3.1 native-linker-error（39 个 — 唯一阻塞）
+### 3.1 ✅ 已修复：native-linker-error 39 → 5
 
-**根因：TPG（`chaos-il2cpp convert-to-cpp`，引擎的 C# 代码生成工具）在生成 `entry.exe` 时自己调用 cmake，但这条 cmake 调用路径没有加载 MSVC/vcvars 环境。**
+**原根因（已由引擎团队修复）：TPG 生成 `entry.exe` 时的 cmake 调用没有正确加载 MSVC/SDK 版本。**
 
-四次构建（258~261）的日志完全一致：
-
+引擎修复 `13cc2c55d`：
 ```
-chaos_pch.h(24): fatal error C1083: Cannot open include file: 'corecrt_terminate.h'
-
-chaos_runtime_core.lib : error LNK2001: unresolved external symbol _Thrd_sleep_for
-chaos_runtime_core.lib : error LNK2001: unresolved external symbol _Cnd_timedwait_for_unchecked
-chaos_runtime_core.lib : error LNK2019: unresolved external symbol __std_find_last_trivial_1
-chaos_runtime_core.lib : error LNK2019: unresolved external symbol __std_find_end_1
+root_cause: FindMsvcCompiler() 与 FindVcAndSdkIncludePaths() 版本错配
+fix_strategy: clPath 同源推导 include + NumericVersionKey + SDK 有效性过滤
 ```
 
-**根因链条：**
-1. `chaos_pch.h` 在 `#ifdef _MSC_VER` 内 `#include <corecrt_terminate.h>`（绕开 MSVC `<exception>` C2039 的 workaround）
-2. TPG 调用的 cmake 子进程没有继承 MSVC 的 `INCLUDE`/`LIB` 环境变量（因为没加载 vcvars64）
-3. → UCRT include 目录(`C:\Program Files (x86)\Windows Kits\10\Include\*\ucrt\`) 不在 `INCLUDE` 中
-4. → `corecrt_terminate.h` 找不到 → PCH 编译失败 → CRT 声明缺失 → 链接时 4 个符号无法解析
-5. → `chaos_entry.exe` 链接失败 → 所有 39 个 chunk 卡在此处
+原先报错（build 258-261）：`chaos_pch.h:24 C1083 corecrt_terminate.h` + `_Thrd_sleep_for` / `_Cnd_timedwait_for_unchecked` / `__std_find_*` 完全消失。
 
-⚠️ 注意：`build_presets.py` 已在 SDK 预构建时用 vcvars64 包裹（commit `abc57c561`，**已修复**），但 **TPG 内部的 entry.exe cmake 是另一条 call path，没有做同样处理**。
+### 3.2 剩余 5 个 native-linker-error（新问题）
 
-**该文件在 Windows 上确实存在**（已 SSH 确认）：
-```
-C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt\corecrt_terminate.h
-```
+已不是 corecrt 问题。引擎 handoff 文档 §5 提到"2 个 chunk 因 GC 压力符号未链接失败"，需读取这 5 个 chunk 的最新 run.log 确认新符号。
 
-**修复方向（需引擎 C++/C# 团队）**：
-1. **让 TPG 生成 entry.exe 前加载 vcvars64**：TPG 用 `cmd /c "call vcvars64.bat && cmake --build ..."` 替代裸 cmake 调用。`vswhere` 路径已确认可用。
-2. 或在 TPG 生成的 `chaos_entry.vcxproj` 中显式设置 `WindowsTargetPlatformVersion=10.0.22621.0`。
+### 3.3 csharp-error（8 个）+ atg-combined-cs（7 个）
 
-### 3.2 csharp-error（14→0，已修）
-C# ATG 编译错误（`Enumerable.AggregateBy`/`CountBy` 在 net8.0 不存在）已在引擎侧修复。build 260 起 csharp-error = 0。
-
-### 3.3 unknown（5 个）
-待确认。可能与 `atg-combined-cs(1)` 同源或由那 1 个级联引起。
+ATG 生成的 `CombinedSubjects.cs` 在 net8.0 编译时报 `error CS0117: Enumerable 未包含 AggregateBy/CountBy`。
+两边一致（Linux 同样），需决策：放弃 net8.0 兼容？还是让 ATG 不生成 net10 特有方法的 wrapper？
 
 ### 3.4 已知约束
-- **引擎工作树卫生**：`/home/debian/agent/booming-il2cpp` 曾被 10000+ 脏文件污染，误推过 main。`git reset --hard origin/main && git clean -fdx` 已清理。改引擎代码请先在干净 checkout 上做。
-- **bat 环境变量不传递到 python 子进程**：修引擎侧比修 bat 更可靠。
-- **code-review 已恢复**：ARG_MAX 修复（`bd5e836`）已推送，锁已清。本机正逐个 review 73 个未审提交（`/tmp/batch_review.sh`），完成后汇总。
+- 引擎工作树卫生：已清理（`git reset --hard origin/main && git clean -fdx`）。改引擎代码请在干净 checkout 上做。
+- code-review 可靠性已修复（锁泄漏、ARG_MAX、pipefail、monitor 增强，commit `93c209d` + `2eeec32`）
+- 本机补审 73 个未审提交已完成 37 个（结果已发飞书卡），剩余 36 个后台续跑
+- Windows SSH 通道：`ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197'`（公钥免密）
 
 ---
 
