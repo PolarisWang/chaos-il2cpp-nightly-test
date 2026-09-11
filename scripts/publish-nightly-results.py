@@ -491,6 +491,8 @@ def build_nightly_data(
     date_tag: str,
     run_tag: str,
     build_number: str = "",
+    engine_sha: str = "",
+    platform: str = "",
 ) -> dict:
     """Build the nightly-data-*.json payload (backward-compatible format)."""
     assemblies = discover_assemblies(foundation_dir)
@@ -565,8 +567,24 @@ def build_nightly_data(
     # Provenance: which engine revision and platform produced this payload.
     # Without it, "20/45" cannot be tied to a commit, which is the first
     # question asked when a regression appears.
+    #
+    # The run_id's trailing hash is NOT reliably the engine revision: the
+    # nightly CLI derives it from `git rev-parse --short HEAD` in the process
+    # CWD. On the Linux branch that CWD is a `git archive` tree with no .git,
+    # so git walks up and finds whatever repo happens to enclose the Jenkins
+    # workspace — observed in build 267, where the Linux run_id carried the
+    # NIGHTLY-TEST repo's hash (6e2049c) while the Windows one carried a real
+    # engine commit (e3992ccc5). The two platforms therefore reported hashes
+    # from different namespaces under the same field name, which defeats
+    # cross-platform comparison.
+    #
+    # `engine_sha` is passed in explicitly by the caller (which knows the
+    # engine tree) so the field means the same thing on both platforms; the
+    # raw run_id is kept verbatim for traceability.
     report["provenance"] = {
         "run_id": nightly_summary.get("runId", ""),
+        "engine_sha": engine_sha or "",
+        "platform": platform,
         "native_config": nightly_summary.get("nativeConfig", ""),
         "timestamp": nightly_summary.get("timestamp"),
         "build_number": build_number,
@@ -711,6 +729,14 @@ def main() -> int:
                         help="Run tag (run1/run2), auto-detected from hour if empty")
     parser.add_argument("--build-number", default="",
                         help="Jenkins build number")
+    parser.add_argument("--engine-sha", default="",
+                        help="The ENGINE revision this run built (not the CI repo "
+                             "revision). Passed explicitly because the nightly CLI's "
+                             "run_id hash is derived from git in its CWD, which is not "
+                             "the engine on every platform.")
+    parser.add_argument("--platform", default="",
+                        help="linux | windows — recorded in provenance so the two "
+                             "branches of the same night can be told apart.")
     parser.add_argument("--api-url", default=os.environ.get("REPORT_API_URL", "http://report-api:8000"),
                         help="Report API base URL")
     parser.add_argument("--minio-endpoint", default=os.environ.get("MINIO_ENDPOINT", "http://chaos-minio:9000"),
@@ -774,7 +800,9 @@ def main() -> int:
     # Step 1: Build nightly-data JSON
     print(f"\n  Phase 1: Building nightly-data...")
     nightly_data = build_nightly_data(foundation_dir, report_dir, args.date_tag,
-                                     run_tag, args.build_number)
+                                     run_tag, args.build_number,
+                                     engine_sha=args.engine_sha,
+                                     platform=args.platform)
 
     data_path = output_dir / f"nightly-data-{date_tag_full}.json"
     data_path.write_text(

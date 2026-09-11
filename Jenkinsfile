@@ -346,6 +346,14 @@ sh """
                             2>&1 || echo "WARNING: nightly cli had failures"
 
                         echo "=== [x64] Publish Results (collect tests/e2e report) ==="
+                        # Record the ENGINE revision, not this CI repo's. The nightly
+                        # CLI's own run_id hash comes from `git rev-parse` in its CWD,
+                        # and the Linux branch runs inside a `git archive` tree with no
+                        # .git — so git walks up and reports whatever repo encloses the
+                        # Jenkins workspace (observed: the nightly-test repo's hash).
+                        # Resolve it from the engine worktree we archived from instead.
+                        ENG_SHA=\$(git --git-dir='${engSrc}/.git' rev-parse --short origin/main 2>/dev/null || echo "")
+                        echo "  engine revision: \${ENG_SHA}"
                         python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
                             --report-dir "${engTree}/tests/e2e/nightly-build-report/summary" \
                             --foundation-dir "${engTree}/tests/e2e/translation" \
@@ -353,6 +361,8 @@ sh """
                             --date-tag "${DATE_TAG}" \
                             --run-tag "${RUN_TAG}" \
                             --build-number "\${BUILD_NUMBER}" \
+                            --engine-sha "\${ENG_SHA}" \
+                            --platform "linux" \
                             --skip-ingest \
                             --skip-minio \
                             2>&1 || echo "WARNING: publish-nightly-results had failures"
@@ -433,6 +443,17 @@ sh """
                                 ) else (
                                     echo === [win-x64] WARNING: MSVC vcvars64.bat not found - native codegen may be skipped ===
                                 )
+
+                                REM Record the ENGINE revision this run built, resolved
+                                REM from the engine tree itself (not from this CI repo).
+                                REM The nightly CLI's own run_id hash is unreliable:
+                                REM it comes from git in its CWD, and on the Linux
+                                REM branch that lands on the enclosing CI checkout, so
+                                REM the two platforms reported hashes from different
+                                REM namespaces under the same field.
+                                for /f "usebackq tokens=*" %%s in (`git -C "${winBoomin}" rev-parse --short HEAD 2^>nul`) do set "ENG_SHA=%%s"
+                                if not defined ENG_SHA set "ENG_SHA=unknown"
+                                echo === [win-x64] engine revision: %ENG_SHA% ===
 
                                 echo === [win-x64] Full Pipeline = verification.nightly.cli ===
 
@@ -561,6 +582,8 @@ sh """
                                         --date-tag "%DATE_TAG%-win" ^
                                         --run-tag "${RUN_TAG}" ^
                                         --build-number "%BUILD_NUMBER%" ^
+                                        --engine-sha "%ENG_SHA%" ^
+                                        --platform "windows" ^
                                         --skip-ingest --skip-minio --skip-report-server
                                     echo === [win-x64] publish exit=!ERRORLEVEL! ===
                                 )

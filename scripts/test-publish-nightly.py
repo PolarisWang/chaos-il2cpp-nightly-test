@@ -388,6 +388,30 @@ def main() -> int:
         else:
             skip("--skip-report-server checks", "engine tree not available")
 
+        print("\n[10] provenance: engine_sha + platform must be explicit")
+        if TRANSLATION.is_dir():
+            out = tmp / "prov"
+            r = subprocess.run(
+                [sys.executable, str(PUB),
+                 "--report-dir", str(a),
+                 "--foundation-dir", str(TRANSLATION),
+                 "--output-dir", str(out),
+                 "--date-tag", "20260911", "--run-tag", "run1",
+                 "--build-number", "267",
+                 "--engine-sha", "e3992ccc5", "--platform", "windows",
+                 "--skip-ingest", "--skip-minio", "--skip-html"],
+                capture_output=True, text=True, timeout=300,
+            )
+            check("publish accepts --engine-sha/--platform", r.returncode == 0, r.stderr[-300:])
+            dfs = list(out.glob("nightly-data-*.json"))
+            if dfs:
+                prov = json.loads(dfs[0].read_text(encoding="utf-8")).get("provenance", {})
+                check("provenance.engine_sha recorded", prov.get("engine_sha") == "e3992ccc5", str(prov))
+                check("provenance.platform recorded", prov.get("platform") == "windows", str(prov))
+                check("raw run_id kept for traceability", "run_id" in prov)
+        else:
+            skip("provenance checks", "engine tree not available")
+
         print("\n[11] Jenkinsfile sanity")
         # In CI (Jenkins Init) only scripts/ is downloaded into the workspace —
         # there is no checkout, so no Jenkinsfile.  Skip loudly rather than
@@ -489,6 +513,17 @@ def main() -> int:
                   'set "PIN=%GIT_COMMIT%"' in jf and "GIT_PREVIOUS_COMMIT" in jf)
             check("windows skips publish (not fails) when the pin is unusable",
                   "skipping publish" in jf.lower())
+            # The nightly CLI's run_id hash is derived from git in its CWD, which on
+            # the Linux branch is a git-archive tree with no .git — so git walks up
+            # and reports the CI repo's hash, not the engine's. Build 267 showed the
+            # two branches emitting hashes from different namespaces under the same
+            # field (linux 6e2049c = CI repo, windows e3992ccc5 = engine). Both
+            # branches must therefore pass the engine revision explicitly.
+            check("linux passes --engine-sha", "--engine-sha" in jf)
+            check("linux passes --platform", '--platform "linux"' in jf)
+            check("windows passes --engine-sha", jf.count("--engine-sha") >= 2,
+                  f"count={jf.count('--engine-sha')}")
+            check("windows passes --platform", '--platform "windows"' in jf)
             # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.
