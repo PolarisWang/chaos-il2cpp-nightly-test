@@ -135,24 +135,47 @@ fi
 
 # ── Silent-stoppage check (#15) ──
 # The build-result monitor only sees FAILURE/SUCCESS; a review that stops being
-# *triggered entirely* (poller dead, state wedged, lock held on a green build)
-# looks like a healthy idle pipeline.  Alert if no build has completed for a
-# long time while the repo still has unreviewed commits.
+# *triggered entirely* (poller dead, state wedged) looks like a healthy idle
+# pipeline.  Alert if the state is behind HEAD **and stays behind** — a mere
+# "state behind HEAD right now" is NORMAL: the state only advances after a
+# review completes, so during an in-flight review it is always behind.
+# Guard against false positives:
+#   * a lock present means the poller just triggered / a review is running → OK
+#   * a build started within the last BUILD_GRACE_S → OK
+#   * require the state to have been behind for STALL_S since the last build
 STATE_FILE_CR="/var/lib/report-server/daily/last-reviewed-commit.json"
 BOOMING_DIR="${BOOMING_DIR:-/home/debian/agent/booming-il2cpp}"
+STALL_S="${STALL_S:-3600}"          # 1h without any build while behind → stalled
+BUILD_GRACE_S="${BUILD_GRACE_S:-600}"
 if [ -f "$STATE_FILE_CR" ] && [ -d "$BOOMING_DIR/.git" ]; then
     LAST_REVIEWED=$(python3 -c "import json;print(json.load(open('$STATE_FILE_CR')).get('last_reviewed_commit',''))" 2>/dev/null || echo "")
     REPO_HEAD=$(git -C "$BOOMING_DIR" rev-parse HEAD 2>/dev/null || echo "")
     if [ -n "$LAST_REVIEWED" ] && [ -n "$REPO_HEAD" ] && [ "$LAST_REVIEWED" != "$REPO_HEAD" ]; then
         BEHIND=$(git -C "$BOOMING_DIR" rev-list --count "$LAST_REVIEWED".."$REPO_HEAD" 2>/dev/null || echo 0)
-        log "state is behind HEAD by ${BEHIND} commit(s) — review may have silently stopped"
-        if [ "${BEHIND:-0}" -gt 0 ]; then
-            alert "⚠️ IL2CPP Code Review 可能已停止" \
-"最后审查 commit 与仓库 HEAD 不一致，落后 ${BEHIND} 个提交，且近期没有新的审查构建。
-可能原因：触发轮询停止 / 状态文件损坏 / 锁被占用。
+        RECENT_BUILD=0
+        if [ -n "$TS" ] && [ "$(( $(date +%s) - TS ))" -lt "$BUILD_GRACE_S" ]; then
+            RECENT_BUILD=1
+        fi
+        if [ -f "$LOCK_FILE" ]; then
+            # A lock exists: poller is mid-cycle or a review is running.  Normal.
+            log "state behind HEAD by ${BEHIND}, but lock present — review likely in flight (OK)"
+        elif [ "$RECENT_BUILD" = "1" ]; then
+            log "state behind HEAD by ${BEHIND}, but a build ran recently (${WHEN}) — OK"
+        else
+            NOW=$(date +%s)
+            LAST_BUILD_AGE=$(( NOW - ${TS:-0} ))
+            if [ "$LAST_BUILD_AGE" -gt "$STALL_S" ]; then
+                log "WARNING: state behind HEAD by ${BEHIND}, no build for $(( LAST_BUILD_AGE/60 ))m — likely stalled"
+                alert "⚠️ IL2CPP Code Review 可能已停止" \
+"状态落后仓库 HEAD ${BEHIND} 个提交，且已 $(( LAST_BUILD_AGE/60 )) 分钟没有新的审查构建（无锁占用）。
+可能原因：触发轮询停止 / 状态文件损坏。
 last_reviewed: ${LAST_REVIEWED:0:10}
 repo HEAD:     ${REPO_HEAD:0:10}
+上次构建:      #${NUM} ${WHEN}
 打开 Jenkins: ${JENKINS_URL}"
+            else
+                log "state behind HEAD by ${BEHIND}, last build ${WHEN} — within grace, OK"
+            fi
         fi
     fi
 fi
