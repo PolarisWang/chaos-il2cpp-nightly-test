@@ -385,7 +385,12 @@ sh """
                                 REM endlocal & set "VAR=%VAR%" idiom re-expands at parse
                                 REM time and captures nothing. Verified on the agent.
                                 setlocal EnableDelayedExpansion
-                                set "PATH=C:\\Program Files\\Python312;C:\\Program Files\\dotnet;C:\\Program Files\\CMake\\bin;C:\\Program Files\\Git\\cmd;%PATH%"
+                                REM System32 is where curl.exe and certutil.exe live. The
+                                REM Jenkins service account's PATH is minimal and does not
+                                REM necessarily include it — build 267 failed here with
+                                REM "'curl' is not recognized", which silently disabled the
+                                REM whole windows publish step.
+                                set "PATH=C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Python312;C:\\Program Files\\dotnet;C:\\Program Files\\CMake\\bin;C:\\Program Files\\Git\\cmd;%PATH%"
                                 REM DOTNET_ROOT must be explicit: build.py auto-detects it by
                                 REM running `dotnet --info`, which fails silently if dotnet is
                                 REM not on PATH under the Jenkins service account — that leaves
@@ -408,7 +413,7 @@ sh """
                                     git -C "${winBoomin}" log -1 --oneline
                                     echo === [win-x64] engine synced ===
                                 ) else (
-                                    echo === [win-x64] WARNING: engine sync failed; using existing tree ===
+                                    echo === [win-x64] WARNING: engine sync failed - using existing tree ===
                                 )
 
                                 cd /d "${winBoomin}/tests/e2e"
@@ -426,7 +431,7 @@ sh """
                                     echo === [win-x64] loading MSVC env from "%VCVARS%" ===
                                     call "%VCVARS%"
                                 ) else (
-                                    echo === [win-x64] WARNING: MSVC vcvars64.bat not found; native codegen may be skipped ===
+                                    echo === [win-x64] WARNING: MSVC vcvars64.bat not found - native codegen may be skipped ===
                                 )
 
                                 echo === [win-x64] Full Pipeline = verification.nightly.cli ===
@@ -506,14 +511,18 @@ sh """
                                 if not exist "%PUB%" set "DL_OK=0"
                                 if not exist "%GENPY%" set "DL_OK=0"
                                 if "%DL_OK%"=="0" (
-                                    echo === [win-x64] WARNING: publish helper download failed (pin=%PIN%); skipping publish ===
+                                    REM No ';' inside this echo: cmd treats it as a command
+                                    REM separator and aborts with "skipping was unexpected at
+                                    REM this time" (build 267). Keep parenthesised echo text
+                                    REM free of cmd metacharacters.
+                                    echo === [win-x64] WARNING: publish helper download failed for pin %PIN% - skipping publish ===
                                 ) else (
                                 REM Syntax-gate both downloads (same reasoning as Init):
                                 REM a truncated body on a flaky link must fail loudly.
                                 call python -m py_compile "%PUB%" "%GENPY%"
                                 set "PYCHECK=%ERRORLEVEL%"
                                 if not "%PYCHECK%"=="0" (
-                                    echo === [win-x64] WARNING: publish helper is not valid Python; skipping publish ===
+                                    echo === [win-x64] WARNING: publish helper is not valid Python - skipping publish ===
                                 ) else (
                                     echo === [win-x64] Publishing Windows results ===
                                     REM --report-dir: config.report_dir defaults to a
