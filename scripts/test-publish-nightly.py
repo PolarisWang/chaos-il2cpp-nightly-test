@@ -579,6 +579,22 @@ def main() -> int:
                   "max-workers %NUMBER_OF_PROCESSORS%" not in jf)
             check("windows worker count is capped",
                   "NIGHTLY_WORKERS=4" in jf or 'set "NIGHTLY_WORKERS=' in jf)
+            # Groovy does NOT interpolate %name%; that is cmd syntax. Writing a
+            # Groovy variable as %winArtifacts% passes the literal text through
+            # to cmd, which then finds no such BAT variable and expands it to
+            # EMPTY. That silently sent the windows publish to `--output-dir`
+            # "." and `--foundation-dir "\tests\e2e\translation"` in build 271,
+            # and also wrote the helper to "D:\publish-nightly-results.py".
+            # Each Groovy variable used inside the bat body must be ${...}.
+            bat_body = re.findall(r'bat """(.*?)"""', jf, re.S)[0]
+            groovy_vars = ("winArtifacts", "winBoomin")
+            bad_refs = [
+                f"%{v}%" for v in groovy_vars if f"%{v}%" in bat_body
+            ]
+            check("no Groovy variable written with cmd %var% syntax",
+                  not bad_refs, f"found {bad_refs}")
+            check("windows publish paths use ${...} interpolation",
+                  "${winArtifacts}" in bat_body and "${winBoomin}" in bat_body)
             # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.

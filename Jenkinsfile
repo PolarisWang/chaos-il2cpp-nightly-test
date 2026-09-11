@@ -544,7 +544,7 @@ sh """
                                 REM linux-x64 agent, which this node cannot read — so fetch
                                 REM this one here, pinned to GIT_COMMIT for the same
                                 REM CDN-staleness reason documented in Init.
-                                set "PUB=%winArtifacts%\\publish-nightly-results.py"
+                                set "PUB=${winArtifacts}\\publish-nightly-results.py"
                                 REM Pin to a concrete SHA, never the moving 'main' ref:
                                 REM /main was measured serving a stale revision long
                                 REM after a push, so it silently mixes old and new
@@ -569,7 +569,7 @@ sh """
                                 REM report. Downloading only the former produced a
                                 REM "generate-nightly-report.py not found, skipping HTML
                                 REM generation" warning and a JSON-only result.
-                                set "GENPY=%winArtifacts%/generate-nightly-report.py"
+                                set "GENPY=${winArtifacts}/generate-nightly-report.py"
                                 set "DL_OK=1"
                                 curl -sfL --max-time 60 -o "%PUB%" "%RAWT%/scripts/publish-nightly-results.py" || set "DL_OK=0"
                                 curl -sfL --max-time 60 -o "%GENPY%" "%RAWT%/scripts/generate-nightly-report.py" || set "DL_OK=0"
@@ -635,8 +635,8 @@ sh """
                                     REM a plain !PUBRC! read gives the real code.
                                     python "%PUB%" ^
                                         --report-dir "%REPORT%\\summary" ^
-                                        --foundation-dir "%winBoomin%\\tests\\e2e\\translation" ^
-                                        --output-dir "%winArtifacts%" ^
+                                        --foundation-dir "${winBoomin}\\tests\\e2e\\translation" ^
+                                        --output-dir "${winArtifacts}" ^
                                         --date-tag "%DATE_TAG%-win" ^
                                         --run-tag "${RUN_TAG}" ^
                                         --build-number "%BUILD_NUMBER%" ^
@@ -652,7 +652,7 @@ sh """
                                 echo === [win-x64] report tree ===
                                 if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
                                 echo === [win-x64] published artifacts ===
-                                if exist "%winArtifacts%" (dir /b "%winArtifacts%" 2>nul)
+                                if exist "${winArtifacts}" (dir /b "${winArtifacts}" 2>nul)
                             """
                             // Archive on THIS node: the post block's archiveArtifacts
                             // runs on the linux-x64 agent and cannot see a Windows
