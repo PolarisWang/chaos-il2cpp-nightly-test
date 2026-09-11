@@ -571,15 +571,29 @@ def main() -> int:
             check("windows passes --engine-sha", jf.count("--engine-sha") >= 2,
                   f"count={jf.count('--engine-sha')}")
             check("windows passes --platform", '--platform "windows"' in jf)
+            # Windows must NOT use every core: all chunks rebuild the same shared
+            # C# projects, and the engine's `dotnet build-server shutdown` is not
+            # a lock, so parallel rebuilds race and VBCSCompiler holds the DLL
+            # open -> CS2012 file-in-use (9+ chunks in build 268, run left 0/45).
+            check("windows does NOT use all cores for workers",
+                  "max-workers %NUMBER_OF_PROCESSORS%" not in jf)
+            check("windows worker count is capped",
+                  "NIGHTLY_WORKERS=4" in jf or 'set "NIGHTLY_WORKERS=' in jf)
             # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.
-            bad_escapes = [
-                "\\" + c for c in "nrtbfv$u0"
-                if re.search(r'(?<!\\)\\' + c, bat_code)
-            ]
-            check("no unescaped Groovy backslash escapes in bat block",
-                  not bad_escapes, f"found {bad_escapes}")
+            # Groovy parses backslash escapes even inside triple-quoted strings,
+            # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
+            # a parse error twice). Only single backslashes are hazards;
+            # doubled ones are the correct escaping. Check ALL bat blocks, not
+            # just the first, and include the comment text.
+            bad_escapes = []
+            for blk in re.findall(r'bat """(.*?)"""', jf, re.S):
+                for n, line in enumerate(blk.splitlines(), 1):
+                    for m in re.finditer(r'(?<!\\)\\([a-zA-Z])', line):
+                        bad_escapes.append(f"line {n}: {m.group(0)}")
+            check("no unescaped Groovy backslash escapes in any bat block",
+                  not bad_escapes, f"found {bad_escapes[:3]}")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

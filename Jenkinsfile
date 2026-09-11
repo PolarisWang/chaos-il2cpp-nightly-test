@@ -477,8 +477,35 @@ sh """
                                 echo === [win-x64] dotnet --info ===
                                 dotnet --info
 
+                                REM Worker count: do NOT use %NUMBER_OF_PROCESSORS%.
+                                REM Every chunk runs `dotnet build` against the SAME shared
+                                REM projects (Chaos.IL2CPP.Tools.AutoTestGenerator,
+                                REM Chaos.IL2CPP.Driver) writing into the SAME obj/ dirs.
+                                REM ensure_tool_built() mitigates this with a best-effort
+                                REM `dotnet build-server shutdown`, but that is not a lock:
+                                REM with N workers the processes race past each other and
+                                REM VBCSCompiler keeps the output DLL open, so a sibling
+                                REM build dies with
+                                REM   error CS2012: Cannot open '...AutoTestGenerator.dll'
+                                REM   for writing -- being used by another process
+                                REM which killed 9+ chunks in build 268 and left the run at
+                                REM 0/45. Linux used a fixed 4 and never hit it; this branch
+                                REM was the only one using every core.
+                                REM
+                                REM 4 matches the Linux branch so the two platforms stay
+                                REM comparable, and keeps concurrent rebuilds low enough
+                                REM that the shared-project build stays serialised in
+                                REM practice. Overridable for a machine that proves it can
+                                REM take more.
+                                REM `if not defined` only sees variables from a PARENT
+                                REM scope, not one set earlier in this same block, so
+                                REM `set "X=%X%"` then `if not defined X` never fires.
+                                REM Default it explicitly instead.
+                                if not defined NIGHTLY_WORKERS set "NIGHTLY_WORKERS=4"
+                                echo === [win-x64] workers=%NIGHTLY_WORKERS% (cores=%NUMBER_OF_PROCESSORS%) ===
+
                                 python -m verification.nightly.cli ^
-                                    --max-workers %NUMBER_OF_PROCESSORS% ^
+                                    --max-workers %NIGHTLY_WORKERS% ^
                                     --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
