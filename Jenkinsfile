@@ -131,11 +131,18 @@ pipeline {
                     // scripts download a moving target and, once the fallback was
                     // removed, stopped the whole pipeline dead.
                     //
-                    // So check out this commit explicitly. It makes GIT_COMMIT
-                    // real, which is what the SHA-pinned download below needs, and
-                    // it gives the nightly a trustworthy record of which revision
-                    // of this repo produced the run.
-                    checkout scm
+                    // Capture the revision from checkout's RETURN VALUE rather
+                    // than env.GIT_COMMIT: on this Jenkins the checkout succeeds
+                    // but does not export GIT_COMMIT to the environment (build 266
+                    // checked out a36f217 and still printed "@ null"), so reading
+                    // the env var leaves us with an empty pin.
+                    def scmInfo = checkout scm
+                    env.GIT_COMMIT = (scmInfo?.GIT_COMMIT
+                                      ?: sh(script: 'git -C "$WORKSPACE" rev-parse HEAD',
+                                            returnStdout: true).trim())
+                    if (!env.GIT_COMMIT) {
+                        error("FATAL: could not resolve this repo's revision after checkout")
+                    }
                     echo "Building from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
                     // Find dotnet binary and add its directory to pipeline PATH
                     def dotnetDir = sh(script: '''#!/bin/bash
@@ -1077,9 +1084,17 @@ def runCodeReview(Map params = [:]) {
             sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
             echo "Code review workspace: ${workspaceDir}"
             // GIT_COMMIT comes from a checkout, not from being
-            // CpsScmFlowDefinition. Without this the SHA below is empty and the
-            // guard aborts the review (it did: build 1561).
-            checkout scm
+            // CpsScmFlowDefinition — and on this Jenkins the checkout does not
+            // export it to the environment either, so capture it from the
+            // checkout return value (build 266). Without this the SHA below is
+            // empty and the guard aborts the review (as it did in build 1561).
+            def crScmInfo = checkout scm
+            env.GIT_COMMIT = (crScmInfo?.GIT_COMMIT
+                              ?: sh(script: 'git -C "$WORKSPACE" rev-parse HEAD',
+                                    returnStdout: true).trim())
+            if (!env.GIT_COMMIT) {
+                error("FATAL: could not resolve this repo's revision after checkout")
+            }
             echo "Code review running from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
             sh """
                 set -euo pipefail

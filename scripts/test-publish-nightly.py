@@ -465,6 +465,16 @@ def main() -> int:
             # whole pipeline dead in 12 seconds (build 265).
             check("linux Init checks out before the pinned download",
                   "checkout scm" in jf)
+            # On this Jenkins the checkout succeeds but does NOT export
+            # GIT_COMMIT to the environment: build 266 checked out a36f217 and
+            # still echoed "@ null", so the pin stayed empty and the guard fired.
+            # The revision must come from checkout's return value (or rev-parse).
+            check("revision captured from checkout return value, not env only",
+                  "def scmInfo = checkout scm" in jf and "scmInfo?.GIT_COMMIT" in jf)
+            check("fallback to git rev-parse when checkout gives no SHA",
+                  "rev-parse HEAD" in jf)
+            check("fails loudly if the revision cannot be resolved",
+                  "could not resolve this repo's revision" in jf)
             check("linux init guards against an unset GIT_COMMIT",
                   "GIT_COMMIT is unset" in jf)
             check("code-review checks out before the pinned download",
