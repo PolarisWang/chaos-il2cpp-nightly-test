@@ -412,7 +412,54 @@ def main() -> int:
         else:
             skip("provenance checks", "engine tree not available")
 
-        print("\n[11] Jenkinsfile sanity")
+        print("\n[11] per-platform Feishu payload")
+        FEISHU = HERE / "build-feishu-payload.py"
+        if not FEISHU.exists():
+            skip("feishu payload checks", f"{FEISHU} not found")
+        else:
+            fspec = importlib.util.spec_from_file_location("fmod", FEISHU)
+            fm = importlib.util.module_from_spec(fspec)
+            fspec.loader.exec_module(fm)
+
+            check("artifact name: linux has no suffix",
+                  fm.artifact_name("20260911", "run2", "linux") == "nightly-data-20260911-run2.json")
+            check("artifact name: windows is -win suffixed",
+                  fm.artifact_name("20260911", "run2", "windows") == "nightly-data-20260911-win-run2.json")
+
+            s = fm.summarise({"summary": {"chunk_passed": 20, "chunk_total": 45,
+                                          "error_classes": {"csharp-error": 8},
+                                          "data_dlls": 3},
+                              "total_dlls": 25,
+                              "provenance": {"engine_sha": "e3992ccc5"}})
+            check("summarise: counts + pct", s["chunk_passed"] == 20 and s["chunk_pct"] == "44.4%", str(s))
+            check("summarise: engine_sha surfaced", s["engine_sha"] == "e3992ccc5")
+            check("summarise: absent payload marked not present",
+                  fm.summarise(None) == {"present": False})
+            # engine_sha unrecorded must be visible, not an empty string.
+            check("summarise: missing engine_sha is explicit",
+                  fm.summarise({"summary": {}})["engine_sha"] == "(unrecorded)")
+
+            # A missing platform is the whole point: it must be surfaced.
+            import tempfile as _tf
+            with _tf.TemporaryDirectory() as td:
+                lp = Path(td) / "lin.json"
+                write_json(lp, {"summary": {"chunk_passed": 1, "chunk_total": 2},
+                                "total_dlls": 2, "provenance": {"engine_sha": "abc"}})
+                pay = fm.build_payload("http://127.0.0.1:1/job/x/1", "20260911", "run2",
+                                       lp, "", ["linux", "windows"])
+                check("missing windows flagged when expected",
+                      pay["missing_platforms"] == ["windows"], str(pay["missing_platforms"]))
+                check("linux still reported from the local file",
+                      pay["platforms"]["linux"]["present"] is True)
+                body = "\n".join(pay["body_lines"])
+                check("body names the absent platform explicitly", "Windows" in body)
+                # With only linux expected, no alarm must be raised.
+                pay2 = fm.build_payload("http://127.0.0.1:1/job/x/1", "20260911", "run2",
+                                        lp, "", ["linux"])
+                check("no false alarm when windows not expected",
+                      pay2["missing_platforms"] == [], str(pay2["missing_platforms"]))
+
+        print("\n[12] Jenkinsfile sanity")
         # In CI (Jenkins Init) only scripts/ is downloaded into the workspace —
         # there is no checkout, so no Jenkinsfile.  Skip loudly rather than
         # raising FileNotFoundError and failing the whole suite.

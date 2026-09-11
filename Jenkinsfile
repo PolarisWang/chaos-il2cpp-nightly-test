@@ -186,7 +186,7 @@ pipeline {
                         fi
                         RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
                         echo "Downloading nightly scripts from \$RAWT"
-                        for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh test-publish-nightly.py; do
+                        for script in publish-nightly-results.py generate-nightly-report.py build-feishu-payload.py send-feishu.py notify-feishu.sh notify-feishu-text.sh test-publish-nightly.py; do
                             # curl can return rc=0 even on a GnuTLS handshake failure (this box's flaky
                             # link to GitHub), so ALWAYS sanity-check the downloaded content rather than
                             # trusting rc alone. A corrupt/empty script would otherwise silently break
@@ -926,6 +926,33 @@ except Exception:
             }
         }
 
+        // Collect per-platform results for BOTH branches. The two agents have
+        // separate workspaces and no copyartifact plugin is installed, so fetch
+        // each platform's archived payload over the Jenkins API. A missing
+        // platform is reported IN the card rather than silently omitted —
+        // otherwise "windows produced no data" is indistinguishable from
+        // "windows was never run", which is exactly how the gap went unnoticed.
+        def platformLines = []
+        def missingPlatforms = []
+        try {
+            def payloadOut = "${WORKSPACE}/.notify/platform-payload.json"
+            def localLinux = "${artifacts}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
+            sh """
+                python3 "\${WORKSPACE}/scripts/build-feishu-payload.py" \
+                    --build-url "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
+                    --date-tag "${DATE_TAG}" --run-tag "${RUN_TAG}" \
+                    --local-linux-json "${localLinux}" \
+                    --output "${payloadOut}" 2>&1 || true
+            """
+            def payload = readJSON text: sh(
+                script: "cat '${payloadOut}' 2>/dev/null || echo '{}'",
+                returnStdout: true).trim()
+            platformLines = payload.body_lines ?: []
+            missingPlatforms = payload.missing_platforms ?: []
+        } catch (err) {
+            echo "WARNING: per-platform payload build failed (card falls back to linux-only): ${err.message}"
+        }
+
         def dataJson = groovy.json.JsonOutput.toJson([
             status: status,
             color: color,
@@ -947,6 +974,8 @@ except Exception:
             mem_methods: memMethods,
             mem_alloc: memAllocStr,
             mem_gc: memGcStr,
+            platform_lines: platformLines,
+            missing_platforms: missingPlatforms,
             fail_lines: failLines,
         ])
         sendFeishuCard(dataJson, webhook)
@@ -1020,6 +1049,22 @@ parts = [
     f'**热更新:** {data.get("hot_passed", 0)}/{data.get("hot_total", 0)} ({data.get("hot_pct", "N/A")})',
     f'**内存Profile:** {data.get("mem_methods", 0)} 方法',
 ]
+# Per-platform section (v5). The card previously described the linux-x64
+# workspace only, so the group could not tell that a windows run existed at
+# all — let alone that it had failed. These lines come from
+# build-feishu-payload.py, which fetches BOTH platforms' archived payloads
+# over the Jenkins API (the two agents have separate workspaces and no
+# copyartifact plugin is installed).
+platform_lines = data.get('platform_lines') or []
+if platform_lines:
+    parts.append('')
+    parts.append('**各平台结果:**')
+    parts.extend(platform_lines)
+missing = data.get('missing_platforms') or []
+if missing:
+    parts.append('')
+    parts.append('⚠️ **缺少平台报告:** ' + '、'.join(missing)
+                 + ' — 该平台本轮未产出数据，请检查该分支是否失败')
 fail_lines = data.get('fail_lines', '')
 if fail_lines:
     if fail_lines.startswith('__MANY__'):
