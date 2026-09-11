@@ -588,10 +588,20 @@ sh """
                                 ) else (
                                 REM Syntax-gate both downloads (same reasoning as Init):
                                 REM a truncated body on a flaky link must fail loudly.
+                                REM
+                                REM !ERRORLEVEL! not %ERRORLEVEL%: this line sits inside a
+                                REM parenthesised block, where %ERRORLEVEL% expands at
+                                REM PARSE time and captures whatever the code was BEFORE
+                                REM the block. That made PYCHECK non-zero on a perfectly
+                                REM good download and silently skipped the windows publish
+                                REM in build 270 ("publish helper is not valid Python")
+                                REM even though the same py_compile returns 0 when run
+                                REM standalone on the agent. Delayed expansion is enabled
+                                REM at the top of this bat block for exactly this reason.
                                 call python -m py_compile "%PUB%" "%GENPY%"
-                                set "PYCHECK=%ERRORLEVEL%"
-                                if not "%PYCHECK%"=="0" (
-                                    echo === [win-x64] WARNING: publish helper is not valid Python - skipping publish ===
+                                set "PYCHECK=!ERRORLEVEL!"
+                                if not "!PYCHECK!"=="0" (
+                                    echo === [win-x64] WARNING: publish helper is not valid Python for pin %PIN% - skipping publish ===
                                 ) else (
                                     echo === [win-x64] Publishing Windows results ===
                                     REM --report-dir: config.report_dir defaults to a
