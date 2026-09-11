@@ -577,6 +577,19 @@ def main() -> int:
             # open -> CS2012 file-in-use (9+ chunks in build 268, run left 0/45).
             check("windows does NOT use all cores for workers",
                   "max-workers %NUMBER_OF_PROCESSORS%" not in jf)
+            # The engine's build.py locates the runtime DLLs via DOTNET_ROOT.
+            # It is unset on the linux agent, so every chunk failed with the
+            # opaque class "unknown" (43 of them, build 272) and linux went
+            # 20/45 -> 0/45. The windows branch had guarded this all along; the
+            # linux branch never did, because a developer shell exports it.
+            check("linux sets DOTNET_ROOT for the engine",
+                  "env.DOTNET_ROOT" in jf)
+            # /usr/local/bin/dotnet is a SYMLINK to /usr/share/dotnet/dotnet, so
+            # a bare dirname gives /usr/local/bin, which has no shared/.
+            check("dotnet probe resolves symlinks",
+                  "readlink -f" in jf and 'dirname "$(readlink -f' in jf)
+            check("dotnet root is validated to contain shared/",
+                  'test -d "${DOTNET_ROOT}/shared"' in jf)
             check("windows worker count is capped",
                   "NIGHTLY_WORKERS=4" in jf or 'set "NIGHTLY_WORKERS=' in jf)
             # Groovy does NOT interpolate %name%; that is cmd syntax. Writing a

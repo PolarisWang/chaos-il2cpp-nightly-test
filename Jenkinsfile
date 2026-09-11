@@ -144,11 +144,17 @@ pipeline {
                         error("FATAL: could not resolve this repo's revision after checkout")
                     }
                     echo "Building from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
-                    // Find dotnet binary and add its directory to pipeline PATH
+                    // Find dotnet binary and add its directory to pipeline PATH.
+                    // Resolve symlinks first: on this agent /usr/local/bin/dotnet
+                    // is a symlink to /usr/share/dotnet/dotnet, so a plain
+                    // `dirname` yields /usr/local/bin — a directory with no
+                    // shared/ in it — and DOTNET_ROOT would point somewhere the
+                    // runtime DLLs are not. `readlink -f` gives the real install
+                    // root, which is what the engine's DLL probe needs.
                     def dotnetDir = sh(script: '''#!/bin/bash
                         set -euo pipefail
                         for c in /usr/local/bin/dotnet /usr/share/dotnet/dotnet /usr/bin/dotnet; do
-                            if [ -x "$c" ]; then dirname "$c"; exit 0; fi
+                            if [ -x "$c" ]; then dirname "$(readlink -f "$c")"; exit 0; fi
                         done
                         echo ""
                     ''', returnStdout: true).trim()
@@ -156,6 +162,29 @@ pipeline {
                         error("FATAL: dotnet not found — install dotnet SDK 8.0+10.0 on this agent")
                     }
                     env.PATH = "${dotnetDir}:${env.PATH}"
+                    // PATH alone is not enough. The engine's build.py resolves the
+                    // runtime DLLs it compiles against from DOTNET_ROOT, and on
+                    // this agent that variable is UNSET — the build 272 console
+                    // showed, on the linux branch:
+                    //     [dll-probe] DOTNET_ROOT=None
+                    //     [dll-probe] NO runtime_base — DOTNET_ROOT unset or wrong
+                    // and every chunk then failed with the opaque class "unknown"
+                    // (43 of them), taking linux from 20/45 to 0/45.
+                    //
+                    // The windows branch has set DOTNET_ROOT explicitly since the
+                    // original "DLL not found" investigation; the linux branch was
+                    // never given the same guard because a developer shell happens
+                    // to export it. A chunk run by hand on an archive tree passes
+                    // for exactly that reason, which is why this looked like an
+                    // engine bug rather than a missing env var.
+                    env.DOTNET_ROOT = dotnetDir
+                    sh '''
+                        echo "DOTNET_ROOT=${DOTNET_ROOT}"
+                        test -d "${DOTNET_ROOT}/shared" || {
+                            echo "FATAL: DOTNET_ROOT has no shared/ — expected the dotnet install root, got ${DOTNET_ROOT}"
+                            exit 1
+                        }
+                    '''
                     sh 'dotnet --version'
                     sh """
                         set -eu
