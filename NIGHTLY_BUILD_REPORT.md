@@ -19,8 +19,59 @@ Linux 侧同样如此，只是它至少产出过一个「格式合法、内容�
 | HTML 新增「Chunk 构建」+「失败归因」卡片 + 失败 chunk 清单 | `generate-nightly-report.py` |
 | Windows 分支接入 publish + 本 node `archiveArtifacts` | `Jenkinsfile` |
 | `--baseline` 日期格式 `%Y%mdd` → `%Y%m%d` | `Jenkinsfile` |
+| 三个 bat 缺陷（HTML 不生成 / 退出码为空 / 写 Linux 路径） | `Jenkinsfile` |
+| 禁止 CDN `main` 回退，强制 SHA pin | `Jenkinsfile` |
 
 详见 §三 问题 3–6。
+
+---
+
+## 🆕 真实 agent 验证（2026-09-11）
+
+不只是本机测试 —— 通过 SSH 在真实 Windows agent 上端到端跑通了发布链路：
+
+```
+=== publish exit=0 ===
+=== artifacts ===
+  generate-nightly-report.py
+  nightly-data-20260910-win-run1.json
+  nightly-report-20260910-win-run1.html
+  publish-nightly-results.py
+```
+
+读出的正是真实数据：**20/45 passed + 四类归因**。失败路径也验证过
+（指向不存在的目录 → `exit=1`，不再静默）。
+
+### 验证中发现的三个 bat 缺陷（已修）
+
+| # | 缺陷 | 根因 |
+|---|---|---|
+| 1 | HTML 不生成 | 只下载了 publish 脚本，没下载它调用的 `generate-nightly-report.py` |
+| 2 | `publish exit=` 为空 | `set "VAR=%ERRORLEVEL%"` 在括号块内**解析期**展开，取到陈旧值 |
+| 3 | 往 Linux 路径写 | `--report-server-dir` 默认 `/var/lib/...`，Windows 上会在当前盘建 `var/lib` 树且报成功 |
+
+**2 号的坑比预想深**：`setlocal EnableDelayedExpansion` 写在块内**不管用** ——
+`endlocal & set "VAR=%VAR%"` 这个惯用写法里 `%VAR%` 同样在解析期展开。
+只有**脚本级** `EnableDelayedExpansion` + 直接读 `!ERRORLEVEL!` 才对（已用探针实测）。
+
+### ⚠️ GitHub raw CDN 陈旧（重要运维知识）
+
+实测：`raw.githubusercontent.com/<repo>/main` **push 后长时间仍返回上一版**，
+加 `?cb=` 也无效；**按 SHA pin 的地址立即返回新内容**。
+
+验证时真的撞上过：第一次跑到的是旧版 `publish-nightly-results.py`，报
+`unrecognized arguments: --skip-report-server`，而修复其实早已在 main 上。
+
+因此所有下载点改为**强制 SHA pin，`GIT_COMMIT` 为空则失败**。job 是
+`CpsScmFlowDefinition`（pipeline-from-SCM），`GIT_COMMIT` 必定存在。
+
+### 已确认的环境事实
+
+- Jenkins workspace = `C:\agent\agentworkspace\workspace\chaos-il2cpp-nightly`
+  （**不是** `C:\Jenkins\...`），`artifacts/` 子目录存在且为空
+- `nightly-result.json` 落在
+  `D:\agent\workspace\booming-il2cpp\tests\e2e\nightly-build-report\summary\`
+- Python / curl / git 均在 PATH 上；curl 能连通 GitHub raw
 
 ---
 
@@ -229,10 +280,11 @@ verification.nightly.cli
 | 12 | csharp-error + atg-combined-cs | P1 | ATG 检测 TFM / csproj 升 net10 | ⬜ 引擎团队 |
 | 13 | 剩余 5 个 native-linker-error | P1 | 定位新符号 | ⬜ 引擎团队 |
 | 14 | `aggregate_reports()` 异常不落盘 | P2 | 保证异常也写 summary | ⬜ 引擎团队 |
+| 15 | CDN main 回退（已禁用） | P1 | 强制 SHA pin | ✅ 本次 |
 
 ### 自测与 CI 门禁
 
-`scripts/test-publish-nightly.py` —— **67 项检查全通过**，覆盖两种 `report_dir`
+`scripts/test-publish-nightly.py` —— **83 项检查全通过**，覆盖两种 `report_dir`
 布局、corrupt JSON、legacy 回退、空数据告警、e2e publish→HTML、真实产物键路径、
 加权平均、DB 平台隔离与陈旧行清理、Jenkinsfile 断言。
 

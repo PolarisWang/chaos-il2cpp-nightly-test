@@ -195,16 +195,42 @@ Jenkinsfile 的 `Publish-Chain Self-Test` stage 在昂贵构建**之前**跑这�
 `report-server`）时必须同步更新它** —— 它是唯一能挡住
 「报告静默变空」这类回归的东西（那个 bug 曾让每晚都发布空报告而构建全绿）。
 
+### ⚠️ GitHub raw CDN 会返回陈旧内容
+
+**实测（2026-09-11）**：`raw.githubusercontent.com/<repo>/main` 在 push 之后
+**长时间仍返回上一个版本**，加 `?cb=` 缓存破坏参数也无效；而**按 commit SHA
+pin 的地址立即返回新内容**。
+
+后果：如果只 pin 到 `main`，会拿到旧脚本 —— 验证时就撞到过一次
+（拉到了旧版 `publish-nightly-results.py`，报
+`unrecognized arguments: --skip-report-server`，而修复其实早已在 main 上）。
+
+因此**所有下载点都强制 SHA pin，且 `GIT_COMMIT` 为空时直接失败**，不回退 `main`。
+job 是 `CpsScmFlowDefinition`（pipeline-from-SCM），`GIT_COMMIT` 必定存在，
+为空说明 SCM 配置真坏了 —— 此时猜测比失败更危险。
+
 ## 7. 状态快照（2026-09-11）
 
 | 项 | 值 |
 |---|---|
 | 最近 Windows build | 262（20/45 passed） |
 | 错误分布 | csharp-error=8, atg-combined-cs=7, native-linker-error=5, unknown=5 |
-| **流水线侧（本仓库）** | ✅ 全部修复（13 项） |
-| 自测套件 | ✅ 67/67 |
+| **流水线侧（本仓库）** | ✅ 全部修复（14 项） |
+| 自测套件 | ✅ 83/83 |
+| **真实 agent 验证** | ✅ 端到端跑通（20/45 + 四类归因 + HTML，exit=0） |
 | 剩余阻塞 | ⬜ 引擎侧：TFM 兼容(15) + 新 linker 符号(5) |
 | SSH 通道 | ✅ 通（`booming\admin140@10.10.9.197`，公钥） |
+
+### 真实 agent 上验证过的关键事实
+
+- Jenkins workspace = `C:\agent\agentworkspace\workspace\chaos-il2cpp-nightly`
+  （**不是** `C:\Jenkins\...`），`artifacts/` 子目录存在
+- `nightly-result.json` 确实落在
+  `D:\agent\workspace\booming-il2cpp\tests\e2e\nightly-build-report\summary\`
+- Python/curl/git 均在 PATH 上，curl 能连通 GitHub raw
+- **bat 陷阱**：`endlocal & set "VAR=%VAR%"` 这种一行写法在本机**不工作**
+  —— `%VAR%` 在解析期就展开（早于 `endlocal`），捕获为空。只有**脚本级**
+  `setlocal EnableDelayedExpansion` + 直接读 `!ERRORLEVEL!` 才正确
 
 ---
 
