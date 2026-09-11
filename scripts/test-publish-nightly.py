@@ -456,12 +456,29 @@ def main() -> int:
                       for l in jf.splitlines() if l.strip().startswith("RAWT=")),
                   str([l.strip() for l in jf.splitlines()
                        if l.strip().startswith("RAWT=")]))
-            check("linux init fails loudly when GIT_COMMIT is unset",
-                  "GIT_COMMIT is unset; refusing to download helper" in jf)
-            check("code-review fails loudly when GIT_COMMIT is unset",
-                  "GIT_COMMIT is unset; refusing to download review" in jf)
-            check("windows fails loudly when GIT_COMMIT is unset",
-                  "FATAL: GIT_COMMIT unset" in jf)
+            # Both download sites that must have a real SHA now check out this
+            # commit first. GIT_COMMIT comes from a checkout, NOT from being a
+            # CpsScmFlowDefinition — Init originally had no checkout, so
+            # GIT_COMMIT was empty on every build (build 264's console shows
+            # "NIGHTLY_SHA=" with the `main` fallback doing the work), and
+            # removing that fallback without adding the checkout stopped the
+            # whole pipeline dead in 12 seconds (build 265).
+            check("linux Init checks out before the pinned download",
+                  "checkout scm" in jf)
+            check("linux init guards against an unset GIT_COMMIT",
+                  "GIT_COMMIT is unset" in jf)
+            check("code-review checks out before the pinned download",
+                  jf.count("checkout scm") >= 2, f"count={jf.count('checkout scm')}")
+            check("code-review guards against an unset GIT_COMMIT",
+                  "GIT_COMMIT is unset (the checkout scm did not run?)" in jf)
+            # The windows stage runs on a DIFFERENT agent than Init's checkout,
+            # so it must not depend on cross-node env propagation: it resolves
+            # a pin independently and SKIPS (rather than failing the branch)
+            # when no usable pin can be found.
+            check("windows resolves a pin without relying on cross-node GIT_COMMIT",
+                  'set "PIN=%GIT_COMMIT%"' in jf and "GIT_PREVIOUS_COMMIT" in jf)
+            check("windows skips publish (not fails) when the pin is unusable",
+                  "skipping publish" in jf.lower())
             # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.

