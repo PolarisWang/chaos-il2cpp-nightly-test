@@ -445,7 +445,23 @@ def main() -> int:
                   "setlocal EnableDelayedExpansion" in bat_code)
             check("windows forwards --skip-report-server",
                   "--skip-report-server" in jf)
-            # Groovy parses backslash escapes even inside triple-quoted strings,
+            # No CDN 'main' fallback anywhere: /main was measured serving the
+            # PREVIOUS revision after a push (even with a cache-buster) while the
+            # SHA-pinned path was current, so a fallback silently mixes old and
+            # new scripts.
+            check("no raw.githubusercontent /main path anywhere",
+                  "nightly-test/main" not in jf)
+            check("all RAWT assignments are SHA-pinned",
+                  all("NIGHTLY_SHA" in l or "%GIT_COMMIT%" in l
+                      for l in jf.splitlines() if l.strip().startswith("RAWT=")),
+                  str([l.strip() for l in jf.splitlines()
+                       if l.strip().startswith("RAWT=")]))
+            check("linux init fails loudly when GIT_COMMIT is unset",
+                  "GIT_COMMIT is unset; refusing to download helper" in jf)
+            check("code-review fails loudly when GIT_COMMIT is unset",
+                  "GIT_COMMIT is unset; refusing to download review" in jf)
+            check("windows fails loudly when GIT_COMMIT is unset",
+                  "FATAL: GIT_COMMIT unset" in jf)
             # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.

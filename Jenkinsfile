@@ -142,14 +142,24 @@ pipeline {
                         cd "\${WORKSPACE}/scripts"
                         # Download the helper scripts, pinning to this build's own GIT_COMMIT so the
                         # download is consistent (raw.githubusercontent.com's bare 'main' path is
-                        # CDN-cached and can serve a STALE script for a while after a push). Fall back
-                        # to 'main' if GIT_COMMIT is unset. See the P0-1 note in runCodeReview too.
+                        # CDN-cached and can serve a STALE script for a while after a push).
+                        #
+                        # Do NOT fall back to 'main' when GIT_COMMIT is unset. Measured on
+                        # this setup: raw.githubusercontent.com/main kept serving the previous
+                        # revision long after the push (a cache-busting query string did not
+                        # help), while the SHA-pinned path returned the new file immediately.
+                        # A silent 'main' fallback therefore runs a MIX of old and new
+                        # scripts, which is far worse than failing. This job is a
+                        # CpsScmFlowDefinition (pipeline-from-SCM) on */main, so GIT_COMMIT is
+                        # always set — an empty value means something is genuinely wrong.
                         NIGHTLY_SHA="\${GIT_COMMIT:-}"
-                        if [ -n "\$NIGHTLY_SHA" ]; then
-                            RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
-                        else
-                            RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                        if [ -z "\$NIGHTLY_SHA" ]; then
+                            echo "FATAL: GIT_COMMIT is unset; refusing to download helper"
+                            echo "       scripts from the CDN-cached 'main' path, which can"
+                            echo "       serve a stale revision. Check the job's SCM config."
+                            exit 1
                         fi
+                        RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
                         echo "Downloading nightly scripts from \$RAWT"
                         for script in publish-nightly-results.py generate-nightly-report.py send-feishu.py notify-feishu.sh notify-feishu-text.sh test-publish-nightly.py; do
                             # curl can return rc=0 even on a GnuTLS handshake failure (this box's flaky
@@ -437,7 +447,17 @@ sh """
                                 REM CDN-staleness reason documented in Init.
                                 set "PUB=%winArtifacts%\\publish-nightly-results.py"
                                 set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/%GIT_COMMIT%"
-                                if "%GIT_COMMIT%"=="" set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                                REM No 'main' fallback: /main was measured serving the
+                                REM PREVIOUS revision long after the push (even with a
+                                REM cache-busting query string), while the SHA-pinned path
+                                REM was current immediately. Falling back would run a mix
+                                REM of old and new scripts, which is worse than failing.
+                                REM GIT_COMMIT is always set for a pipeline-from-SCM job,
+                                REM so an empty value means the SCM config is broken.
+                                if "%GIT_COMMIT%"=="" (
+                                    echo === [win-x64] FATAL: GIT_COMMIT unset; refusing to fetch publish helpers from the CDN-cached main path ===
+                                    exit /b 1
+                                )
                                 echo === [win-x64] fetching publish helpers from %RAWT% ===
                                 REM BOTH scripts are needed: publish-nightly-results.py
                                 REM shells out to generate-nightly-report.py for the HTML
@@ -1028,13 +1048,18 @@ def runCodeReview(Map params = [:]) {
                 # Prefer a pin to this repo's own checked-out SHA (GIT_COMMIT), so the
                 # download is consistent: raw.githubusercontent.com's bare 'main' path is
                 # CDN-cached and can serve a STALE script for a while after a push (e.g.
-                # missing the docs-only review). Fall back to 'main' if GIT_COMMIT is unset.
+                # missing the docs-only review). No 'main' fallback: measured on this
+                # setup, /main served the previous revision long after the push
+                # (cache-busting did not help) while the SHA path was current, so a
+                # fallback would silently mix old and new scripts. This job is
+                # pipeline-from-SCM, so GIT_COMMIT is always set.
                 NIGHTLY_SHA="\${GIT_COMMIT:-}"
-                if [ -n "\$NIGHTLY_SHA" ]; then
-                    RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
-                else
-                    RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
+                if [ -z "\$NIGHTLY_SHA" ]; then
+                    echo "FATAL: GIT_COMMIT is unset; refusing to download review scripts"
+                    echo "       from the CDN-cached 'main' path. Check the job's SCM config."
+                    exit 1
                 fi
+                RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
                 echo "Downloading from \$RAWT"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
                     "\$RAWT/scripts/review-with-claude.sh"
@@ -1051,14 +1076,26 @@ def runCodeReview(Map params = [:]) {
                 # EXTS_KEEP-with-.md fix that makes the docs path actually run). Without it
                 # a docs-only range still falls through to the all-excluded early exit.
                 grep -Fq 'DOCS_REVIEWABLE_VERSION_MARKER' '${SCRIPT_DIR}/review-with-claude.sh' || {
-                    echo "WARNING: review script lacks docs marker (stale download?); re-pulling from main"
-                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
-                        'https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main/scripts/review-with-claude.sh'
+                    # Retry the SHA-pinned URL rather than /main. The old code re-pulled
+                    # from /main, but /main is the CDN-cached path measured serving the
+                    # PREVIOUS revision after a push (cache-busting did not help), so a
+                    # "stale download" would just re-fetch the same stale bytes. A
+                    # transient curl failure is the likelier cause, so retry the pin.
+                    echo "WARNING: review script lacks docs marker (stale or truncated download?); re-pulling pinned revision"
+                    rm -f '${SCRIPT_DIR}/review-with-claude.sh'
+                    ok=0
+                    for attempt in 1 2 3; do
+                        curl -sfL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
+                            "\$RAWT/scripts/review-with-claude.sh" && \\
+                            grep -Fq 'DOCS_REVIEWABLE_VERSION_MARKER' '${SCRIPT_DIR}/review-with-claude.sh' && ok=1 && break
+                        echo "  retry \$attempt/3 for review-with-claude.sh"
+                        sleep 2
+                    done
                     chmod +x '${SCRIPT_DIR}/review-with-claude.sh'
-                    grep -Fq 'DOCS_REVIEWABLE_VERSION_MARKER' '${SCRIPT_DIR}/review-with-claude.sh' || {
-                        echo "ERROR: review script still lacks docs marker after re-pull"
+                    if [ "\$ok" != "1" ]; then
+                        echo "ERROR: review script still lacks docs marker after 3 attempts from \$RAWT"
                         exit 1
-                    }
+                    fi
                 }
                 # Syntax-validate the extracted card-send scripts (layer 3) so a
                 # main-pushed syntax error aborts here at download, not silently at
