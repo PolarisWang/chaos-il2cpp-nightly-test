@@ -100,8 +100,122 @@ def parse_entry_maps(foundation_dir: Path, assemblies: list[str]) -> dict:
     return entry_maps
 
 
+def read_nightly_summary(report_dir: Path) -> dict:
+    """Read the Route-3 nightly CLI's authoritative summary JSON.
+
+    `verification.nightly.aggregate.aggregate_reports()` writes ONLY
+    `<report_dir>/summary/nightly-result.json` (+ nightly-summary.md).  It does
+    NOT create `per-chunk/` or `reports/` — those were products of the legacy
+    `nightly_runner.ReportCollector`, and this script was left reading them
+    after that runner was removed.  Result: every metric below came out 0 while
+    `total_dlls` looked correct (it is discovered from the foundation dir, not
+    from this report), so the pipeline published a well-formed but EMPTY
+    report.  This reader is now the primary source of truth.
+
+    There is a second, older `summary/nightly-summary.md` schema
+    (full-run/YYYYMMDD_HHMMSS-<sha>/summary/) emitted by the legacy reporting
+    stack; it carries a different shape and a nightly-delta.json sibling.  It
+    is handled by `parse_legacy_summary_md()` as a fallback.
+
+    Path ambiguity: `aggregate_reports()` writes to `<config.report_dir>/summary/`,
+    so the canonical `--report-dir` is the PARENT.  But the Jenkinsfile passes
+    `.../nightly-build-report/summary` directly, which would double-append.  We
+    accept either by checking both locations.
+    """
+    candidates = [
+        report_dir / "nightly-result.json",           # report_dir IS the summary dir
+        report_dir / "summary" / "nightly-result.json",  # report_dir is the parent
+    ]
+    result_file = next((c for c in candidates if c.exists()), None)
+    if result_file is None:
+        return {}
+    try:
+        data = json.loads(result_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  [publish] WARNING: failed to parse {result_file}: {e}")
+        return {}
+    if not isinstance(data, dict):
+        print(f"  [publish] WARNING: {result_file} is not a JSON object")
+        return {}
+    return data
+
+
+def parse_legacy_summary_md(report_dir: Path) -> dict:
+    """Best-effort parse of the LEGACY `nightly-summary.md` (old reporting stack).
+
+    Shape (see full-run/<run-id>/summary/nightly-summary.md):
+        | Assemblies | 28 |
+        | Chunks | 54 / 71 verified |
+        | Fact pass rate | 97.8%  |
+        | Benchmark methods | 18291 |
+        ### Build Failures ❌ (10)
+        - System.Net.Sockets/global-ns (not_run)
+
+    Only used when nightly-result.json is absent.  Returns a partial summary in
+    the same key space as read_nightly_summary() so downstream code needs no
+    branch; any field we cannot parse is simply left out.
+    """
+    md_file = next((c for c in (
+        report_dir / "nightly-summary.md",
+        report_dir / "summary" / "nightly-summary.md",
+    ) if c.exists()), None)
+    if md_file is None:
+        return {}
+    try:
+        text = md_file.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"  [publish] WARNING: failed to read {md_file}: {e}")
+        return {}
+
+    def _metric(label: str):
+        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*([^|]+?)\s*\|", text, re.M)
+        return m.group(1).strip() if m else None
+
+    out: dict[str, Any] = {"_source": "legacy-nightly-summary.md"}
+
+    chunks_raw = _metric("Chunks")
+    if chunks_raw:
+        m = re.match(r"(\d+)\s*/\s*(\d+)", chunks_raw)
+        if m:
+            out["passed"] = int(m.group(1))
+            out["total"] = int(m.group(2))
+            out["failed"] = max(0, int(m.group(2)) - int(m.group(1)))
+
+    if (asm_raw := _metric("Assemblies")):
+        try:
+            out["totalAssemblies"] = int(asm_raw)
+        except ValueError:
+            pass
+
+    # Build-failure keys: "#### Build Failures ❌ (N)" then (usually after a
+    # blank line) "- asm/chunk (reason)".  The list is terminated by the next
+    # heading or a blank line followed by non-list content, so match the block
+    # lazily and filter for "-" lines rather than assuming adjacency.
+    m = re.search(r"^#+\s*Build Failures[^\n]*\n(.*?)(?=\n#|\Z)", text, re.M | re.S)
+    if m:
+        keys = []
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if not line.startswith("-"):
+                continue
+            item = line.lstrip("-").strip()
+            key = item.split(" (")[0].strip()
+            if key:
+                keys.append(key)
+        if keys:
+            out["failingChunks"] = keys
+            out["byErrorClass"] = {"unknown": len(keys)}
+
+    return out
+
+
 def read_chunk_results(report_dir: Path, assemblies: list[str]) -> dict:
     """Read per-chunk results from ReportCollector's per-chunk/ directory.
+
+    OPTIONAL ENRICHMENT: the Route-3 nightly CLI does not produce this tree, so
+    an empty result is normal and no longer means "the run failed".  Kept so a
+    future ReportCollector (or an externally-supplied results dir) still lights
+    up the per-method benchmark tables.
 
     ReportCollector copies chunks/<slug>/results/* → per-chunk/<asm>/<slug>/*
     (files directly under slug dir, no nested results/ subdirectory).
@@ -176,16 +290,26 @@ def compute_summary(chunks: dict) -> dict:
             if hot and "error" not in hot:
                 summary["hotupdate_passed"] += hot.get("passed", 0)
                 summary["hotupdate_total"] += hot.get("passed", 0) + hot.get("failed", 0)
-            # Profile (memory)
+            # Profile (memory).  Note the metrics live under profile.summary
+            # (verified against real engine profile.json), and the aggregate
+            # block is keyed by technology — see the fallback below.
             prof = chunk_data.get("profile", {})
             if prof and "error" not in prof:
-                ps = prof.get("summary", {})
+                ps = prof.get("summary", prof)
                 summary["memory_alloc_bytes"] += ps.get("totalNurseryAllocBytes", 0)
                 summary["memory_gc_pause_ns"] += ps.get("totalGcPauseNs", 0)
-                summary["memory_fast_path_rate"] = max(
-                    summary["memory_fast_path_rate"], ps.get("fastPathRate", 0)
-                )
-                summary["memory_methods_profiled"] += ps.get("methodCount", 0)
+                # Weighted mean, not max(): a max() reports the single best
+                # chunk's rate and hides a regression in every other chunk.
+                _mc = ps.get("methodCount", 0)
+                _rate = ps.get("fastPathRate", 0)
+                if _mc:
+                    summary["_fp_weighted"] = summary.get("_fp_weighted", 0.0) + _rate * _mc
+                summary["memory_methods_profiled"] += _mc
+
+    _prof_total = summary.get("memory_methods_profiled", 0)
+    if _prof_total:
+        summary["memory_fast_path_rate"] = summary.pop("_fp_weighted", 0.0) / _prof_total
+    summary.pop("_fp_weighted", None)
     return summary
 
 
@@ -268,46 +392,184 @@ def extract_comparison(aggregates: dict) -> dict:
 
 # ── I/O ─────────────────────────────────────────────────────────────
 
+def merge_nightly_summary(summary: dict, nightly_summary: dict) -> dict:
+    """Overlay the authoritative CLI summary onto the derived one.
+
+    The CLI summary is chunk-level truth (how many chunks passed/failed and
+    why).  The derived summary is method-level detail from per-chunk JSON, which
+    is usually absent.  We keep both: chunk counts come from the CLI, and any
+    method-level metric the CLI cannot know (benchmark methods, nursery bytes)
+    survives from the derived value when it is non-zero.
+
+    Also normalises the CLI's camelCase payload into the snake_case key space
+    the rest of this script, the HTML generator, and the Report API all use.
+    """
+    if not nightly_summary:
+        summary["summary_source"] = "derived-from-per-chunk"
+        return summary
+
+    total = nightly_summary.get("total")
+    passed = nightly_summary.get("passed")
+    if isinstance(total, int):
+        summary["chunk_total"] = total
+    if isinstance(passed, int):
+        summary["chunk_passed"] = passed
+    if isinstance(nightly_summary.get("failed"), int):
+        summary["chunk_failed"] = nightly_summary["failed"]
+    if isinstance(nightly_summary.get("stalled"), int):
+        summary["chunk_stalled"] = nightly_summary["stalled"]
+
+    # Error-class breakdown — the analysis dimension the old payload lacked
+    # entirely (the "39 native-linker-error" figures in the handoff docs were
+    # produced by hand-grepping logs).
+    by_class = nightly_summary.get("byErrorClass")
+    if isinstance(by_class, dict) and by_class:
+        summary["error_classes"] = dict(sorted(by_class.items()))
+        # Flatten the failure buckets into one lookup used by the HTML report.
+        failing: dict[str, list[str]] = {}
+        failing.setdefault("translation_defect", []).extend(
+            nightly_summary.get("translationDefectFails", []) or [])
+        failing.setdefault("infra", []).extend(
+            nightly_summary.get("infraFails", []) or [])
+        failing.setdefault("code_defect", []).extend(
+            nightly_summary.get("codeDefectFails", []) or [])
+        summary["failing_chunks"] = {k: v for k, v in failing.items() if v}
+
+    if isinstance(nightly_summary.get("failingChunks"), list):
+        summary.setdefault("failing_chunks", {})["unknown"] = \
+            nightly_summary["failingChunks"]
+
+    # data_dlls: how many assemblies actually produced data.  This was previously
+    # absent from the payload while Jenkins and the Report API each recomputed it
+    # — the Feishu card read the missing key and displayed "0/N" unconditionally.
+    #
+    # Semantics match the other two consumers (report-server/api/main.py and
+    # generate-nightly-report.py): an assembly counts when it RAN (total > 0),
+    # not when it passed.  Using `passed > 0` here would hide an assembly whose
+    # every chunk failed — exactly the case an operator most needs to see.
+    by_asm = nightly_summary.get("byAssembly")
+    if isinstance(by_asm, dict) and by_asm:
+        summary["by_assembly"] = by_asm
+        summary["data_dlls"] = sum(
+            1 for v in by_asm.values()
+            if isinstance(v, dict) and v.get("total", 0) > 0
+        )
+
+    summary["summary_source"] = "nightly-result.json"
+    return summary
+
+
+def build_chunk_status(nightly_summary: dict, assemblies: list[str]) -> dict:
+    """Per-assembly chunk rollup from the CLI summary, for the HTML table.
+
+    `byAssembly` is {asm: {passed, failed, total}}; we convert it to the
+    pass/total shape the report generator's fact column expects.
+    """
+    by_asm = (nightly_summary or {}).get("byAssembly")
+    if not isinstance(by_asm, dict):
+        return {}
+    status: dict[str, Any] = {}
+    for asm, v in by_asm.items():
+        if not isinstance(v, dict):
+            continue
+        status[asm] = {
+            "chunk_passed": v.get("passed", 0),
+            "chunk_failed": v.get("failed", 0),
+            "chunk_total": v.get("total", 0),
+        }
+    # Surface assemblies the foundation dir knows about but the run never
+    # reached (e.g. filtered or crashed before scheduling) — otherwise they are
+    # invisible in the report rather than shown as 0/N.
+    for asm in assemblies:
+        status.setdefault(asm, {"chunk_passed": 0, "chunk_failed": 0, "chunk_total": 0})
+    return status
+
+
 def build_nightly_data(
     foundation_dir: Path,
     report_dir: Path,
     date_tag: str,
     run_tag: str,
+    build_number: str = "",
 ) -> dict:
     """Build the nightly-data-*.json payload (backward-compatible format)."""
     assemblies = discover_assemblies(foundation_dir)
     print(f"  [publish] Discovered {len(assemblies)} assemblies")
 
-    # Read chunk results from ReportCollector's per-chunk/ copies
-    chunks = read_chunk_results(report_dir, assemblies)
-    print(f"  [publish] Read chunk results for {len(chunks)} assemblies")
+    # ── PRIMARY SOURCE: the nightly CLI's own summary ──
+    # Written by verification.nightly.aggregate.aggregate_reports() to
+    # <report_dir>/summary/nightly-result.json.  Fall back to the legacy
+    # markdown schema when it is absent (or empty, which the CLI can leave
+    # behind when it dies before aggregation).
+    nightly_summary = read_nightly_summary(report_dir)
+    summary_source = "nightly-result.json"
+    if not nightly_summary:
+        nightly_summary = parse_legacy_summary_md(report_dir)
+        summary_source = ("legacy nightly-summary.md" if nightly_summary
+                          else "NONE — metrics unavailable")
+    print(f"  [publish] Summary source: {summary_source}")
+    if nightly_summary:
+        print(f"  [publish]   {nightly_summary.get('passed', 0)}/"
+              f"{nightly_summary.get('total', 0)} chunks passed, "
+              f"error classes: {nightly_summary.get('byErrorClass', {})}")
 
-    # Read aggregate reports from ReportCollector's reports/ copies
+    # Read chunk results from ReportCollector's per-chunk/ copies.
+    # NOTE: optional enrichment — the Route-3 CLI does not create this tree, so
+    # an empty dict here is EXPECTED and is not a failure signal.
+    chunks = read_chunk_results(report_dir, assemblies)
+    if chunks:
+        print(f"  [publish] Read chunk results for {len(chunks)} assemblies")
+    else:
+        print("  [publish] No per-chunk/ tree (expected for verification.nightly.cli)")
+
+    # Read aggregate reports from ReportCollector's reports/ copies (also optional)
     aggregates = read_aggregate_reports(report_dir, assemblies)
-    print(f"  [publish] Read aggregate reports for {len(aggregates)} assemblies")
+    if aggregates:
+        print(f"  [publish] Read aggregate reports for {len(aggregates)} assemblies")
 
     # Parse entry.cpp for method resolution
     entry_maps = parse_entry_maps(foundation_dir, assemblies)
 
-    # Compute summary
+    # Compute summary from the per-chunk tree (may be all zeros when absent) ...
     summary = compute_summary(chunks)
+    # ... then let the authoritative CLI summary override it.
+    summary = merge_nightly_summary(summary, nightly_summary)
+    # The Report API reads build_number from summary (main.py upsert_report) but
+    # nothing ever wrote it, so the DB column was always empty.
+    summary["build_number"] = build_number
 
     # Extract expanded data
     benchmark_methods = extract_benchmark_methods(chunks, entry_maps)
     coverage = extract_coverage(aggregates)
     comparison = extract_comparison(aggregates)
 
-    # Build report in nightly-data-*.json format
+    # Chunk-level pass/fail derived from the CLI summary (the only source of
+    # truth available under the Route-3 CLI).  Consumed by the HTML report's
+    # per-assembly table and by the error-class breakdown card.
+    chunk_status = build_chunk_status(nightly_summary, assemblies)
+
     report: dict[str, Any] = {
         "date_tag": f"{date_tag}-{run_tag}",
         "total_dlls": len(assemblies),
         "dlls": {},
         "aggregate": {},
         "summary": summary,
+        "chunk_status": chunk_status,
         "entry_maps": entry_maps,
         "benchmark_methods": benchmark_methods,
         "coverage": coverage,
         "comparison": comparison,
+        "summary_source": summary_source,
+    }
+
+    # Provenance: which engine revision and platform produced this payload.
+    # Without it, "20/45" cannot be tied to a commit, which is the first
+    # question asked when a regression appears.
+    report["provenance"] = {
+        "run_id": nightly_summary.get("runId", ""),
+        "native_config": nightly_summary.get("nativeConfig", ""),
+        "timestamp": nightly_summary.get("timestamp"),
+        "build_number": build_number,
     }
 
     for asm in assemblies:
@@ -495,12 +757,18 @@ def main() -> int:
     if not report_dir.exists():
         print(f"ERROR: Report directory not found: {report_dir}")
         return 1
-    if not (report_dir / "per-chunk").exists():
-        print(f"WARNING: {report_dir}/per-chunk/ not found — no chunk results?")
+    # NOTE: the absence of per-chunk/ is NOT a problem under the Route-3 CLI —
+    # it never creates that tree.  Only complain when we also have no summary,
+    # i.e. when there is genuinely nothing to publish.
+    if not (report_dir / "per-chunk").exists() and not read_nightly_summary(report_dir) \
+            and not parse_legacy_summary_md(report_dir):
+        print(f"WARNING: no per-chunk/ tree and no nightly-result.json under {report_dir} "
+              f"— nothing to publish")
 
     # Step 1: Build nightly-data JSON
     print(f"\n  Phase 1: Building nightly-data...")
-    nightly_data = build_nightly_data(foundation_dir, report_dir, args.date_tag, run_tag)
+    nightly_data = build_nightly_data(foundation_dir, report_dir, args.date_tag,
+                                     run_tag, args.build_number)
 
     data_path = output_dir / f"nightly-data-{date_tag_full}.json"
     data_path.write_text(
@@ -513,6 +781,15 @@ def main() -> int:
     print(f"  [publish] {len(nightly_data['dlls'])} DLLs, "
           f"Fact: {summary['fact_passed']}/{summary['fact_total']} ({fact_pct:.1f}%), "
           f"BMK: {summary['benchmark_methods']} methods")
+    if "chunk_passed" in summary:
+        print(f"  [publish] Chunks: {summary['chunk_passed']}/{summary.get('chunk_total', 0)} passed, "
+              f"{summary.get('chunk_failed', 0)} failed")
+        if summary.get("error_classes"):
+            classes = ", ".join(f"{k}={v}" for k, v in summary["error_classes"].items())
+            print(f"  [publish] Error classes: {classes}")
+    if summary.get("summary_source") == "derived-from-per-chunk":
+        print("  [publish] WARNING: no nightly-result.json found — chunk metrics are "
+              "derived from per-chunk data only and may be empty")
 
     # Step 2: Ingest into Report API
     if not args.skip_ingest:

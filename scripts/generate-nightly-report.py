@@ -54,6 +54,25 @@ def fmt_ns_to_ms(ns: int) -> str:
     return f"{ns / 1e6:.1f} ms"
 
 
+def _chunk_profile_summary(chunk: dict) -> dict:
+    """Return the chunk's profile summary block.
+
+    Verified against real engine output: `profile.json` is
+    {exitCode, nativeConfig, entryCount, profileData, summary, sectionSizes} —
+    the metrics live under `summary`, NOT at the top level.  Reading
+    `profile.totalNurseryAllocBytes` (as this file previously did) always
+    yielded 0, which is why the memory card was permanently empty.  Tolerate a
+    flat layout too so an older payload still renders.
+    """
+    prof = chunk.get("profile") or {}
+    if not isinstance(prof, dict):
+        return {}
+    inner = prof.get("summary")
+    if isinstance(inner, dict):
+        return inner
+    return prof
+
+
 def compute_dll_metrics(dll_data: dict) -> dict:
     """Extract aggregated metrics from a single DLL's data."""
     chunks = dll_data.get("chunks", {})
@@ -63,11 +82,31 @@ def compute_dll_metrics(dll_data: dict) -> dict:
 
     bmk = sum(c.get("benchmark", {}).get("methodCount", 0) for c in chunks.values() if "benchmark" in c)
 
-    hot_p = sum(c.get("hotupdate", {}).get("passCount", 0) for c in chunks.values() if "hotupdate" in c)
-    hot_t = sum(c.get("hotupdate", {}).get("patchCount", 0) for c in chunks.values() if "hotupdate" in c)
+    # hotupdate.json carries `passed`/`failed` (verified against 114 real
+    # samples); the old `passCount`/`patchCount` keys never existed, so the
+    # HotUpdate column was always "-".  Keep the legacy names as a fallback.
+    hot_p = hot_t = 0
+    for c in chunks.values():
+        hot = c.get("hotupdate")
+        if not isinstance(hot, dict):
+            continue
+        p = hot.get("passed", hot.get("passCount"))
+        f = hot.get("failed")
+        if p is None:
+            continue
+        hot_p += p
+        if f is None:
+            hot_t += hot.get("patchCount", p)
+        else:
+            hot_t += p + f
 
-    mem_alloc = sum(c.get("profile", {}).get("totalNurseryAllocBytes", 0) for c in chunks.values() if "profile" in c)
-    mem_gc = sum(c.get("profile", {}).get("totalGcPauseNs", 0) for c in chunks.values() if "profile" in c)
+    mem_alloc = mem_gc = 0
+    for c in chunks.values():
+        if "profile" not in c:
+            continue
+        ps = _chunk_profile_summary(c)
+        mem_alloc += ps.get("totalNurseryAllocBytes", 0)
+        mem_gc += ps.get("totalGcPauseNs", 0)
 
     return {
         "fact_passed": fact_p, "fact_total": fact_t,
@@ -99,6 +138,7 @@ def generate_report(data: dict, build_number: str = "",
                     baseline_data: dict | None = None) -> str:
     summary = data.get("summary", {})
     dlls = data.get("dlls", {})
+    chunk_status = data.get("chunk_status", {}) or {}
     date_tag = data.get("date_tag", datetime.now().strftime("%Y%m%d-%H%M%S"))
 
     baseline_dlls = baseline_data.get("dlls", {}) if baseline_data else {}
@@ -316,8 +356,72 @@ def generate_report(data: dict, build_number: str = "",
 </div>"""
 
     no_data_warn = ""
-    if no_data_count > 0:
+    if no_data_count > 0 and not chunk_status:
         no_data_warn = f'<div class="no-data-warn">⚠️ {no_data_count} assemblies have no test data — possibly new or skipped</div>'
+
+    # ── Chunk pass + failure attribution (from nightly-result.json) ──
+    # The old report could only show fact %; a build that failed at the BUILD
+    # stage has no fact data at all, so a 0/45 run rendered as "no data" with
+    # no indication of WHY.  These two cards close that gap.
+    chunk_section = ""
+    if chunk_status:
+        cp = summary.get("chunk_passed", 0)
+        ct = summary.get("chunk_total", 0)
+        cf = summary.get("chunk_failed", 0)
+        cs = summary.get("chunk_stalled", 0)
+        cp_pct = (cp / ct * 100) if ct else 0
+        chunk_section += f"""
+<div class="grid">
+  <div class="card">
+    <h2>Chunk 构建</h2>
+    <div class="value {'pass' if cp == ct else 'fail'}">{cp}/{ct}</div>
+    <div class="sub">chunks passed ({cp_pct:.1f}%){f' · {cs} stalled' if cs else ''}</div>
+  </div>
+  <div class="card">
+    <h2>失败数</h2>
+    <div class="value {'pass' if cf == 0 else 'fail'}">{cf}</div>
+    <div class="sub">chunks failed</div>
+  </div>
+</div>"""
+
+    error_class_section = ""
+    error_classes = summary.get("error_classes") or {}
+    if error_classes:
+        total_err = sum(error_classes.values())
+        rows = "".join(
+            f"<tr><td>{k}</td><td>{v}</td>"
+            f"<td>{(v / total_err * 100) if total_err else 0:.0f}%</td></tr>"
+            for k, v in sorted(error_classes.items(), key=lambda kv: -kv[1])
+        )
+        error_class_section += f"""
+<div class="card regression-warn">
+  <h2>🔴 失败归因 (error class)</h2>
+  <p><strong>{total_err}</strong> 个失败 chunk 按原因分类：</p>
+  <table style="margin-top:8px;max-width:520px">
+    <thead><tr><th>Error class</th><th>数量</th><th>占比</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+
+    # Named failing chunks per bucket — turns "8 csharp-error" into a worklist.
+    failing_chunks = summary.get("failing_chunks") or {}
+    _BUCKET_LABEL = {
+        "translation_defect": "translation-defect (codegen 问题)",
+        "infra": "infra / timeout (环境问题)",
+        "code_defect": "code-defect / crash",
+        "unknown": "未分类",
+    }
+    failing_section = ""
+    for bucket, keys in failing_chunks.items():
+        if not keys:
+            continue
+        label = _BUCKET_LABEL.get(bucket, bucket)
+        items = "".join(f"<li><code>{k}</code></li>" for k in keys)
+        failing_section += f"""
+<div class="card">
+  <h2>{label} ({len(keys)})</h2>
+  <ul style="margin:8px 0 0 16px;font-size:.82rem;columns:2">{items}</ul>
+</div>"""
 
     # ── Baseline aggregates for summary cards ──
     bl_summary = baseline_data.get("summary", {}) if baseline_data else {}
@@ -459,7 +563,13 @@ tr.fail td {{ background:#fef2f2; }}
   </div>
 </div>
 
+{chunk_section}
+
+{error_class_section}
+
 {regression_section}
+
+{failing_section}
 
 <table>
 <thead><tr>
