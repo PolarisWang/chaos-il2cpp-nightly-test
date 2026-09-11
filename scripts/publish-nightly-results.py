@@ -21,7 +21,7 @@ Usage:
         [--api-url http://report-api:8000] \\
         [--minio-endpoint http://chaos-minio:9000] \\
         [--report-server-dir /var/lib/report-server/daily] \\
-        [--skip-ingest] [--skip-minio] [--skip-html]
+        [--skip-ingest] [--skip-minio] [--skip-html] [--skip-report-server]
 """
 
 import argparse
@@ -718,6 +718,12 @@ def main() -> int:
     parser.add_argument("--report-server-dir",
                         default="/var/lib/report-server/daily",
                         help="Report server daily directory for nginx")
+    parser.add_argument("--skip-report-server", action="store_true",
+                        help="Skip copying into --report-server-dir. Use on any "
+                             "platform that is not the report server: the default "
+                             "is a Linux path, so on Windows this step creates a "
+                             "bogus \\var\\lib\\... tree on the current drive and "
+                             "still reports success.")
     parser.add_argument("--skip-ingest", action="store_true",
                         help="Skip Report API ingestion")
     parser.add_argument("--skip-minio", action="store_true",
@@ -810,7 +816,7 @@ def main() -> int:
         generate_html_report(data_path, html_path, args.build_number, baseline)
 
     # Step 5: Copy to report server
-    if args.report_server_dir:
+    if args.report_server_dir and not args.skip_report_server:
         print(f"\n  Phase 5: Copying to report server...")
         report_server = Path(args.report_server_dir)
         report_server.mkdir(parents=True, exist_ok=True)

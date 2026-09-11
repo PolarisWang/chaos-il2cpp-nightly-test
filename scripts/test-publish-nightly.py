@@ -349,7 +349,45 @@ def main() -> int:
             check("empty/None input is a no-op",
                   dmod.upsert_error_classes("x", None) is None)
 
-        print("\n[10] Jenkinsfile sanity")
+        print("\n[10] --skip-report-server (Windows must not write a Linux path)")
+        if TRANSLATION.is_dir():
+            out = tmp / "out-srs"
+            # A Windows-style default (a Linux absolute path) must not be
+            # created on whatever drive is current. Point --report-server-dir at
+            # a path under tmp and assert the flag suppresses the copy entirely.
+            rs = tmp / "fake-report-server"
+            r = subprocess.run(
+                [sys.executable, str(PUB),
+                 "--report-dir", str(a),
+                 "--foundation-dir", str(TRANSLATION),
+                 "--output-dir", str(out),
+                 "--date-tag", "20260911", "--run-tag", "run1",
+                 "--report-server-dir", str(rs),
+                 "--skip-ingest", "--skip-minio", "--skip-report-server"],
+                capture_output=True, text=True, timeout=300,
+            )
+            check("--skip-report-server accepted", r.returncode == 0, r.stderr[-300:])
+            check("--skip-report-server suppressed Phase 5",
+                  "Phase 5" not in r.stdout, r.stdout[-300:])
+            check("--skip-report-server created no directory", not rs.exists())
+            # Without the flag the copy still happens (regression guard).
+            rs2 = tmp / "real-report-server"
+            r2 = subprocess.run(
+                [sys.executable, str(PUB),
+                 "--report-dir", str(a),
+                 "--foundation-dir", str(TRANSLATION),
+                 "--output-dir", str(tmp / "out-srs2"),
+                 "--date-tag", "20260911", "--run-tag", "run1",
+                 "--report-server-dir", str(rs2),
+                 "--skip-ingest", "--skip-minio"],
+                capture_output=True, text=True, timeout=300,
+            )
+            check("without the flag Phase 5 still runs",
+                  r2.returncode == 0 and "Phase 5" in r2.stdout and rs2.exists())
+        else:
+            skip("--skip-report-server checks", "engine tree not available")
+
+        print("\n[11] Jenkinsfile sanity")
         # In CI (Jenkins Init) only scripts/ is downloaded into the workspace —
         # there is no checkout, so no Jenkinsfile.  Skip loudly rather than
         # raising FileNotFoundError and failing the whole suite.
@@ -377,6 +415,19 @@ def main() -> int:
                   "test-publish-nightly.py" in jf)
             check("self-test gate stage present",
                   "Publish-Chain Self-Test" in jf)
+            # Bug seen on the real Windows agent: only the publisher was
+            # downloaded, so the HTML step warned "generate-nightly-report.py
+            # not found" and produced JSON only.
+            check("windows downloads BOTH publish scripts",
+                  jf.count("generate-nightly-report.py") >= 2,
+                  f"count={jf.count('generate-nightly-report.py')}")
+            # Bug seen on the real Windows agent: `set "PUBRC=%ERRORLEVEL%"`
+            # inside a parenthesised block expanded at parse time, so the exit
+            # code came back empty and failures were invisible.
+            check("windows uses delayed expansion for the exit code",
+                  "EnableDelayedExpansion" in jf and "!ERRORLEVEL!" in jf)
+            check("windows forwards --skip-report-server",
+                  "--skip-report-server" in jf)
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

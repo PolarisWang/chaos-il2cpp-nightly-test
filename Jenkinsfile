@@ -431,22 +431,18 @@ sh """
                                 set "PUB=%winArtifacts%\\publish-nightly-results.py"
                                 set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/%GIT_COMMIT%"
                                 if "%GIT_COMMIT%"=="" set "RAWT=https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/main"
-                                echo === [win-x64] fetching publish helper from %RAWT% ===
+                                echo === [win-x64] fetching publish helpers from %RAWT% ===
+                                REM BOTH scripts are needed: publish-nightly-results.py
+                                REM shells out to generate-nightly-report.py for the HTML
+                                REM report. Downloading only the former produced a
+                                REM "generate-nightly-report.py not found, skipping HTML
+                                REM generation" warning and a JSON-only result.
+                                set "GENPY=%winArtifacts%/generate-nightly-report.py"
                                 curl -sfL --max-time 60 -o "%PUB%" "%RAWT%/scripts/publish-nightly-results.py"
-                                REM Verify with `call python`, NOT `python`, and capture the
-                                REM exit code into a variable immediately. Two bat traps:
-                                REM  1. A bare `python -m py_compile` re-parses against
-                                REM     %RAWT%'s definition and clobbers the real exit code
-                                REM     with its own; `call` forces a second parse after
-                                REM     the block is entered, which is what we want here.
-                                REM  2. %ERRORLEVEL% inside a parenthesised block expands
-                                REM     when the block is PARSED, not when each line runs,
-                                REM     so reading it after the python call yields the
-                                REM     pre-block value. Copying it to a plain variable
-                                REM     right after the call works because that line is
-                                REM     still parsed lazily within the block.
-                                echo === [win-x64] verify publish helper ===
-                                call python -m py_compile "%PUB%"
+                                curl -sfL --max-time 60 -o "%GENPY%" "%RAWT%/scripts/generate-nightly-report.py"
+                                REM Syntax-gate both downloads (same reasoning as Init):
+                                REM a truncated body on a flaky link must fail loudly.
+                                call python -m py_compile "%PUB%" "%GENPY%"
                                 set "PYCHECK=%ERRORLEVEL%"
                                 if not "%PYCHECK%"=="0" (
                                     echo === [win-x64] WARNING: publish helper is not valid Python; skipping publish ===
@@ -459,9 +455,21 @@ sh """
                                     REM reads its own mounted data dir on the Linux side, so
                                     REM Windows publishes a JSON artifact and relies on
                                     REM archiveArtifacts below to reach the controller.
+                                    REM --skip-report-server: that option's default is the
+                                    REM LINUX path /var/lib/report-server/daily, so on
+                                    REM Windows the copy would create a bogus \var\lib\...
+                                    REM tree on the current drive and still report success.
                                     REM Single-line continuations (^): Jenkins' bat treats
                                     REM each physical line as its own command, so a
                                     REM multi-line construct here is a known failure mode.
+                                    REM EnableDelayedExpansion is scoped to this script and
+                                    REM makes !ERRORLEVEL! expand at RUN time — the only
+                                    REM reliable way to read it inside a parenthesised
+                                    REM block (%ERRORLEVEL% expands when the block is
+                                    REM PARSED, yielding a stale value; a `set` inside the
+                                    REM block has the same problem, which is how the exit
+                                    REM code came back empty).
+                                    setlocal EnableDelayedExpansion
                                     python "%PUB%" ^
                                         --report-dir "%REPORT%\\summary" ^
                                         --foundation-dir "%winBoomin%\\tests\\e2e\\translation" ^
@@ -469,8 +477,9 @@ sh """
                                         --date-tag "%DATE_TAG%-win" ^
                                         --run-tag "${RUN_TAG}" ^
                                         --build-number "%BUILD_NUMBER%" ^
-                                        --skip-ingest --skip-minio
-                                    set "PUBRC=%ERRORLEVEL%"
+                                        --skip-ingest --skip-minio --skip-report-server
+                                    set "PUBRC=!ERRORLEVEL!"
+                                    endlocal & set "PUBRC=%PUBRC%"
                                     echo === [win-x64] publish exit=%PUBRC% ===
                                 )
 
