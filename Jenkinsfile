@@ -376,11 +376,8 @@ sh """
                                     --native-config "${BUILD_CONFIG}"
 
                                 echo === [win-x64] Pipeline Complete ===
-                                REM ---- Debug surface (controller cannot SSH into this box) ----
-                                REM 1) where did the report land? 2) dump the summary; 3) dump the
-                                REM per-chunk result json which carries the error_class; 4) dump the
-                                REM newest .log anywhere under the report tree (that is where the
-                                REM nightly CLI puts each chunk's captured stderr).
+                                REM ---- Debug surface (controller cannot SSH into this box,
+                                REM but the maintainer can — keep this minimal & robust). ----
                                 set "REPORT=${winBoomin}\\tests\\e2e\\nightly-build-report"
                                 echo === [win-x64] report tree ===
                                 if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
@@ -388,17 +385,6 @@ sh """
                                 if exist "%REPORT%\\summary\\nightly-summary.md" type "%REPORT%\\summary\\nightly-summary.md"
                                 echo === [win-x64] nightly-result.json ===
                                 if exist "%REPORT%\\summary\\nightly-result.json" type "%REPORT%\\summary\\nightly-result.json"
-                                echo === [win-x64] newest captured log ===
-                                set "NEWEST="
-                                for /f "delims=" %%f in ('dir /s /b /o-d "%REPORT%\\*.log" 2^>nul') do if not defined NEWEST set "NEWEST=%%f"
-                                if defined NEWEST (echo --- %NEWEST% --- & type "%NEWEST%") else (echo [win-x64] no .log files found under %REPORT%)
-                                REM Cache-busted: also dump the SDK fingerprint + the first
-                                REM chunk run.log from the CURRENT run + cmake's own error, so
-                                REM the chunk-level SDK failure is visible without SSH.
-                                echo === [win-x64] chunk-pipeline log of current run ===
-                                for /f "delims=" %%d in ('dir /b /ad /o-d "%REPORT%\\logs" 2^>nul') do if not defined CUR run set "CUR=%%d"
-                                if defined CUR (echo current run dir: %CUR%)
-                                if defined CUR for /f "delims=" %%f in ('dir /s /b "%REPORT%\\logs\\%CUR%\\*.log" 2^>nul') do @if not defined SHOWN2 set SHOWN2=1 & (echo ===== %%f ===== & type "%%f")
                             """
                         }
                     }
