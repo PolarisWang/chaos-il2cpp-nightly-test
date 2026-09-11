@@ -251,6 +251,20 @@ sh """
                         # Run the Route-3 nightly CLI inside the pristine engine tree.
                         cd "${engTree}/tests/e2e"
 
+                        # The `git archive` tree has NO .git/ dir, so the engine's
+                        # _detect_repo_root() (which walks up looking for a .git
+                        # marker) falls back to Path.cwd() and then mis-resolves
+                        # BOTH roots:
+                        #   foundation_root()   → <cwd>/testing/foundation-dll (missing)
+                        #   testing_tree_root() → <cwd>  (no _pipeline/ there)
+                        # Both are file-not-found / import failures.  Point the
+                        # engine at the real dirs via its two documented env
+                        # overrides (see tests/e2e/verification/_path.py).
+                        # Verified locally: with these set, worklist discovery
+                        # returns the expected 45 chunks in an archive tree.
+                        export CHAOS_FOUNDATION_DLL="${engTree}/tests/e2e/translation"
+                        export CHAOS_TESTING_DIR="${engTree}/tests/e2e/verification"
+
                         echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
                         python3 -m verification.nightly.cli \
