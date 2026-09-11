@@ -1,12 +1,22 @@
-# Windows Nightly Build — 问题交接文档 (v3)
+# Windows Nightly Build — 问题交接文档 (v4)
 
-> 给接手修复的 agent。**截止 2026-09-10，build 260/261 错误分布稳定：native-linker-error=39, unknown=5, atg-combined-cs=1**。SSH 通道可用。本机 batch review 正在跑 73 个未审提交的补审。本文档包含完整架构、已修复项、当前根因、复现方法和观测通道。
+> 给接手修复的 agent。**截止 2026-09-11，build 262 错误分布：native-linker-error=5,
+> csharp-error=8, atg-combined-cs=7, unknown=5（20/45 passed）**。SSH 通道可用。
+>
+> **v4 变更**：发布链路整体修复 —— Windows 数据现在能回流到 Jenkins controller。
+> 根因不是「Windows 没回传」，而是**整条链路从来没有数据生产者**（详见 §3.0）。
+> 详见 `NIGHTLY_BUILD_REPORT.md`。
 
 ---
 
 ## 0. 一句话总结
 
-Windows nightly（`chaos-il2cpp-nightly` 的 `windows-x64` 分支）**45/45 chunk 全红**，当前阻塞点是 **39 个 native-linker-error**（MSVC 链接 `entry.exe` 时找不到 Windows CRT 符号）+ 5 个 unknown + 1 个 atg-combined-cs。ATG 并发锁和 DOTNET_ROOT 均已修复，C# 编译问题（csharp-error）已在引擎侧修掉。剩下唯一的阻塞是 **TPG 内嵌的 cmake 调用没有加载 vcvars64**。
+Windows nightly（`chaos-il2cpp-nightly` 的 `windows-x64` 分支）从 0/45 提升到
+**20/45 passed**。剩余 25 个失败中 **15 个是 ATG 生成的 `CombinedSubjects.cs`
+在 net8.0 下引用 net10 API**（引擎侧问题），5 个 native-linker-error（corecrt 已修，
+剩新符号），5 个 unknown。
+
+**流水线侧（本仓库）的问题已全部修复**：结果产出、归因维度、回传、回归对比。
 
 ---
 
@@ -30,12 +40,23 @@ Linux master 10.10.1.173  (Jenkins, docker: chaos-master, 总调度)
 | Windows agent 用户名 | `booming\admin140`（**注意不是** haochuan.wang） |
 
 ### nightly 关键路径
-- Linux 分支：Jenkinsfile 用 `git archive origin/main | tar -x` 抽纯净引擎树→跑 nightly→publish
-- Windows 分支：bat 脚本自动 `git fetch --depth=1 + reset --hard origin/main` → 加载 vcvars64 → SDK 预检 → `python -m verification.nightly.cli`
+- Linux 分支：`git archive origin/main | tar -x` 抽纯净引擎树→跑 nightly→publish
+- Windows 分支：bat 自动 `git fetch --depth=1 + reset --hard origin/main` → 加载
+  vcvars64 → SDK 预检 → `verification.nightly.cli` → **下载 publish 脚本 → publish →
+  `archiveArtifacts`**
+
+### 数据产出链路（v4 修复后）
+
+```
+verification.nightly.cli
+  └─ aggregate_reports() → <report_dir>/summary/nightly-result.json   ← 唯一事实源
+       └─ publish-nightly-results.py ─→ nightly-data-*-win-runN.json + HTML
+            └─ archiveArtifacts → Jenkins controller
+```
 
 ---
 
-## 2. ✅ 已修复的（共 9 项，勿重复排查）
+## 2. ✅ 已修复的（共 13 项，勿重复排查）
 
 | # | 问题 | 修复 | 位置 |
 |---|------|------|------|
@@ -48,20 +69,29 @@ Linux master 10.10.1.173  (Jenkins, docker: chaos-master, 总调度)
 | 7 | cmake 无 MSVC 环境(SDK 预构建) | **引擎修复**：`build_presets.py` 用 vcvars64 包裹 cmake | `build_presets.py` (commit `abc57c561`) |
 | 8 | ATG 多进程并发锁 | **引擎修复**：`ensure_tool_built` 加跨进程锁 | `tool_helpers.py` (build 258 起生效) |
 | 9 | `Argument list too long` (code-review) | 超长文件列表改走 temp file 避免 ARG_MAX | `review-with-claude.sh` (commit `bd5e836`) |
+| 10 | 原生 linker 39 个错误 | **引擎修复**：`FindMsvcCompiler()` 版本错配 | 引擎 `13cc2c55d` |
+| 11 | **发布链路契约断裂**（数据全空） | 以 `summary/nightly-result.json` 为事实源 + 旧版 markdown 回退 | `publish-nightly-results.py` (v4) |
+| 12 | **Windows 结果不回传** | 接入 publish + 本 node `archiveArtifacts` | `Jenkinsfile` (v4) |
+| 13 | **`--baseline` 从不生效** | `%Y%mdd` → `%Y%m%d` | `Jenkinsfile` (v4) |
 
 ---
 
 ## 3. 🔴 当前未解根因
 
-Build 262（2026-09-11，引擎 HEAD `13cc2c55d`）结果分布：
+### 3.0 ✅ 已修复：为什么 Windows「没跑出数据」
 
-| Error class | 数量 | 含义 |
-|---|---|---|
-| **native-linker-error** | **5** (from 39) | ✅ P1 `corecrt_terminate.h` 修复显著见效 —— 剩余 5 个属于新的不同符号 |
-| **csharp-error** | **8** | ATG 生成的 `CombinedSubjects.cs` 引用 net10 API 但 net8.0 不存在 |
-| **atg-combined-cs** | **7** | CombinedSubjects 合成异常 |
-| **unknown** | **5** | 其他原因 |
-| **总计** | **20/45 passed** | ⬆️ 从 0/45 大幅提升 |
+**根因不是 Windows 回传问题，而是整条发布链路没有生产者。**
+
+`publish-nightly-results.py` 读 `<report_dir>/per-chunk/` 和 `<report_dir>/reports/`，
+但这两个目录是**已删除的 legacy `nightly_runner.ReportCollector`** 的产物。
+当前 Route-3 CLI 只写 `<report_dir>/summary/{nightly-result.json, nightly-summary.md}`
+（`aggregate.py:102-156`）。三者对不上：
+
+- `read_chunk_results()` / `read_aggregate_reports()` 恒返回空 → summary 全 0
+- 但 `discover_assemblies()` 扫 `translation/`（真实存在）→ `total_dlls=45` 正确
+- 于是产出**格式合法、内容全空**的报告，正常 ingest、正常发飞书卡
+
+**Linux 侧也一直如此。** 修复见 §2 #11。
 
 ### 3.1 ✅ 已修复：native-linker-error 39 → 5
 
@@ -77,9 +107,10 @@ fix_strategy: clPath 同源推导 include + NumericVersionKey + SDK 有效性过
 
 ### 3.2 剩余 5 个 native-linker-error（新问题）
 
-已不是 corecrt 问题。引擎 handoff 文档 §5 提到"2 个 chunk 因 GC 压力符号未链接失败"，需读取这 5 个 chunk 的最新 run.log 确认新符号。
+已不是 corecrt 问题。需读取这 5 个 chunk 的最新 run.log 确认新符号。
+**现在可直接从 `nightly-data-*.json` 的 `summary.error_classes` 读取，无需 SSH grep。**
 
-### 3.3 csharp-error（8 个）+ atg-combined-cs（7 个）
+### 3.3 csharp-error（8 个）+ atg-combined-cs（7 个）—— 主要阻塞
 
 ATG 生成的 `CombinedSubjects.cs` 在 net8.0 编译时报 `error CS0117: Enumerable 未包含 AggregateBy/CountBy`。
 两边一致（Linux 同样），需决策：放弃 net8.0 兼容？还是让 ATG 不生成 net10 特有方法的 wrapper？
@@ -87,8 +118,12 @@ ATG 生成的 `CombinedSubjects.cs` 在 net8.0 编译时报 `error CS0117: Enume
 ### 3.4 已知约束
 - 引擎工作树卫生：已清理（`git reset --hard origin/main && git clean -fdx`）。改引擎代码请在干净 checkout 上做。
 - code-review 可靠性已修复（锁泄漏、ARG_MAX、pipefail、monitor 增强，commit `93c209d` + `2eeec32`）
-- 本机补审 73 个未审提交已完成 37 个（结果已发飞书卡），剩余 36 个后台续跑
 - Windows SSH 通道：`ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197'`（公钥免密）
+- **~~内存指标恒 0~~** ✅ 已修：真实结构是 `profile.summary.*`，且
+  `hotupdate.json` 用 `passed`/`failed`（无 `passCount`/`patchCount`）。
+  实测后 hotupdate `0 → 12565`、mem_alloc `0 → 282032`。
+- **~~`error_classes` 未入库~~** ✅ 已修：`report-server` 新增 `error_classes` 表
+  + `GET /api/error-classes`、`/api/error-classes/trends`
 
 ---
 
@@ -102,11 +137,20 @@ curl -u admin:admin -X POST \
   --data-urlencode 'BUILD_CONFIG=profile'
 ```
 
-或在 Linux 干净树上手动跑（观察同样的 39 个 linker error）：
+或在 Linux 干净树上手动跑：
 ```bash
 cd /home/debian/agent/booming-il2cpp/tests/e2e
 CHAOS_FOUNDATION_DLL=$PWD/translation python3 -m verification.nightly.cli \
   --max-workers 4 --native-config profile
+```
+
+单独验证发布链路（不跑 nightly）：
+```bash
+python3 scripts/publish-nightly-results.py \
+  --report-dir /home/debian/agent/booming-il2cpp/tests/e2e/nightly-build-report/summary \
+  --foundation-dir /home/debian/agent/booming-il2cpp/tests/e2e/translation \
+  --output-dir /tmp/pub --date-tag 20260911 --run-tag run1 \
+  --build-number 265 --skip-ingest --skip-minio
 ```
 
 ---
@@ -130,17 +174,37 @@ ssh -i /root/.ssh/id_win_agent 'booming\admin140@10.10.9.197' \
   "type \"D:\\agent\\workspace\\booming-il2cpp\\tests\\e2e\\nightly-build-report\\logs\\$RID\\System.Collections.Immutable\\global-ns\\run.log\"" 2>/dev/null | grep -aE "unresolved external|fatal error|LNK|error CS" | sort -u
 ```
 
+**v4 起不再需要手工 grep**：失败归因已写入
+`nightly-data-<date>-win-runN.json` 的 `summary.error_classes`，并在 HTML 报告的
+「失败归因」卡片中按类展示，同时入库 `report-server`（`GET /api/error-classes`）。
+
 ---
 
-## 6. 状态快照（2026-09-10 21:20 CST）
+## 6. 发布链路自测与 CI 门禁
+
+```bash
+# 全量（需引擎树，跑 e2e）
+python3 scripts/test-publish-nightly.py --require-e2e
+
+# 纯单元（无引擎树也能跑，会显式标注 SKIP）
+CHAOS_ENGINE_DIR=/nonexistent python3 scripts/test-publish-nightly.py
+```
+
+Jenkinsfile 的 `Publish-Chain Self-Test` stage 在昂贵构建**之前**跑这个套件。
+**改发布链路（`publish-nightly-results.py` / `generate-nightly-report.py` /
+`report-server`）时必须同步更新它** —— 它是唯一能挡住
+「报告静默变空」这类回归的东西（那个 bug 曾让每晚都发布空报告而构建全绿）。
+
+## 7. 状态快照（2026-09-11）
 
 | 项 | 值 |
 |---|---|
-| 最近 Windows build | **261**（FAILURE, 0/45 passed） |
-| 错误分布 | native-linker-error=39, unknown=5, atg-combined-cs=1 |
-| Linux 端 | 受 ATG/csharp-error 影响（6/45 passed，后续引擎修复待验证） |
-| 引擎 main 最新 | `5beb64de3`（fix tests stub DLL path） |
-| 补审 73 个 commit | 进行中（12/73 完成） |
-| code-review 锁 | 已清，ARG_MAX 修复已推送 |
+| 最近 Windows build | 262（20/45 passed） |
+| 错误分布 | csharp-error=8, atg-combined-cs=7, native-linker-error=5, unknown=5 |
+| **流水线侧（本仓库）** | ✅ 全部修复（13 项） |
+| 自测套件 | ✅ 67/67 |
+| 剩余阻塞 | ⬜ 引擎侧：TFM 兼容(15) + 新 linker 符号(5) |
 | SSH 通道 | ✅ 通（`booming\admin140@10.10.9.197`，公钥） |
-| 交接文档 | v3 版，本文件 |
+
+---
+
