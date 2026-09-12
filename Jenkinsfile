@@ -74,6 +74,14 @@ pipeline {
         BOOMING_DIR = "${BOOMING_DIR}"
         DATE_TAG = "${DATE_TAG}"
         RUN_TAG  = "${RUN_TAG}"
+        // Platform-suffixed tags MUST live in env, not only in the top-level
+        // `def`s above. Inside a node() block the script is CPS-serialized and
+        // the binding loses plain `def` variables — the notify step died with
+        //   MissingPropertyException: No such property: LINUX_DATE_TAG
+        // and the file it wrote came out as "nightly-data--run1.json" because
+        // the variable silently resolved to empty. env.* survives into node().
+        LINUX_DATE_TAG = "${LINUX_DATE_TAG}"
+        WIN_DATE_TAG   = "${WIN_DATE_TAG}"
         REPORT_API_URL = "http://report-api:8000"
         SONAR_HOST_URL = "http://sonarqube:9000"
         FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/9ba5e264-6486-4ba6-abd3-094bb4d923ff"

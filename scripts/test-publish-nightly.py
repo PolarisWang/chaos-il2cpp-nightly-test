@@ -654,6 +654,18 @@ def main() -> int:
             # field (linux 6e2049c = CI repo, windows e3992ccc5 = engine). Both
             # branches must therefore pass the engine revision explicitly.
             check("linux passes --engine-sha", "--engine-sha" in jf)
+            # Top-level `def` variables do NOT survive into a node() block — the
+            # script is CPS-serialized and the binding loses them. The notify step
+            # died with
+            #   MissingPropertyException: No such property: LINUX_DATE_TAG
+            # and wrote "nightly-data--run1.json" because the variable resolved to
+            # empty. They must be published through environment{} as well.
+            env_block = re.search(r'environment \{(.*?)\n    \}', jf, re.S)
+            env_txt = env_block.group(1) if env_block else ""
+            check("LINUX_DATE_TAG is published to env (survives node())",
+                  "LINUX_DATE_TAG" in env_txt, "not in environment{}")
+            check("WIN_DATE_TAG is published to env",
+                  "WIN_DATE_TAG" in env_txt, "not in environment{}")
             check("linux passes --platform", '--platform "linux"' in jf)
             check("windows passes --engine-sha", jf.count("--engine-sha") >= 2,
                   f"count={jf.count('--engine-sha')}")
