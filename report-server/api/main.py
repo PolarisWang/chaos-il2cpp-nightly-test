@@ -214,16 +214,29 @@ def ingest_data(date_tag: str = Query(..., description="Date tag e.g. 20260614")
         "memory_alloc_bytes": summary.get("memory_alloc_bytes", 0),
         "memory_gc_pause_ns": summary.get("memory_gc_pause_ns", 0),
         "memory_fast_path_rate": summary.get("memory_fast_path_rate", 0.0),
+        # The fields the Route-3 CLI actually populates. Without these the row
+        # had no record of how many chunks passed, so no trend or health query
+        # could be answered from the index.
+        "chunk_passed": summary.get("chunk_passed", 0),
+        "chunk_total": summary.get("chunk_total", 0),
+        "platform": ("windows" if date_tag.endswith("-win")
+                     else "linux" if date_tag.endswith("-linux") else "linux"),
+        "engine_sha": (data.get("provenance", {}) or {}).get("engine_sha", ""),
     })
 
-    # Failure attribution (new in v4).  A "*-win" date tag marks the Windows
-    # branch so the two platforms' error classes do not overwrite each other.
+    # Failure attribution. Platform comes from the tag suffix: both branches
+    # now carry an explicit one ("-win" / "-linux"), so windows and linux rows
+    # for the same night cannot overwrite each other. A tag with neither suffix
+    # is a pre-3b payload and is conservatively attributed to linux, which is
+    # what it was.
     if summary.get("error_classes"):
-        db.upsert_error_classes(
-            date_tag_val,
-            summary["error_classes"],
-            platform="windows" if date_tag.endswith("-win") else "linux",
-        )
+        if date_tag.endswith("-win"):
+            _plat = "windows"
+        elif date_tag.endswith("-linux"):
+            _plat = "linux"
+        else:
+            _plat = "linux"
+        db.upsert_error_classes(date_tag_val, summary["error_classes"], platform=_plat)
 
     # Per-DLL rows
     for dll_name, dll_data in dlls.items():

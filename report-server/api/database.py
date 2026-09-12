@@ -37,6 +37,15 @@ def init_db():
             memory_alloc_bytes  INTEGER DEFAULT 0,
             memory_gc_pause_ns  INTEGER DEFAULT 0,
             memory_fast_path_rate REAL DEFAULT 0.0,
+            -- Chunk-level outcome and provenance. These are the fields the
+            -- nightly CLI actually populates (fact_*/benchmark/hotupdate are
+            -- always 0 under the Route-3 CLI), so without them the table had no
+            -- record of how many chunks passed and the per-platform trend was
+            -- unanswerable.
+            chunk_passed   INTEGER DEFAULT 0,
+            chunk_total    INTEGER DEFAULT 0,
+            platform       TEXT DEFAULT '',
+            engine_sha     TEXT DEFAULT '',
             created_at     TEXT DEFAULT (datetime('now'))
         );
 
@@ -157,6 +166,22 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_hu_method ON hotupdate_methods(method_name);
     """)
     conn.commit()
+
+    # ── Lightweight column migrations ──
+    # CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+    # a column added here would never appear on an existing DB. That silently
+    # dropped chunk_passed/chunk_total: the ingest computed them and handed them
+    # to upsert_report, but they had no column to land in, so every page and
+    # trend query saw NULL. ALTER TABLE ADD COLUMN is additive and safe to retry,
+    # and sqlite has no "IF NOT EXISTS" for it, hence the PRAGMA check.
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(reports)").fetchall()}
+    for col, decl in (("chunk_passed", "INTEGER DEFAULT 0"),
+                      ("chunk_total", "INTEGER DEFAULT 0"),
+                      ("platform", "TEXT DEFAULT ''"),
+                      ("engine_sha", "TEXT DEFAULT ''")):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE reports ADD COLUMN {col} {decl}")
+    conn.commit()
     conn.close()
 
 
@@ -168,8 +193,10 @@ def upsert_report(summary: dict) -> None:
             (date_tag, build_number, total_dlls, data_dlls,
              fact_passed, fact_total, benchmark_methods,
              hotupdate_passed, hotupdate_total,
-             memory_alloc_bytes, memory_gc_pause_ns, memory_fast_path_rate)
-        VALUES (?,?,?,?, ?,?,?, ?,?,?, ?,?)
+             memory_alloc_bytes, memory_gc_pause_ns, memory_fast_path_rate,
+             chunk_passed, chunk_total, platform, engine_sha)
+        VALUES (?,?,?,?, ?,?,?, ?,?,?, ?,?,
+                ?,?,?,?)
     """, (
         summary["date_tag"],
         summary.get("build_number", ""),
@@ -183,6 +210,10 @@ def upsert_report(summary: dict) -> None:
         summary.get("memory_alloc_bytes", 0),
         summary.get("memory_gc_pause_ns", 0),
         summary.get("memory_fast_path_rate", 0.0),
+        summary.get("chunk_passed", 0),
+        summary.get("chunk_total", 0),
+        summary.get("platform", ""),
+        summary.get("engine_sha", ""),
     ))
     conn.commit()
     conn.close()

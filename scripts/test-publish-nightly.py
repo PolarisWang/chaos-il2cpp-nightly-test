@@ -349,6 +349,16 @@ def main() -> int:
                   len(rows) == 1 and rows[0]["error_class"] == "csharp-error", str(rows))
             check("empty/None input is a no-op",
                   dmod.upsert_error_classes("x", None) is None)
+            # The reports table must record the chunk outcome; without these
+            # columns the ingest computed them and they had nowhere to land, so
+            # no trend or health query could be answered from the index.
+            rcols = {r[1] for r in dmod.get_db().execute(
+                "PRAGMA table_info(reports)").fetchall()}
+            for col in ("chunk_passed", "chunk_total", "platform", "engine_sha"):
+                check(f"reports table has {col}", col in rcols, str(sorted(rcols)))
+            # init_db must be safe to re-run (it runs on every API restart).
+            dmod.init_db()
+            check("init_db is idempotent", True)
 
         print("\n[10] --skip-report-server (Windows must not write a Linux path)")
         if TRANSLATION.is_dir():
@@ -421,10 +431,87 @@ def main() -> int:
             fm = importlib.util.module_from_spec(fspec)
             fspec.loader.exec_module(fm)
 
-            check("artifact name: linux has no suffix",
-                  fm.artifact_name("20260911", "run2", "linux") == "nightly-data-20260911-run2.json")
+            # Both platforms carry an explicit suffix (decision 3b): bare names
+            # for linux made "the linux file" indistinguishable from "the
+            # default file" and already caused the wrong payload to be read.
+            check("artifact name: linux carries -linux",
+                  fm.artifact_name("20260911", "run2", "linux") == "nightly-data-20260911-linux-run2.json")
             check("artifact name: windows is -win suffixed",
                   fm.artifact_name("20260911", "run2", "windows") == "nightly-data-20260911-win-run2.json")
+            # ── Z: absolute-only health verdict ──
+            def P(**kw):
+                base = {"present": True, "chunk_passed": 20, "chunk_total": 45}
+                base.update(kw)
+                return base
+
+            v = fm.verdict({"linux": P(), "windows": P()}, [], ["linux", "windows"])
+            check("Z: all healthy -> green", v["level"] == "green", str(v))
+
+            v = fm.verdict({"linux": P(chunk_passed=0), "windows": P()}, [],
+                           ["linux", "windows"])
+            check("Z: a platform passing 0 -> red", v["level"] == "red", str(v))
+            check("Z: names the dead platform", "linux" in v.get("reason", ""), str(v))
+
+            v = fm.verdict({"linux": P(), "windows": {"present": False}}, ["windows"],
+                           ["linux", "windows"])
+            check("Z: missing platform -> red", v["level"] == "red", str(v))
+
+            v = fm.verdict({"linux": P(), "windows": P()}, [], ["linux", "windows"],
+                           jenkins_result="FAILURE")
+            check("Z: jenkins FAILURE -> red regardless", v["level"] == "red", str(v))
+
+            # Decision 1c: NO percentage threshold. A low-but-nonzero pass rate
+            # must NOT raise the alarm — a threshold picked out of the air goes
+            # off every night once a build settles below it.
+            v = fm.verdict({"linux": P(chunk_passed=1), "windows": P(chunk_passed=1)}, [],
+                           ["linux", "windows"])
+            check("Z: 1/45 is NOT flagged (absolute-only, no threshold)",
+                  v["level"] == "green", str(v))
+
+            # A platform with no chunks at all is not "dead", it's empty.
+            v = fm.verdict({"linux": P(chunk_total=0, chunk_passed=0), "windows": P()}, [],
+                           ["linux", "windows"])
+            check("Z: zero-total platform is not treated as dead",
+                  v["level"] == "green", str(v))
+
+            # ── Y: trend vs previous ──
+            cur = {"linux": P(chunk_passed=20), "windows": P(chunk_passed=25)}
+            prev = {"linux": {"present": True, "chunk_passed": 15, "chunk_total": 45},
+                    "windows": {"present": True, "chunk_passed": 25, "chunk_total": 45}}
+            t = fm.compare_previous(cur, prev)
+            check("Y: delta computed", t["linux"]["delta"] == 5, str(t["linux"]))
+            check("Y: unchanged platform gives 0", t["windows"]["delta"] == 0)
+            check("Y: same_total marked comparable", t["linux"]["same_total"] is True)
+
+            # A different total means the worklist moved — not a like-for-like
+            # comparison, so it must not be rendered as a delta.
+            prev_diff_total = {"linux": {"present": True, "chunk_passed": 15, "chunk_total": 40}}
+            t = fm.compare_previous(cur, prev_diff_total)
+            check("Y: total change -> not a like-for-like delta",
+                  t["linux"]["same_total"] is False, str(t["linux"]))
+
+            # No baseline must read as "首轮", never as "no change".
+            t = fm.compare_previous(cur, None)
+            check("Y: no previous -> marked not comparable",
+                  t["linux"]["comparable"] is False, str(t["linux"]))
+
+            # ── 5b: unknown is folded, and the body leads with the verdict ──
+            local_only = tmp / "only_linux.json"
+            write_json(local_only, {
+                "summary": {"chunk_passed": 0, "chunk_total": 45, "data_dlls": 26,
+                            "error_classes": {"unknown": 43, "atg-combined-cs": 2}},
+                "total_dlls": 25, "provenance": {"engine_sha": "abc"}})
+            pay5 = fm.build_payload("http://127.0.0.1:1/job/x/1", "20260911", "run2",
+                                    local_only, "", ["linux"], previous=None)
+            body5 = "\n".join(pay5["body_lines"])
+            check("body leads with the verdict",
+                  body5.lstrip().startswith(("🔴", "✅", "⚪")), body5[:60])
+            check("actionable class shown as a lead",
+                  "atg-combined-cs" in body5, body5)
+            check("unknown folded into its own subdued line",
+                  "另有 43 个未分类" in body5, body5)
+            check("unknown not listed among the named leads",
+                  "`unknown`" not in body5, body5)
 
             s = fm.summarise({"summary": {"chunk_passed": 20, "chunk_total": 45,
                                           "error_classes": {"csharp-error": 8},

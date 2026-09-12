@@ -22,6 +22,21 @@ def BUILD_CONFIG  = params.BUILD_CONFIG ?: 'profile'
 def ARTIFACTS_DIR = ""
 def DATE_TAG      = new Date().format('yyyyMMdd')
 def RUN_TAG       = (new Date().format('HH') as int) < 8 ? 'run1' : 'run2'
+// Platform suffixes (decision 3b). Linux used to be written BARE
+// (nightly-data-<date>-<run>.json) while Windows carried "-win", so "the linux
+// file" was indistinguishable from "the default file" and the two platforms sat
+// in different naming shapes — an ambiguity that already caused the wrong
+// payload to be read once. Both now carry an explicit suffix.
+//
+// Defined ONCE and used by every reader/writer of these names. The three linux
+// sites (publish --date-tag, the ingest query, and the dataFile read back for
+// the notification) MUST agree or the notification reads a file the publish
+// never wrote — so they all derive from these two constants rather than
+// repeating the string.
+def LINUX_SUFFIX  = '-linux'
+def WIN_SUFFIX    = '-win'
+def LINUX_DATE_TAG = "${DATE_TAG}${LINUX_SUFFIX}"
+def WIN_DATE_TAG   = "${DATE_TAG}${WIN_SUFFIX}"
 def FAILED_PLATFORMS = []
 
 pipeline {
@@ -387,7 +402,7 @@ sh """
                             --report-dir "${engTree}/tests/e2e/nightly-build-report/summary" \
                             --foundation-dir "${engTree}/tests/e2e/translation" \
                             --output-dir "${ARTIFACTS_DIR}" \
-                            --date-tag "${DATE_TAG}" \
+                            --date-tag "${LINUX_DATE_TAG}" \
                             --run-tag "${RUN_TAG}" \
                             --build-number "\${BUILD_NUMBER}" \
                             --engine-sha "\${ENG_SHA}" \
@@ -666,7 +681,7 @@ sh """
                                         --report-dir "%REPORT%\\summary" ^
                                         --foundation-dir "${winBoomin}\\tests\\e2e\\translation" ^
                                         --output-dir "${winArtifacts}" ^
-                                        --date-tag "%DATE_TAG%-win" ^
+                                        --date-tag "%WIN_DATE_TAG%" ^
                                         --run-tag "${RUN_TAG}" ^
                                         --build-number "%BUILD_NUMBER%" ^
                                         --engine-sha "%ENG_SHA%" ^
@@ -787,22 +802,22 @@ sh """
             agent { label 'linux-x64' }
             steps {
                 script {
-                    def dataFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
+                    def dataFile = "${ARTIFACTS_DIR}/nightly-data-${LINUX_DATE_TAG}-${RUN_TAG}.json"
 
                     // Find previous run's data for baseline comparison
                     def prevFile = ""
                     if (RUN_TAG == 'run2') {
                         // Noon run: compare against this morning's run
-                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${DATE_TAG}-run1.json"
+                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${LINUX_DATE_TAG}-run1.json"
                     } else {
                         // Morning run: compare against yesterday's last run.
                         // NOTE the format is %Y%m%d — it was %Y%mdd, which emits
                         // a literal "dd" (e.g. 202609dd), so prevFile never
                         // matched and --baseline was silently never applied.
                         def yesterday = sh(script: "date -d '${DATE_TAG} 1 day ago' +%Y%m%d", returnStdout: true).trim()
-                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run2.json"
+                        prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}${LINUX_SUFFIX}-run2.json"
                         if (!fileExists(prevFile)) {
-                            prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}-run1.json"
+                            prevFile = "${ARTIFACTS_DIR}/nightly-data-${yesterday}${LINUX_SUFFIX}-run1.json"
                         }
                     }
                     def baselineFlag = fileExists(prevFile) ? "--baseline ${prevFile}" : ""
@@ -817,7 +832,7 @@ sh """
                             --build-number "\${BUILD_NUMBER}"
 
                         echo "=== Ingest into Report API ==="
-                        curl -sf -X POST "${REPORT_API_URL}/api/ingest?date_tag=${DATE_TAG}" \
+                        curl -sf -X POST "${REPORT_API_URL}/api/ingest?date_tag=${LINUX_DATE_TAG}" \
                             2>&1 || echo "WARNING: Ingest failed"
 
                         echo "=== Copy to Nginx volume ==="
@@ -901,7 +916,7 @@ def runSonarScan(platform, boomingDir, buildConfig, artifactsDir) {
 def sendNightlyNotification(Map params) {
     def status     = params.status ?: 'SUCCESS'
     def artifacts  = params.artifactsDir ?: "${env.WORKSPACE}/artifacts"
-    def dataFile   = "${artifacts}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
+    def dataFile   = "${artifacts}/nightly-data-${LINUX_DATE_TAG}-${RUN_TAG}.json"
     def webhook    = env.FEISHU_WEBHOOK_URL
 
     if (!webhook) {
@@ -1021,14 +1036,23 @@ except Exception:
         // "windows was never run", which is exactly how the gap went unnoticed.
         def platformLines = []
         def missingPlatforms = []
+        def payloadVerdict = [:]
         try {
             def payloadOut = "${WORKSPACE}/.notify/platform-payload.json"
-            def localLinux = "${artifacts}/nightly-data-${DATE_TAG}-${RUN_TAG}.json"
+            def localLinux = "${artifacts}/nightly-data-${LINUX_DATE_TAG}-${RUN_TAG}.json"
+            // Trend baseline (decision Y): the PREVIOUS build's payload, kept in
+            // the workspace by the previous run's notify step. First run after a
+            // workspace wipe has none, and the trend reports "首轮" rather than a
+            // misleading "no change".
+            def prevPayload = "${WORKSPACE}/.notify/platform-payload.prev.json"
+            sh "cp -f '${payloadOut}' '${prevPayload}' 2>/dev/null || true"
             sh """
                 python3 "\${WORKSPACE}/scripts/build-feishu-payload.py" \
                     --build-url "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
                     --date-tag "${DATE_TAG}" --run-tag "${RUN_TAG}" \
                     --local-linux-json "${localLinux}" \
+                    --jenkins-result "${status}" \
+                    --previous-json "${prevPayload}" \
                     --output "${payloadOut}" 2>&1 || true
             """
             def payload = readJSON text: sh(
@@ -1036,6 +1060,7 @@ except Exception:
                 returnStdout: true).trim()
             platformLines = payload.body_lines ?: []
             missingPlatforms = payload.missing_platforms ?: []
+            payloadVerdict = payload.verdict ?: [:]
         } catch (err) {
             echo "WARNING: per-platform payload build failed (card falls back to linux-only): ${err.message}"
         }
@@ -1063,6 +1088,7 @@ except Exception:
             mem_gc: memGcStr,
             platform_lines: platformLines,
             missing_platforms: missingPlatforms,
+            verdict: payloadVerdict,
             fail_lines: failLines,
         ])
         sendFeishuCard(dataJson, webhook)
@@ -1123,47 +1149,89 @@ build_link = data.get('build_link', '')
 report_link = data.get('report_link', '')
 
 run_label = '午后' if run_tag == 'run2' else '凌晨'
-icon = '✅' if status == 'SUCCESS' else '❌'
+// Colour and icon follow the VERDICT, not the Jenkins result. A build that
+// finished successfully while a platform passed 0/45 must not render green —
+// that is precisely the case that went unnoticed before.
+verdict = data.get('verdict') or {}
+vlevel = verdict.get('level', '')
+if vlevel == 'red':
+    color, icon = 'red', '🔴'
+elif vlevel == 'green':
+    color, icon = 'green', '✅'
+else:
+    # No verdict available (payload builder failed) — fall back to Jenkins but
+    # mark it as unverified rather than asserting health.
+    color = data.get('color', 'green')
+    icon = '⚠️'
 title = f'{icon} chaos-il2cpp Nightly #{build_num} — {date_tag} ({run_label})'
 
-parts = [
-    f'**构建配置:** {data.get("build_config", "")}',
-    f'**状态:** {status}',
-    '',
-    f'**覆盖范围:** {data.get("data_dlls", 0)}/{data.get("total_dlls", 0)} DLLs',
-    f'**正确率:** {data.get("fact_passed", 0)}/{data.get("fact_total", 0)} ({data.get("fact_pct", "N/A")})',
-    f'**基准测试:** {data.get("bmk_methods", 0)} 方法',
-    f'**热更新:** {data.get("hot_passed", 0)}/{data.get("hot_total", 0)} ({data.get("hot_pct", "N/A")})',
-    f'**内存Profile:** {data.get("mem_methods", 0)} 方法',
-]
-# Per-platform section (v5). The card previously described the linux-x64
-# workspace only, so the group could not tell that a windows run existed at
-# all — let alone that it had failed. These lines come from
-# build-feishu-payload.py, which fetches BOTH platforms' archived payloads
-# over the Jenkins API (the two agents have separate workspaces and no
-# copyartifact plugin is installed).
-platform_lines = data.get('platform_lines') or []
-if platform_lines:
-    parts.append('')
-    parts.append('**各平台结果:**')
-    parts.extend(platform_lines)
+// ── Card body (decision A) ──
+// Answers "do I need to act?" in the first line, then the per-platform numbers
+// people actually scan, then only the details that carry information.
+//
+// The previous body opened with 构建配置/状态 and then rendered four metric
+// lines — 正确率, 基准测试, 热更新, 内存Profile — that the Route-3 CLI never
+// populates, so they always read "0/0 (N/A)" and "0 方法". Four lines of
+// zeros pushed the real signal below the fold and made the card look fuller
+// than it was. They are gone; if those metrics ever do get populated, render
+// them conditionally (see metric_lines below) rather than unconditionally.
+//
+// 状态: SUCCESS is also gone as the headline. It came from Jenkins, which only
+// reports whether the pipeline finished — build 272 was SUCCESS while linux
+// passed 0/45, so the card said SUCCESS on a night when one platform was
+// completely dead. The headline is now `verdict`, computed in
+// build-feishu-payload.py from what the payloads actually contain, and shared
+// with the web report so the two can never disagree.
+parts = []
+bodyLines = data.get('platform_lines') or []
+if (bodyLines) {
+    // body_lines[0] is the verdict line produced by build-feishu-payload.py.
+    parts.addAll(bodyLines)
+} else {
+    // Payload builder unavailable — degrade to the raw Jenkins status rather
+    // than render an empty card, and say so.
+    parts.add("⚠️ **无法获取平台数据** — 请查看 Jenkins 构建")
+    parts.add("status: " + status)
+}
+
+// Only show metrics that carry a value. Kept as a list so the day the engine
+// starts emitting them they appear without another redesign.
+def metricLines = []
+if ((data.get('fact_total') ?: 0) > 0) {
+    metricLines.add("正确率 " + data.get('fact_passed', 0) + "/" + data.get('fact_total', 0))
+}
+if ((data.get('bmk_methods') ?: 0) > 0) {
+    metricLines.add("基准测试 " + data.get('bmk_methods') + " 方法")
+}
+if ((data.get('hot_total') ?: 0) > 0) {
+    metricLines.add("热更新 " + data.get('hot_passed', 0) + "/" + data.get('hot_total', 0))
+}
+if ((data.get('mem_methods') ?: 0) > 0) {
+    metricLines.add("内存Profile " + data.get('mem_methods') + " 方法")
+}
+if (metricLines) {
+    parts.add('')
+    parts.add("　" + metricLines.join(' · '))
+}
+
 missing = data.get('missing_platforms') or []
-if missing:
-    parts.append('')
-    parts.append('⚠️ **缺少平台报告:** ' + '、'.join(missing)
-                 + ' — 该平台本轮未产出数据，请检查该分支是否失败')
+if (missing) {
+    parts.add('')
+    parts.add('⚠️ **缺少平台报告:** ' + missing.join('、')
+              + ' — 该平台本轮未产出数据，请检查该分支是否失败')
+}
 fail_lines = data.get('fail_lines', '')
-if fail_lines:
-    if fail_lines.startswith('__MANY__'):
-        count = fail_lines.replace('__MANY__', '')
-        parts.append('')
-        parts.append(f'**失败详情:** {count} DLL(s) 有失败')
-    else:
-        detail = fail_lines.replace('||', chr(10))
-        parts.append('')
-        parts.append('**失败详情:**')
-        parts.append(detail)
-message = chr(10).join(parts)
+if (fail_lines) {
+    if (fail_lines.startsWith('__MANY__')) {
+        parts.add('')
+        parts.add('**失败详情:** ' + fail_lines.replace('__MANY__', '') + ' DLL(s) 有失败')
+    } else {
+        parts.add('')
+        parts.add('**失败详情:**')
+        parts.add(fail_lines.replace('||', chr(10)))
+    }
+}
+message = parts.join(chr(10))
 
 elements = [
     {'tag': 'div', 'text': {'tag': 'lark_md', 'content': message}},

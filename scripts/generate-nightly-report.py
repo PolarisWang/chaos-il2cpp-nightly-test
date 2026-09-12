@@ -359,6 +359,41 @@ def generate_report(data: dict, build_number: str = "",
     if no_data_count > 0 and not chunk_status:
         no_data_warn = f'<div class="no-data-warn">⚠️ {no_data_count} assemblies have no test data — possibly new or skipped</div>'
 
+    # ── Platform banner ──
+    # This page reports ONE platform (the payload's provenance.platform), and
+    # nothing on it said so — a reader landing here from a link could not tell
+    # whether they were looking at linux or windows, and a 0/45 page looked
+    # like the whole nightly had died rather than one branch.
+    #
+    # The health word reuses build-feishu-payload.verdict() so the page and the
+    # Feishu card can never disagree about whether a run needs attention.
+    import importlib.util as _ilu
+    _prov = data.get("provenance", {}) or {}
+    _plat = _prov.get("platform", "") or "?"
+    _sha = _prov.get("engine_sha", "") or "(unrecorded)"
+    _banner_level, _banner_word = "ok", "正常"
+    try:
+        _spec = _ilu.spec_from_file_location(
+            "_fp", Path(__file__).resolve().parent / "build-feishu-payload.py")
+        _fp = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_fp)
+        _s = data.get("summary", {}) or {}
+        _v = _fp.verdict(
+            {_plat: {"present": True,
+                     "chunk_passed": _s.get("chunk_passed", 0),
+                     "chunk_total": _s.get("chunk_total", 0)}},
+            [], [_plat])
+        _banner_level = "bad" if _v["level"] == "red" else "ok"
+        _banner_word = _v["word"]
+    except Exception as _e:
+        print(f"  [report] verdict unavailable ({_e}); banner shows platform only")
+    platform_banner = (
+        f'<div class="plat-banner {_banner_level}">'
+        f'<strong>{_banner_word}</strong> · 平台 <code>{_plat}</code> '
+        f'· engine <code>{_sha}</code>'
+        f'</div>'
+    )
+
     # ── Chunk pass + failure attribution (from nightly-result.json) ──
     # The old report could only show fact %; a build that failed at the BUILD
     # stage has no fact data at all, so a 0/45 run rendered as "no data" with
@@ -522,6 +557,11 @@ tr.fail td {{ background:#fef2f2; }}
 .expand-btn {{ cursor:pointer; color:#4361ee; font-weight:600; }}
 .expand-btn:hover {{ text-decoration:underline; }}
 .error {{ color:#ef4444; }}
+.plat-banner {{ border-radius:6px; padding:10px 16px; margin-bottom:12px;
+                font-size:.85rem; }}
+.plat-banner.ok {{ background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }}
+.plat-banner.bad {{ background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }}
+.plat-banner code {{ background:rgba(0,0,0,.06); padding:1px 5px; border-radius:3px; }}
 .no-data-warn {{ background:#fffbeb; border:1px solid #fde68a; border-radius:6px;
                 padding:10px 16px; margin-bottom:12px; font-size:.85rem; color:#92400e; }}
 .footer {{ text-align:center; color:#999; font-size:.75rem; margin-top:20px; padding:20px; }}
@@ -532,6 +572,8 @@ tr.fail td {{ background:#fef2f2; }}
   <h1>chaos-il2cpp Nightly Report — {date_tag}</h1>
   <div class="meta">Build #{build_number} · {total_dlls} assemblies · {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
 </div>
+
+{platform_banner}
 
 {no_data_warn}
 
