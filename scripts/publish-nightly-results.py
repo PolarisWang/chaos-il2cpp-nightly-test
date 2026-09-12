@@ -100,7 +100,30 @@ def parse_entry_maps(foundation_dir: Path, assemblies: list[str]) -> dict:
     return entry_maps
 
 
-def read_nightly_summary(report_dir: Path) -> dict:
+def latest_run_id(report_dir: Path) -> str:
+    """Newest run id found under <report_dir>/run-state/.
+
+    The CLI creates one run-state directory per invocation, named exactly
+    `<run_id>`, so the newest one is this run. Used when --run-id is not given
+    so the per-run summary can still be preferred over the shared file.
+
+    Returns "" when there is no run-state tree (an older payload laid out
+    differently, or a clean checkout); callers then fall back to the shared
+    summary exactly as before.
+    """
+    for base in (report_dir, report_dir.parent):
+        d = base / "run-state"
+        if not d.is_dir():
+            continue
+        subdirs = [p for p in d.iterdir() if p.is_dir()]
+        if not subdirs:
+            continue
+        # Run ids are "YYYYMMDD_HHMMSS-<sha>", so the name sorts chronologically.
+        return max(subdirs, key=lambda p: p.name).name
+    return ""
+
+
+def read_nightly_summary(report_dir: Path, run_id: str = "") -> dict:
     """Read the Route-3 nightly CLI's authoritative summary JSON.
 
     `verification.nightly.aggregate.aggregate_reports()` writes ONLY
@@ -121,14 +144,28 @@ def read_nightly_summary(report_dir: Path) -> dict:
     so the canonical `--report-dir` is the PARENT.  But the Jenkinsfile passes
     `.../nightly-build-report/summary` directly, which would double-append.  We
     accept either by checking both locations.
+
+    PER-RUN PREFERENCE: `nightly-result.json` is a single shared file that every
+    run overwrites on an agent that accumulates many of them, so reading it can
+    return a DIFFERENT run's numbers. That is not hypothetical — build 277
+    published 0/45 while its own run-state recorded 21 chunks passed, because
+    another run had replaced the file. When the caller knows the run id we look
+    for `run-<run_id>.json` first and only fall back to the shared name, so an
+    old-style payload still publishes.
     """
-    candidates = [
-        report_dir / "nightly-result.json",           # report_dir IS the summary dir
-        report_dir / "summary" / "nightly-result.json",  # report_dir is the parent
-    ]
+    names: list[str] = []
+    if run_id:
+        names.append(f"run-{run_id}.json")
+    names.append("nightly-result.json")
+    candidates = [base / n for base in (report_dir, report_dir / "summary")
+                  for n in names]
     result_file = next((c for c in candidates if c.exists()), None)
     if result_file is None:
         return {}
+    if run_id and result_file.name != f"run-{run_id}.json":
+        print(f"  [publish] WARNING: no per-run summary for {run_id}; "
+              f"reading the SHARED {result_file.name}, which another run may "
+              f"have overwritten", file=sys.stderr)
     try:
         data = json.loads(result_file.read_text(encoding="utf-8"))
     except Exception as e:
@@ -493,6 +530,7 @@ def build_nightly_data(
     build_number: str = "",
     engine_sha: str = "",
     platform: str = "",
+    run_id: str = "",
 ) -> dict:
     """Build the nightly-data-*.json payload (backward-compatible format)."""
     assemblies = discover_assemblies(foundation_dir)
@@ -503,7 +541,15 @@ def build_nightly_data(
     # <report_dir>/summary/nightly-result.json.  Fall back to the legacy
     # markdown schema when it is absent (or empty, which the CLI can leave
     # behind when it dies before aggregation).
-    nightly_summary = read_nightly_summary(report_dir)
+    # Resolve the run id: explicit flag wins, else discover it from run-state so
+    # the per-run summary is preferred automatically. Without this the caller
+    # would have to know a value that is only recorded inside the summary —
+    # a chicken-and-egg that would leave the shared-file race in place.
+    if not run_id:
+        run_id = latest_run_id(report_dir)
+        if run_id:
+            print(f"  [publish] run id (from run-state): {run_id}")
+    nightly_summary = read_nightly_summary(report_dir, run_id=run_id)
     summary_source = "nightly-result.json"
     if not nightly_summary:
         nightly_summary = parse_legacy_summary_md(report_dir)
@@ -582,7 +628,11 @@ def build_nightly_data(
     # engine tree) so the field means the same thing on both platforms; the
     # raw run_id is kept verbatim for traceability.
     report["provenance"] = {
-        "run_id": nightly_summary.get("runId", ""),
+        # Prefer the id we actually resolved (from run-state) over the one in
+        # the payload: if we fell back to the shared file, its runId belongs to
+        # whichever run wrote it last, and recording that would misattribute
+        # this result.
+        "run_id": run_id or nightly_summary.get("runId", ""),
         "engine_sha": engine_sha or "",
         "platform": platform,
         "native_config": nightly_summary.get("nativeConfig", ""),
@@ -734,6 +784,12 @@ def main() -> int:
                              "revision). Passed explicitly because the nightly CLI's "
                              "run_id hash is derived from git in its CWD, which is not "
                              "the engine on every platform.")
+    parser.add_argument("--run-id", default="",
+                        help="This run's nightly id (from the CLI's run_id / the "
+                             "payload's provenance). Used to prefer the per-run "
+                             "summary run-<id>.json over the shared "
+                             "nightly-result.json, which any concurrent run can "
+                             "overwrite.")
     parser.add_argument("--platform", default="",
                         help="linux | windows — recorded in provenance so the two "
                              "branches of the same night can be told apart.")
@@ -792,7 +848,7 @@ def main() -> int:
     # NOTE: the absence of per-chunk/ is NOT a problem under the Route-3 CLI —
     # it never creates that tree.  Only complain when we also have no summary,
     # i.e. when there is genuinely nothing to publish.
-    if not (report_dir / "per-chunk").exists() and not read_nightly_summary(report_dir) \
+    if not (report_dir / "per-chunk").exists() and not read_nightly_summary(report_dir, run_id=args.run_id) \
             and not parse_legacy_summary_md(report_dir):
         print(f"WARNING: no per-chunk/ tree and no nightly-result.json under {report_dir} "
               f"— nothing to publish")
@@ -802,7 +858,8 @@ def main() -> int:
     nightly_data = build_nightly_data(foundation_dir, report_dir, args.date_tag,
                                      run_tag, args.build_number,
                                      engine_sha=args.engine_sha,
-                                     platform=args.platform)
+                                     platform=args.platform,
+                                     run_id=args.run_id)
 
     data_path = output_dir / f"nightly-data-{date_tag_full}.json"
     data_path.write_text(

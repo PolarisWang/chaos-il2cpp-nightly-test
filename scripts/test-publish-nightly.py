@@ -128,6 +128,42 @@ def main() -> int:
         (bad / "nightly-result.json").write_text("{not json", encoding="utf-8")
         check("corrupt json returns {} (no raise)", m.read_nightly_summary(bad) == {})
 
+        print("\n[1b] per-run summary preference (the summary-race fix)")
+        # nightly-result.json is ONE shared file that every run overwrites, and
+        # the agents accumulate many runs. Build 277 published 0/45 while its own
+        # run-state recorded 21 chunks passed, because another run had replaced
+        # the file between the two reads.
+        race = tmp / "race"
+        write_json(race / "summary" / "run-20260912_045412-c3d475811.json",
+                   {"total": 45, "passed": 21, "failed": 24,
+                    "runId": "20260912_045412-c3d475811"})
+        write_json(race / "summary" / "nightly-result.json",
+                   {"total": 45, "passed": 0, "failed": 45,
+                    "runId": "20260912_064426-a61127ab1"})
+        got = m.read_nightly_summary(race, run_id="20260912_045412-c3d475811")
+        check("per-run summary is preferred over the shared file",
+              got.get("passed") == 21, str(got.get("passed")))
+        # A run with no per-run copy must still publish (backward compat) but
+        # should not silently claim the shared file's numbers are its own.
+        got2 = m.read_nightly_summary(race, run_id="20260912_999999-xxxxxxx")
+        check("absent per-run summary falls back to the shared file",
+              got2.get("passed") == 0, str(got2))
+        # With no run id at all, behave exactly as before the change.
+        got3 = m.read_nightly_summary(race)
+        check("no run_id -> shared file (unchanged legacy behaviour)",
+              got3.get("passed") == 0)
+
+        # run id discovery from run-state: names sort chronologically
+        for rid in ("20260912_045412-c3d475811", "20260912_064426-a61127ab1"):
+            (race / "run-state" / rid).mkdir(parents=True, exist_ok=True)
+        check("latest_run_id picks the newest run-state dir",
+              m.latest_run_id(race) == "20260912_064426-a61127ab1",
+              m.latest_run_id(race))
+        empty = tmp / "noruns"
+        empty.mkdir()
+        check("latest_run_id -> '' when there is no run-state tree",
+              m.latest_run_id(empty) == "")
+
         print("\n[2] parse_legacy_summary_md — old markdown fallback")
         legacy = tmp / "legacy"
         legacy.mkdir()
