@@ -658,6 +658,19 @@ def main() -> int:
             check("windows passes --engine-sha", jf.count("--engine-sha") >= 2,
                   f"count={jf.count('--engine-sha')}")
             check("windows passes --platform", '--platform "windows"' in jf)
+            # A pipeline-scoped env.* value set during Init (which runs on the
+            # LINUX agent) propagates to every other node. Setting
+            # env.DOTNET_ROOT=/usr/share/dotnet there therefore put a LINUX path
+            # on the windows agent, and the old `if not defined DOTNET_ROOT`
+            # guard saw it as already set and kept it — every windows chunk then
+            # failed "DLL not found for <Assembly>" (45/45, classed "unknown").
+            # The windows guard must OVERWRITE, not merely default.
+            check("windows DOTNET_ROOT guard overwrites a leaked value",
+                  "if not defined DOTNET_ROOT if exist" not in jf)
+            check("windows sets DOTNET_ROOT from a Windows path",
+                  'set "DOTNET_ROOT=C:\\\\Program Files\\\\dotnet"' in jf)
+            check("windows echoes the resolved DOTNET_ROOT for diagnosis",
+                  "DOTNET_ROOT=%DOTNET_ROOT%" in jf)
             # Windows must NOT use every core: all chunks rebuild the same shared
             # C# projects, and the engine's `dotnet build-server shutdown` is not
             # a lock, so parallel rebuilds race and VBCSCompiler holds the DLL
@@ -699,16 +712,23 @@ def main() -> int:
             # a parse error once already). Only single backslashes are hazards;
             # doubled ones are the correct escaping.
             # Groovy parses backslash escapes even inside triple-quoted strings,
-            # so a comment like \var\lib breaks the whole Jenkinsfile (this cost
-            # a parse error twice). Only single backslashes are hazards;
-            # doubled ones are the correct escaping. Check ALL bat blocks, not
-            # just the first, and include the comment text.
+            # so a single backslash anywhere in a `bat """..."""` body — including
+            # a REM comment — can break the whole Jenkinsfile. A bare \u is
+            # treated as a unicode escape ("Did not find four digit hex character
+            # code") and a bare \a/\v etc. is an invalid escape. This has now
+            # cost three separate parse failures. Only DOUBLED backslashes are
+            # safe; scan the raw text of every bat block, comments included.
             bad_escapes = []
             for blk in re.findall(r'bat """(.*?)"""', jf, re.S):
                 for n, line in enumerate(blk.splitlines(), 1):
-                    for m in re.finditer(r'(?<!\\)\\([a-zA-Z])', line):
-                        bad_escapes.append(f"line {n}: {m.group(0)}")
-            check("no unescaped Groovy backslash escapes in any bat block",
+                    for m in re.finditer(r'(?<!\\)\\', line):
+                        # allow \\ (escaped) and \" (escaped quote)
+                        nxt = line[m.end():m.end() + 1]
+                        if nxt in ('\\', '"'):
+                            continue
+                        bad_escapes.append(f"line {n}: ...{line[max(0,m.start()-18):m.start()+18]}...")
+                        break
+            check("no single backslash escapes in any bat block",
                   not bad_escapes, f"found {bad_escapes[:3]}")
 
     finally:

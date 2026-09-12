@@ -450,7 +450,21 @@ sh """
                                 REM not on PATH under the Jenkins service account — that leaves
                                 REM DOTNET_ROOT unset and every chunk fails with
                                 REM "DLL not found for <Assembly>".
-                                if not defined DOTNET_ROOT if exist "C:\\Program Files\\dotnet\\dotnet.exe" set "DOTNET_ROOT=C:\\Program Files\\dotnet"
+                                REM
+                                REM This MUST overwrite, not merely default. Init runs on the
+                                REM linux-x64 agent and sets env.DOTNET_ROOT=/usr/share/dotnet,
+                                REM and an `environment{}`/env.* value is pipeline-scoped so it
+                                REM propagates to THIS node too. The old `if not defined`
+                                REM guard therefore saw DOTNET_ROOT as already set, kept the
+                                REM LINUX path, and every windows chunk failed with
+                                REM "DLL not found for <Assembly>" — verified in the real log:
+                                REM   [build] DOTNET_ROOT='/usr/share/dotnet'
+                                REM   DLL candidates: ...; <dotnetroot>X.dll exists=False
+                                REM That surfaced as the opaque class "unknown" on 45/45
+                                REM chunks. Set it unconditionally from the Windows side.
+                                if exist "C:\\Program Files\\dotnet\\dotnet.exe" set "DOTNET_ROOT=C:\\Program Files\\dotnet"
+                                if not exist "C:\\Program Files\\dotnet\\dotnet.exe" if exist "C:\\Program Files (x86)\\dotnet\\dotnet.exe" set "DOTNET_ROOT=C:\\Program Files (x86)\\dotnet"
+                                echo === [win-x64] DOTNET_ROOT=%DOTNET_ROOT% ===
                                 if not exist "${winArtifacts}" mkdir "${winArtifacts}"
 
                                 REM Sync the engine to the latest origin/main before every run.
