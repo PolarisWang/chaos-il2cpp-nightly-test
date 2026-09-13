@@ -58,6 +58,6 @@ n = notice_from_alert(
     event=event, title=title, impact=impact, cause=cause, action=action,
     build_link=build_link, report_link=report_link, date_tag=date_tag,
 )
-result = send(n, os.environ.get('FEISHU_WEBHOOK_URL', ''), force=True)
+result = send(n, os.environ.get('FEISHU_WEBHOOK_URL', ''))
 sys.exit(0 if result in ('sent', 'deduped') else 1)
 PYEOF

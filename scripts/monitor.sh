@@ -961,7 +961,7 @@ if notify:
         # as every other notification.
         feishu_dir = os.environ.get(
             'FEISHU_ENGINE_DIR',
-            '/home/debian/agent/chaos-il2cpp-nightly-test/scripts')
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ''))
         sent = False
         try:
             if feishu_dir not in sys.path:
@@ -976,7 +976,7 @@ if notify:
                 sections=card_sections,
                 footer_text='chaos-il2cpp 系统监控 · ' + time.strftime('%Y%m%d'),
             )
-            sent = feishu_send(n, webhook, force=True) in ('sent', 'deduped')
+            sent = feishu_send(n, webhook)
         except Exception as e:
             print('WARNING: feishu engine unavailable (%s), falling back' % e)
         if not sent:

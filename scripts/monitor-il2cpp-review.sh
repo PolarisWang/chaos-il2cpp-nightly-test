@@ -87,12 +87,16 @@ alert() {
         return 0
     fi
     # Map the action level onto an engine event so the source module can pick
-    # the right level/title decorator.
-    local event="system"
+    # the right level/title decorator, and onto a fallback colour so a degraded
+    # send does not misrepresent the message. The fallback used to hardcode
+    # `--color red`, which painted a RECOVERED ("已恢复正常") card red — the
+    # opposite of what it says.
+    local event="system" fallback_color="red"
     case "$level" in
-        RED)       event="new_failure" ;;
-        RECOVERED) event="recovered" ;;
-        YELLOW)    event="system" ;;
+        RED)       event="new_failure"; fallback_color="red" ;;
+        RECOVERED) event="recovered";   fallback_color="green" ;;
+        YELLOW)    event="system";      fallback_color="orange" ;;
+        INFO)      event="system";      fallback_color="blue" ;;
     esac
     if [ -f "$HEALTH_CARD" ]; then
         FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" bash "$HEALTH_CARD" \
@@ -104,7 +108,7 @@ alert() {
             || log "alert FAILED to send: [$level] $title"
     else
         FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" bash "$NOTIFY" \
-            --title "$title" --message "$impact" --color red --build-link "$JENKINS_URL" >/dev/null 2>&1 \
+            --title "$title" --message "$impact" --color "$fallback_color" --build-link "$JENKINS_URL" >/dev/null 2>&1 \
             && log "alert sent (legacy): $title" || log "alert FAILED (legacy): $title"
     fi
 }

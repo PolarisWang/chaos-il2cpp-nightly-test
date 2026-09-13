@@ -62,6 +62,6 @@ n = to_notice(
     coverage_total=os.environ.get('REVIEW_COVERAGE_TOTAL', ''),
     skipped_files=os.environ.get('REVIEW_SKIPPED_FILES', ''),
 )
-result = send(n, os.environ.get('FEISHU_WEBHOOK_URL', ''), force=True)
+result = send(n, os.environ.get('FEISHU_WEBHOOK_URL', ''))
 sys.exit(0 if result == 'sent' else 1 if result == 'failed' else 0)
 " 2>&1

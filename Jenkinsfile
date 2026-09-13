@@ -142,17 +142,14 @@ pipeline {
                             try {
                                 sh """
                                     export FEISHU_WEBHOOK_URL="${FEISHU_WEBHOOK_URL}"
-                                    export CARD_OUTDIR='/var/lib/report-server/daily'
                                     export DATE_TAG='${DATE_TAG}'
-                                    python3 '${env.WORKSPACE}/code-review/scripts/incident-card.py' \\
-                                        --level RED \\
+                                    bash '${env.WORKSPACE}/code-review/scripts/send-health-card.sh' \\
+                                        --event new_failure \\
                                         --title '代码审查未完成' \\
                                         --impact '本次 0/N 个文件被审查（脚本执行出错）' \\
                                         --cause '审查流程异常: ${err.message.replace("'", "")}' \\
                                         --action '查看构建日志定位失败环节' \\
-                                        --build-link "http://10.10.1.173:8080/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/" \\
-                                        --extra "build|#${env.BUILD_NUMBER}" \\
-                                        --extra "error|${err.message.replace("'", "").take(200)}"
+                                        --build-link "http://10.10.1.173:8080/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/"
                                 """
                             } catch (_) {
                                 echo "WARNING: failed to send failure incident card"
@@ -1189,168 +1186,27 @@ except Exception:
 }
 
 def sendFeishuCard(dataJson, webhook) {
+    // Route through the unified feishu engine. Replaces ~160 lines of Python
+    // embedded in a Groovy string — the reason the nightly card could not
+    // share the engine's rendering, dedup, retry or colour validation, and
+    // had to be edited in two languages at once.
     sh "mkdir -p '${WORKSPACE}/.notify'"
     writeFile file: "${WORKSPACE}/.notify/feishu-data.json", text: dataJson
     writeFile file: "${WORKSPACE}/.notify/feishu-webhook.txt", text: webhook
-    writeFile file: "${WORKSPACE}/.notify/send-feishu-card.py", text: """#!/usr/bin/env python3
-import json, os, sys
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
-data_dir = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(data_dir, 'feishu-data.json')) as f:
-    data = json.load(f)
-with open(os.path.join(data_dir, 'feishu-webhook.txt')) as f:
-    webhook_url = f.read().strip()
-
-if not webhook_url:
-    print('WARNING: FEISHU_WEBHOOK_URL not set')
-    sys.exit(0)
-
-status = data.get('status', 'UNKNOWN')
-color = data.get('color', 'green')
-build_num = data.get('build_num', '?')
-date_tag = data.get('date_tag', '')
-run_tag = data.get('run_tag', 'run1')
-build_link = data.get('build_link', '')
-report_link = data.get('report_link', '')
-
-run_label = '午后' if run_tag == 'run2' else '凌晨'
-# Colour and icon follow the VERDICT, not the Jenkins result. A build that
-# finished successfully while a platform passed 0/45 must not render green —
-# that is precisely the case that went unnoticed before.
-verdict = data.get('verdict') or {}
-vlevel = verdict.get('level', '')
-if vlevel == 'red':
-    color, icon = 'red', '🔴'
-elif vlevel == 'yellow':
-    # Partial: some chunks failed but the platform is not dead. Without this
-    # branch a 18/45 run fell through to the "no verdict" fallback below and
-    # rendered a green header over 27 failures.
-    color, icon = 'orange', '🟡'
-elif vlevel == 'green':
-    color, icon = 'green', '✅'
-else:
-    # No verdict available (payload builder failed) — fall back to Jenkins but
-    # mark it as unverified rather than asserting health.
-    color = data.get('color', 'green')
-    icon = '⚠️'
-title = f'{icon} chaos-il2cpp Nightly #{build_num} — {date_tag} ({run_label})'
-
-# ── Card body (decision A) ──
-# Answers "do I need to act?" in the first line, then the per-platform numbers
-# people actually scan, then only the details that carry information.
-#
-# The previous body opened with 构建配置/状态 and then rendered four metric
-# lines — 正确率, 基准测试, 热更新, 内存Profile — that the Route-3 CLI never
-# populates, so they always read "0/0 (N/A)" and "0 方法". Four lines of
-# zeros pushed the real signal below the fold and made the card look fuller
-# than it was. They are gone; if those metrics ever do get populated, render
-# them conditionally (see metric_lines below) rather than unconditionally.
-#
-# 状态: SUCCESS is also gone as the headline. It came from Jenkins, which only
-# reports whether the pipeline finished — build 272 was SUCCESS while linux
-# passed 0/45, so the card said SUCCESS on a night when one platform was
-# completely dead. The headline is now `verdict`, computed in
-# build-feishu-payload.py from what the payloads actually contain, and shared
-# with the web report so the two can never disagree.
-parts = []
-body_lines = data.get('platform_lines') or []
-if body_lines:
-    # body_lines[0] is the verdict line produced by build-feishu-payload.py.
-    parts.extend(body_lines)
-else:
-    # Payload builder unavailable — degrade to the raw Jenkins status rather
-    # than render an empty card, and say so.
-    parts.append("⚠️ **无法获取平台数据** — 请查看 Jenkins 构建")
-    parts.append("status: " + str(status))
-
-# Only show metrics that carry a value. The engine's Route-3 CLI never
-# populates fact/benchmark/hotupdate/memory, so rendering them unconditionally
-# produced four lines of "0/0 (N/A)" that buried the one line that mattered.
-metric_lines = []
-if (data.get('fact_total') or 0) > 0:
-    metric_lines.append("正确率 %s/%s" % (data.get('fact_passed', 0), data.get('fact_total', 0)))
-if (data.get('bmk_methods') or 0) > 0:
-    metric_lines.append("基准测试 %s 方法" % data.get('bmk_methods'))
-if (data.get('hot_total') or 0) > 0:
-    metric_lines.append("热更新 %s/%s" % (data.get('hot_passed', 0), data.get('hot_total', 0)))
-if (data.get('mem_methods') or 0) > 0:
-    metric_lines.append("内存Profile %s 方法" % data.get('mem_methods'))
-if metric_lines:
-    parts.append('')
-    parts.append("　" + ' · '.join(metric_lines))
-
-missing = data.get('missing_platforms') or []
-if missing:
-    parts.append('')
-    parts.append('⚠️ **缺少平台报告:** ' + '、'.join(missing)
-                 + ' — 该平台本轮未产出数据，请检查该分支是否失败')
-
-# Fail detail. fail_lines is a "||"-joined blob (or the __MANY__ sentinel);
-# it was built that way to survive being embedded in a Jenkins @NonCPS string,
-# so it is unpacked here rather than upstream.
-fail_lines = data.get('fail_lines') or ''
-if fail_lines:
-    parts.append('')
-    if fail_lines.startswith('__MANY__'):
-        n = fail_lines[len('__MANY__'):]
-        parts.append('**失败详情:** %s 个 DLL 有失败 chunk' % n)
-    else:
-        parts.append('**失败详情:**')
-        parts.extend(fail_lines.split('||'))
-# NOTE: chr(10), not a backslash-n escape. A backslash escape inside a Groovy
-# triple-quoted string is processed by GROOVY before Python ever sees it, so
-# it arrives as a literal newline and splits this line into an unterminated
-# string literal. Every backslash in the generated source is Groovy's.
-message = chr(10).join(parts)
-
-elements = [
-    {'tag': 'div', 'text': {'tag': 'lark_md', 'content': message}},
-    {'tag': 'hr'},
-]
-actions = []
-if report_link:
-    actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '📊 查看报告'},
-        'url': report_link, 'type': 'default',
-    })
-if build_link:
-    actions.append({
-        'tag': 'button', 'text': {'tag': 'plain_text', 'content': '🔧 Jenkins Build'},
-        'url': build_link, 'type': 'default',
-    })
-if actions:
-    elements.append({'tag': 'action', 'actions': actions})
-    elements.append({'tag': 'hr'})
-elements.append({
-    'tag': 'note',
-    'elements': [{'tag': 'plain_text', 'content': 'chaos-il2cpp CI'}],
-})
-
-payload = json.dumps({
-    'msg_type': 'interactive',
-    'card': {
-        'header': {'title': {'tag': 'plain_text', 'content': title}, 'template': color if color in ('red','orange','blue','green') else 'green'},
-        'elements': elements,
-    },
-}, ensure_ascii=False).encode('utf-8')
-
-req = Request(webhook_url, data=payload, headers={'Content-Type': 'application/json; charset=utf-8'})
-try:
-    resp = urlopen(req, timeout=30)
-    print(f'Feishu notification sent (HTTP {resp.status})')
-    resp.close()
-except HTTPError as e:
-    print(f'WARNING: Feishu webhook returned HTTP {e.code}')
-    sys.exit(1)
-except URLError as e:
-    print(f'WARNING: Feishu webhook error: {e.reason}')
-    sys.exit(1)
-"""
-    def notifyExit = sh(script: "python3 '${WORKSPACE}/.notify/send-feishu-card.py'", returnStatus: true)
+    def notifyExit = sh(script: """
+        export FEISHU_WEBHOOK_URL="\$(cat '${WORKSPACE}/.notify/feishu-webhook.txt')"
+        bash '${WORKSPACE}/scripts/send-nightly-card.sh' \
+            --payload       '${WORKSPACE}/.notify/platform-payload.json' \
+            --build-num     '${BUILD_NUMBER}' \
+            --date-tag      '${DATE_TAG}' \
+            --run-tag       '${RUN_TAG}' \
+            --build-url     "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
+            --report-url    "${JENKINS_EXT_URL}" \
+            --data-json     "\$(cat '${WORKSPACE}/.notify/feishu-data.json')"
+    """, returnStatus: true)
     if (notifyExit != 0) {
-        echo "WARNING: inline notification failed with exit ${notifyExit}"
+        echo "WARNING: nightly card send failed with exit ${notifyExit}"
     }
 }
 
@@ -1443,8 +1299,6 @@ def runCodeReview(Map params = [:]) {
                     "\$RAWT/scripts/send-health-card.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-nightly-card.sh' \
                     "\$RAWT/scripts/send-nightly-card.sh"
-                curl -sL --max-time 30 -o '${SCRIPT_DIR}/incident-card.py' \
-                    "\$RAWT/scripts/incident-card.py"
                 chmod +x '${SCRIPT_DIR}/'*.sh
                 # Every downloaded file must be non-empty. curl -sL writes an
                 # EMPTY file on 404 and still exits 0, so a typo'd path or a
@@ -1453,7 +1307,7 @@ def runCodeReview(Map params = [:]) {
                 # the build fails at the point of the actual problem.
                 for _f in review-with-claude.sh notify-feishu.sh \
                           send-code-review-card.sh send-health-card.sh \
-                          send-nightly-card.sh incident-card.py \
+                          send-nightly-card.sh \
                           feishu/__init__.py feishu/engine.py feishu/notice.py \
                           feishu/sources/__init__.py feishu/sources/review.py \
                           feishu/sources/nightly.py feishu/sources/health.py; do
