@@ -1023,17 +1023,23 @@ def sendNightlyNotification(Map params) {
         return
     }
 
-    // External URLs — hardcoded to internal IP for container-external access
-    def JENKINS_EXT_URL = 'http://10.10.1.173:8080'
-    def REPORT_EXT_URL  = 'http://10.10.1.173:8081'
-
+    // External URLs — hardcoded to internal IP for container-external access.
+    //
+    // NOT `def` locals. A local declared here and read inside the nested
+    // `try { ... }` below loses its CPS binding, and the read throws
+    // `NoSuchPropertyException: No such property: JENKINS_EXT_URL`. That throw
+    // lands in the catch at the end of this method, which echoes
+    // "Failed to read nightly data for notification" and sends a degraded card
+    // — so the notification silently lost its links and per-platform data
+    // whenever the path was taken (build 289). Same failure as TREND_STATE_DIR;
+    // literals have no binding to lose, so these are inlined at use instead.
     def color = status == 'SUCCESS' ? 'green' : 'red'
     def icon  = status == 'SUCCESS' ? '✅' : '❌'
     def runLabel  = RUN_TAG == 'run2' ? '午后' : '凌晨'
     def title = "${icon} chaos-il2cpp Nightly #${BUILD_NUMBER} — ${DATE_TAG} (${runLabel})"
 
-    def buildLink  = "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}"
-    def reportLink = "${REPORT_EXT_URL}/?build=${BUILD_NUMBER}&date=${DATE_TAG}"
+    def buildLink  = "http://10.10.1.173:8080/job/chaos-il2cpp-nightly/${BUILD_NUMBER}"
+    def reportLink = "http://10.10.1.173:8081/?build=${BUILD_NUMBER}&date=${DATE_TAG}"
     def message = ""
 
     try {
@@ -1151,7 +1157,7 @@ except Exception:
             def prevPayload = "${TREND_STATE_DIR}/platform-payload.prev.json"
             sh """
                 python3 "\${WORKSPACE}/scripts/build-feishu-payload.py" \
-                    --build-url "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
+                    --build-url "http://10.10.1.173:8080/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
                     --date-tag "${DATE_TAG}" --run-tag "${RUN_TAG}" \
                     --local-linux-json "${localLinux}" \
                     --jenkins-result "${status}" \
@@ -1246,8 +1252,8 @@ def sendFeishuCard(dataJson, webhook) {
             --build-num     '${BUILD_NUMBER}' \
             --date-tag      '${DATE_TAG}' \
             --run-tag       '${RUN_TAG}' \
-            --build-url     "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
-            --report-url    "${JENKINS_EXT_URL}" \
+            --build-url     "http://10.10.1.173:8080/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
+            --report-url    "http://10.10.1.173:8080" \
             --data-json     "\$(cat '${WORKSPACE}/.notify/feishu-data.json')"
     """, returnStatus: true)
     if (notifyExit != 0) {

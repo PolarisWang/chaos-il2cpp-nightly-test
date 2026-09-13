@@ -720,6 +720,20 @@ def main() -> int:
                 and re.search(r'\$\{?' + v + r'\b|\b' + v + r'\b', _post))
             check("no top-level def read inside post{} (CPS drops the binding)",
                   not _leaked, f"leaked: {_leaked}")
+
+            # NOTE on a rejected check: I tried to generalise the rule above to
+            # "a function-local def read inside a nested try", after
+            # JENKINS_EXT_URL (a local in sendNightlyNotification) threw
+            # NoSuchPropertyException from inside the payload-building try. That
+            # heuristic does NOT work and was removed deliberately: it flags
+            # `artifacts` and the code-review locals, which are read exactly the
+            # same way and demonstrably DO work in production (they appear in the
+            # working `sh` invocations of a green build). A gate that cries wolf
+            # on working code gets disabled, which is worse than not having it.
+            # The real discriminator is not visible in the source text, so this
+            # is documented rather than guessed at. What IS enforced, because it
+            # is textually checkable, is the post-block rule above.
+
             # Bug seen on the real Windows agent: only the publisher was
             # downloaded, so the HTML step warned "generate-nightly-report.py
             # not found" and produced JSON only.
