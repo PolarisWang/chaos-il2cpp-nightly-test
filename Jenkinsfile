@@ -1425,11 +1425,11 @@ def runCodeReview(Map params = [:]) {
                 # recurse; keep this list in sync with scripts/feishu/sources/.
                 mkdir -p '${SCRIPT_DIR}/feishu/sources'
                 for f in __init__.py engine.py notice.py; do
-                    curl -sL --max-time 30 -o "\${SCRIPT_DIR}/feishu/\$f" \
+                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/feishu/$f' \
                         "\$RAWT/scripts/feishu/\$f"
                 done
                 for f in __init__.py review.py nightly.py health.py; do
-                    curl -sL --max-time 30 -o "\${SCRIPT_DIR}/feishu/sources/\$f" \
+                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/feishu/sources/$f' \
                         "\$RAWT/scripts/feishu/sources/\$f"
                 done
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-health-card.sh' \
@@ -1439,6 +1439,24 @@ def runCodeReview(Map params = [:]) {
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/incident-card.py' \
                     "\$RAWT/scripts/incident-card.py"
                 chmod +x '${SCRIPT_DIR}/'*.sh
+                # Every downloaded file must be non-empty. curl -sL writes an
+                # EMPTY file on 404 and still exits 0, so a typo'd path or a
+                # stale SHA used to produce a silently-broken agent: the failure
+                # surfaced much later as a missing import. Check sizes here so
+                # the build fails at the point of the actual problem.
+                for _f in review-with-claude.sh notify-feishu.sh \
+                          send-code-review-card.sh send-health-card.sh \
+                          send-nightly-card.sh incident-card.py \
+                          feishu/__init__.py feishu/engine.py feishu/notice.py \
+                          feishu/sources/__init__.py feishu/sources/review.py \
+                          feishu/sources/nightly.py feishu/sources/health.py; do
+                    if [ ! -s '${SCRIPT_DIR}/'"\$_f" ]; then
+                        echo "ERROR: download produced an empty file: \$_f"
+                        echo "       (curl -sL returns 0 on 404; check the path and SHA)"
+                        exit 1
+                    fi
+                done
+                echo "All \$(ls '${SCRIPT_DIR}/feishu' '${SCRIPT_DIR}/feishu/sources' | grep -c . ) feishu files verified non-empty"
                 # Sanity: the review script must carry the docs-reviewable marker (the
                 # EXTS_KEEP-with-.md fix that makes the docs path actually run). Without it
                 # a docs-only range still falls through to the all-excluded early exit.

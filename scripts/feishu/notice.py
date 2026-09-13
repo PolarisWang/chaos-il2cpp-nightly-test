@@ -69,6 +69,34 @@ class Notice:
     # Footer override. Empty means the engine uses the channel default.
     footer_text: str = ''
 
+    # Header decoration override.
+    #
+    # By default the engine prefixes the title with the level's emoji and tag
+    # ("🔴 【需人工处理】 ..."). Set `raw_header=True` to suppress that and use
+    # `title` verbatim.
+    #
+    # Why this exists: the code-review card's header has always been a plain
+    # "chaos-il2cpp 代码审查 — N 个问题" with the severity conveyed by the card
+    # COLOUR, not by a text tag. Forcing the tag on it changed a card the team
+    # reads every day. Preserving the published format beats a uniform-looking
+    # one; the tag stays the default for genuinely-new notifications.
+    raw_header: bool = False
+
+    # Explicit Feishu colour, overriding LEVEL_MAP.
+    #
+    # The legacy review card's colour is computed in the Jenkinsfile (red for
+    # 严重/中, blue for 轻, orange for docs/low-conf/incomplete, else green) and
+    # that Groovy expression is the single decision point the whole pipeline
+    # already agrees on. Rather than re-derive it here — two places to keep in
+    # sync — a source may pass the colour through.
+    color_override: str = ''
+
+    # Verbatim body. When set, the engine uses this markdown as the card body
+    # instead of rendering `body`. Legacy cards whose body is assembled by
+    # string concatenation (and whose exact whitespace readers are used to) set
+    # this so the output is byte-identical to what shipped before.
+    raw_body: str = ''
+
     # Idempotency key. Two Notices with the same key inside the dedup window
     # produce ONE card. Empty disables dedup for this notice.
     # Convention: "<channel>:<stable-identity>", e.g. "nightly:20260913:run1".

@@ -98,15 +98,27 @@ def _plan_card(notice) -> dict:
     channel = notice.channel if notice.channel in _BUILTIN_TEMPLATES else 'default'
     tpl = _BUILTIN_TEMPLATES[channel]
 
-    # Header
-    header_title = _format_header(notice.title, info, tpl)
-    header_color = tpl.get('header_color', '{color}').format(color=info['color'])
+    # Header title. raw_header suppresses the emoji/tag decoration so a source
+    # can keep a published title format exactly as it was.
+    if getattr(notice, 'raw_header', False):
+        header_title = notice.title
+    else:
+        header_title = _format_header(notice.title, info, tpl)
+
+    # Header colour: an explicit override wins (the review card's colour is
+    # decided by the Jenkinsfile and must not be re-derived here).
+    color_override = getattr(notice, 'color_override', '') or ''
+    if color_override:
+        header_color = color_override
+    else:
+        header_color = tpl.get('header_color', '{color}').format(color=info['color'])
     if header_color not in VALID_COLORS:
         header_color = 'green'
 
     # Build elements
     elements = []
-    body_text = _render_body(notice)
+    # raw_body: use the source's verbatim markdown instead of rendering `body`.
+    body_text = getattr(notice, 'raw_body', '') or _render_body(notice)
     if body_text.strip():
         elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': body_text}})
         elements.append({'tag': 'hr'})
@@ -126,8 +138,12 @@ def _plan_card(notice) -> dict:
             elements.append({'tag': 'hr'})
 
     # Footer
-    note_text = tpl.get('note', 'chaos-il2cpp · {channel}').format(
-        channel=notice.channel)
+    footer_override = getattr(notice, 'footer_text', '')
+    if footer_override:
+        note_text = footer_override
+    else:
+        note_text = tpl.get('note', 'chaos-il2cpp · {channel}').format(
+            channel=notice.channel)
     elements.append({
         'tag': 'note',
         'elements': [{'tag': 'plain_text', 'content': note_text}],

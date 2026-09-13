@@ -1,91 +1,136 @@
 """platform-payload.json → Notice for nightly build reports.
 
-Reads the output of build-feishu-payload.py and decides what the nightly
-card should say. The verdict logic stays in build-feishu-payload.py; this
-module only translates its structured output into a Notice.
+Matches the legacy Jenkinsfile inline-Python card format exactly:
+
+  title  : f'{icon} chaos-il2cpp Nightly #{n} — {date} ({run_label})'
+  colour : verdict-driven (red / orange / green), falling back to the Jenkins
+           status colour with a ⚠️ icon when no verdict is available
+  body   : platform lines → optional metrics → missing-platform warning →
+           failure detail
+  footer : "chaos-il2cpp CI"
+
+The verdict logic itself lives in build-feishu-payload.py; this module only
+renders.
 """
 
 import json
-from pathlib import Path
 from typing import List
 
 from ..notice import Notice, InfoLine, RED, YELLOW, INFO
 
-PLATFORM_LABELS = {'linux': 'Linux', 'windows': 'Windows'}
-
-VERDICT_MAP = {
-    'red': RED,
-    'yellow': YELLOW,
-    'green': INFO,
-}
+VERDICT_MAP = {'red': RED, 'yellow': YELLOW, 'green': INFO}
+VERDICT_COLOR = {'red': 'red', 'yellow': 'orange', 'green': 'green'}
+VERDICT_ICON = {'red': '🔴', 'yellow': '🟡', 'green': '✅'}
 
 
-def _parse_body_lines(payload: dict) -> List[InfoLine]:
-    """Turn the platform_lines from build-feishu-payload.py into InfoLines.
+def _metric_lines(data: dict) -> List[str]:
+    """Only render metrics that carry a value.
 
-    Body lines are structured into labelled InfoLines where possible:
-      "Linux  ✅ 9/45" → label="Linux", content="✅ 9/45"
-      "⚠️ 缺少平台报告: windows" → plain (no label)
+    The engine's Route-3 CLI never populates fact/benchmark/hotupdate/memory,
+    so rendering them unconditionally produced four lines of "0/0 (N/A)" that
+    buried the one line that mattered. Kept from the legacy card.
     """
-    import re
-    lines = []
-    for raw in payload.get('body_lines') or []:
-        m = re.match(r'\*\*(.+?)\*\*(.*)', raw)
-        if m:
-            lines.append(InfoLine(m.group(1), m.group(2).strip()))
+    out = []
+    if (data.get('fact_total') or 0) > 0:
+        out.append('正确率 %s/%s' % (data.get('fact_passed', 0),
+                                     data.get('fact_total', 0)))
+    if (data.get('bmk_methods') or 0) > 0:
+        out.append('基准测试 %s 方法' % data.get('bmk_methods'))
+    if (data.get('hot_total') or 0) > 0:
+        out.append('热更新 %s/%s' % (data.get('hot_passed', 0),
+                                     data.get('hot_total', 0)))
+    if (data.get('mem_methods') or 0) > 0:
+        out.append('内存Profile %s 方法' % data.get('mem_methods'))
+    return out
+
+
+def _build_body(data: dict) -> str:
+    """Assemble the card body exactly as the legacy inline Python did."""
+    parts = []
+
+    body_lines = data.get('platform_lines') or []
+    if body_lines:
+        # body_lines[0] is the verdict line produced by build-feishu-payload.py.
+        parts.extend(body_lines)
+    else:
+        # Payload builder unavailable — degrade to the raw Jenkins status
+        # rather than render an empty card, and say so.
+        parts.append('⚠️ **无法获取平台数据** — 请查看 Jenkins 构建')
+        parts.append('status: ' + str(data.get('status', '')))
+
+    metrics = _metric_lines(data)
+    if metrics:
+        parts.append('')
+        parts.append('　' + ' · '.join(metrics))
+
+    missing = data.get('missing_platforms') or []
+    if missing:
+        parts.append('')
+        parts.append('⚠️ **缺少平台报告:** ' + '、'.join(missing)
+                     + ' — 该平台本轮未产出数据，请检查该分支是否失败')
+
+    # Fail detail. fail_lines is a "||"-joined blob (or the __MANY__ sentinel);
+    # it was built that way to survive being embedded in a Jenkins @NonCPS
+    # string, so it is unpacked here rather than upstream.
+    fail_lines = data.get('fail_lines') or ''
+    if fail_lines:
+        parts.append('')
+        if str(fail_lines).startswith('__MANY__'):
+            n = str(fail_lines)[len('__MANY__'):]
+            parts.append('**失败详情:** %s 个 DLL 有失败 chunk' % n)
         else:
-            lines.append(InfoLine('', raw))
-    return lines
+            parts.append('**失败详情:**')
+            parts.extend(str(fail_lines).split('||'))
 
-
-def _build_title(build_num: str, date_tag: str, run_tag: str,
-                 verdict: dict) -> str:
-    """Nightly card title: icon + description."""
-    vlevel = verdict.get('level', '')
-    icons = {'red': '🔴', 'yellow': '🟡', 'green': '✅'}
-    icon = icons.get(vlevel, '⚠️')
-    run_label = '午后' if run_tag == 'run2' else '凌晨'
-    return '%s chaos-il2cpp Nightly #%s — %s (%s)' % (
-        icon, build_num, date_tag, run_label)
+    return '\n'.join(parts)
 
 
 def to_notice(payload_path: str, *,
               build_num: str = '', date_tag: str = '', run_tag: str = 'run1',
-              build_url: str = '', report_url: str = '') -> Notice:
+              status: str = '', jenkins_color: str = 'green',
+              build_url: str = '', report_url: str = '',
+              data: dict = None) -> Notice:
     """Build a Notice from a build-feishu-payload.py output file.
 
     Args:
-        payload_path: Path to the JSON file produced by build-feishu-payload.py.
-        build_num: Build number (for title).
-        date_tag: Date string (for title).
-        run_tag: 'run1' or 'run2' (for title).
-        build_url: Jenkins build URL (for button).
-        report_url: Web report URL (for button).
+        payload_path: JSON produced by build-feishu-payload.py.
+        build_num / date_tag / run_tag: title components.
+        status: Jenkins result, used only in the no-payload degradation line.
+        jenkins_color: the Groovy-computed colour, used when no verdict exists.
+        build_url / report_url: button targets.
+        data: extra fields for metrics/fail_lines (fact_*, bmk_methods, ...).
 
-    Returns a Notice with level, title, body set appropriately.
+    Returns a Notice in the legacy nightly card format.
     """
+    data = dict(data or {})
+    data.setdefault('status', status)
+
     try:
         with open(payload_path) as f:
             payload = json.load(f)
     except Exception:
-        return Notice(
-            channel='nightly',
-            level=RED,
-            title='Nightly #%s — %s (无法获取报告)' % (build_num, date_tag),
-            body=[InfoLine('', '⚠️ platform-payload.json 缺失或无法解析')],
-        )
+        payload = {}
 
     verdict = payload.get('verdict') or {}
-    level = VERDICT_MAP.get(verdict.get('level', ''), INFO)
-    title = _build_title(build_num, date_tag, run_tag, verdict)
+    # The payload file is authoritative for platform_lines / missing / verdict.
+    if payload.get('body_lines') is not None:
+        data['platform_lines'] = payload.get('body_lines')
+    if payload.get('missing_platforms') is not None:
+        data['missing_platforms'] = payload.get('missing_platforms')
 
-    body = _parse_body_lines(payload)
+    vlevel = verdict.get('level', '')
+    if vlevel in VERDICT_COLOR:
+        color = VERDICT_COLOR[vlevel]
+        icon = VERDICT_ICON[vlevel]
+    else:
+        # No verdict available (payload builder failed) — fall back to the
+        # Jenkins status but mark it as unverified rather than asserting health.
+        color = jenkins_color or 'green'
+        icon = '⚠️'
 
-    # Missing platforms
-    missing = payload.get('missing_platforms') or []
-    if missing:
-        body.append(InfoLine('缺少平台', '、'.join(missing)
-                             + ' — 该平台本轮未产出数据'))
+    run_label = '午后' if run_tag == 'run2' else '凌晨'
+    title = '%s chaos-il2cpp Nightly #%s — %s (%s)' % (
+        icon, build_num, date_tag, run_label)
 
     actions = []
     if report_url:
@@ -95,13 +140,16 @@ def to_notice(payload_path: str, *,
 
     return Notice(
         channel='nightly',
-        level=level,
+        level=VERDICT_MAP.get(vlevel, INFO),
         title=title,
-        body=body,
+        raw_header=True,          # icon is already in the title
+        color_override=color,     # verdict-driven, exactly as before
+        raw_body=_build_body(data),
         actions=actions,
+        footer_text='chaos-il2cpp CI',
         dedup_key='nightly:%s:%s' % (date_tag, run_tag),
         tags={
-            'verdict': verdict.get('level', ''),
+            'verdict': vlevel,
             'verdict_reason': verdict.get('reason', ''),
         },
     )

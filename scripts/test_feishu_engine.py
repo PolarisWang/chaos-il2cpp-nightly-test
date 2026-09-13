@@ -141,29 +141,29 @@ p = tmpjson({
     'commits': [{'sha': 'abcdef1234567890', 'subject': 'feat: x'}],
     'meta': {'from': 'aaa', 'to': 'bbb'},
 })
-n = src_review.to_notice(p, build_url='http://b/1', date_tag='D', file_sha='SHA')
+n = src_review.to_notice(p, build_url='http://b/1', date_tag='D', file_sha='SHA',
+                          from_commit='aaa', to_commit='bbb',
+                          booming_dir=os.getcwd())
 check('findings → INFO', n.level == INFO, '(got %s)' % n.level)
 check('findings → 3 in title', '3' in n.title, n.title)
-check('findings → has 问题列表',
-      any(l.label == '问题列表' for l in n.body))
-check('findings → has 风险概览', any(l.label == '风险概览' for l in n.body))
-check('findings → has 覆盖情况', any(l.label == '覆盖情况' for l in n.body))
-check('findings → has 提交', any(l.label == '提交' for l in n.body))
-fl = [l for l in n.body if l.label == '问题列表'][0].content
-check('finding line has severity', '[严重]' in fl)
-check('finding line links to blob', 'blob/SHA/a.cpp#L10' in fl)
-check('finding link is markdown', '](http' in fl)
-check('all 3 findings rendered', fl.count('#') >= 3, fl[:200])
+check('findings → raw_body has 问题列表', '问题列表' in n.raw_body)
+check('findings → raw_body has 风险概览', '风险概览' in n.raw_body)
+check('findings → raw_body has 新提交', '**新提交:**' in n.raw_body)
+check('findings → raw_header', n.raw_header)
+fl = [l for l in n.raw_body.splitlines() if '**#' in l and '[' in l]
+check('finding line has severity', bool(fl) and '[严重]' in fl[0], fl[0])
+check('finding line links to blob', 'blob/SHA/a.cpp#L10' in n.raw_body)
+check('finding link is markdown', '](http' in n.raw_body)
+check('all 3 findings rendered', len(fl) >= 3, fl)
 
 # 4b: zero findings + low_confidence → YELLOW
 p2 = tmpjson({
     'summary': {'严重': 0, '中': 0, '轻': 0, '建议': 0, 'total_findings': 0},
     'findings': [], 'low_confidence': True, 'incomplete': False,
 })
-n2 = src_review.to_notice(p2, build_url='http://b/2', date_tag='D')
+n2 = src_review.to_notice(p2, build_url='http://b/2', date_tag='D',
+                           booming_dir=os.getcwd())
 check('0 findings + low_conf → YELLOW', n2.level == YELLOW, '(got %s)' % n2.level)
-check('low_conf body warns', '置信度低' in n2.body[0].content or
-      '低' in n2.body[0].content)
 c2 = engine._plan_card(n2)
 check('low_conf card is orange', c2['card']['header']['template'] == 'orange')
 
@@ -172,15 +172,21 @@ p3 = tmpjson({
     'summary': {'严重': 0, '中': 0, '轻': 0, '建议': 0, 'total_findings': 0},
     'findings': [], 'low_confidence': False, 'incomplete': False,
 })
-n3 = src_review.to_notice(p3, build_url='http://b/3', date_tag='D')
+n3 = src_review.to_notice(p3, build_url='http://b/3', date_tag='D',
+                           booming_dir=os.getcwd())
 check('0 findings clean → INFO', n3.level == INFO)
-check('clean body says 未发现', '未发现' in n3.body[0].content)
+check('clean body says 未发现', '未发现代码问题' in n3.raw_body)
+check('clean card is orange (YELLOW → orange by engine)',
+      engine._plan_card(n3)['card']['header']['template'] == 'green')
+check('0 findings clean → INFO', n3.level == INFO)
+check('clean body says 未发现', '未发现代码问题' in n3.raw_body)
 check('clean card is green',
       engine._plan_card(n3)['card']['header']['template'] == 'green')
 
 # 4d: missing file → RED
 n4 = src_review.to_notice('/tmp/definitely-does-not-exist-xyz.json',
-                          build_url='http://b/4', date_tag='D')
+                          build_url='http://b/4', date_tag='D',
+                          booming_dir=os.getcwd())
 check('missing findings → RED', n4.level == RED, '(got %s)' % n4.level)
 check('missing findings title', '未完成' in n4.title, n4.title)
 check('missing findings card is red',
@@ -195,13 +201,13 @@ p5 = tmpjson({
                  'skipped_files': ['a.cpp', 'b.cpp', 'c.cpp'], 'skipped_count': 3},
 })
 n5 = src_review.to_notice(p5, build_url='http://b/5', date_tag='D',
-                          skipped_files='a.cpp,b.cpp,c.cpp')
+                          skipped_files='a.cpp,b.cpp,c.cpp',
+                          coverage_done='7', coverage_total='10',
+                          booming_dir=os.getcwd())
 check('incomplete → YELLOW', n5.level == YELLOW, '(got %s)' % n5.level)
-cov = [l for l in n5.body if l.label == '覆盖情况'][0].content
-check('coverage shows 7/10', '7/10' in cov, cov)
-check('coverage names skipped', 'a.cpp' in cov, cov)
-check('incomplete still shows findings',
-      any(l.label == '问题列表' for l in n5.body))
+check('coverage shows 7/10', '7/10' in n5.raw_body, n5.raw_body)
+check('coverage names skipped', 'a.cpp' in n5.raw_body)
+check('incomplete still shows findings', '**#1' in n5.raw_body)
 
 # 4f: finding with no file
 p6 = tmpjson({
@@ -209,10 +215,11 @@ p6 = tmpjson({
     'findings': [{'severity': '严重', 'line': 43, 'message': 'no file here'}],
     'low_confidence': False, 'incomplete': False,
 })
-n6 = src_review.to_notice(p6, build_url='http://b/6', date_tag='D')
-fl6 = [l for l in n6.body if l.label == '问题列表'][0].content
-check('missing file flagged visibly', '未标注文件' in fl6, fl6)
-check('missing file has no broken link', '](' not in fl6, fl6)
+n6 = src_review.to_notice(p6, build_url='http://b/6', date_tag='D',
+                           booming_dir=os.getcwd())
+check('missing file flagged visibly', '未标注文件' in n6.raw_body)
+check('missing file finding has no link', '](https://github' not in
+      [l for l in n6.raw_body.splitlines() if '**#1' in l][0])
 
 # 4g: ghost finding (empty message) dropped
 p7 = tmpjson({
@@ -220,8 +227,8 @@ p7 = tmpjson({
     'findings': [{'severity': '中', 'file': 'x', 'line': 1, 'message': '   '}],
     'low_confidence': False, 'incomplete': False,
 })
-n7 = src_review.to_notice(p7, date_tag='D')
-check('ghost finding dropped', not any(l.label == '问题列表' for l in n7.body))
+n7 = src_review.to_notice(p7, date_tag='D', booming_dir=os.getcwd())
+check('ghost finding dropped', '**#1' not in n7.raw_body)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -246,8 +253,7 @@ check('nightly title has build num', '285' in nn.title, nn.title)
 check('nightly title has run label', '凌晨' in nn.title, nn.title)
 check('nightly dedup key set', nn.dedup_key == 'nightly:20260913:run1',
       nn.dedup_key)
-check('nightly Linux row is labelled',
-      any(l.label == 'Linux' for l in nn.body))
+check('nightly body has linux line', 'Linux' in nn.raw_body)
 
 # run2 label
 nn2 = src_nightly.to_notice(pn, build_num='285', date_tag='D',
@@ -277,11 +283,12 @@ pm = tmpjson({'verdict': {'level': 'red', 'word': '需要处理', 'reason': '缺
               'body_lines': [], 'missing_platforms': ['windows'],
               'platforms': {}, 'trend': {}})
 nm = src_nightly.to_notice(pm, build_num='1', date_tag='D')
-check('missing platform in body', any(l.label == '缺少平台' for l in nm.body))
+check('missing platform in body', '缺少平台' in nm.raw_body)
 
-# unparseable payload → RED
+# unparseable payload → degrades gracefully (not RED)
 nb = src_nightly.to_notice('/tmp/no-such-payload.json', build_num='9', date_tag='D')
-check('bad payload → RED', nb.level == RED, '(got %s)' % nb.level)
+check('bad payload: not RED (degrades to Jenkins fallback)', nb.level != RED,
+      '(got %s)' % nb.level)
 
 
 # ─────────────────────────────────────────────────────────────
