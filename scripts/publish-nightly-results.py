@@ -162,10 +162,7 @@ def read_nightly_summary(report_dir: Path, run_id: str = "") -> dict:
     result_file = next((c for c in candidates if c.exists()), None)
     if result_file is None:
         return {}
-    if run_id and result_file.name != f"run-{run_id}.json":
-        print(f"  [publish] WARNING: no per-run summary for {run_id}; "
-              f"reading the SHARED {result_file.name}, which another run may "
-              f"have overwritten", file=sys.stderr)
+    per_run = bool(run_id) and result_file.name == f"run-{run_id}.json"
     try:
         data = json.loads(result_file.read_text(encoding="utf-8"))
     except Exception as e:
@@ -174,6 +171,34 @@ def read_nightly_summary(report_dir: Path, run_id: str = "") -> dict:
     if not isinstance(data, dict):
         print(f"  [publish] WARNING: {result_file} is not a JSON object")
         return {}
+
+    # Refuse to publish a summary that belongs to a different run.
+    #
+    # The shared nightly-result.json is overwritten by whichever run aggregates
+    # last, so reading it is only safe if its runId matches ours. Build 283 is
+    # what makes this concrete: the windows run 20260913_035640-a9fa0def7 built
+    # 22 chunks successfully, but a Ctrl-C killed it before it aggregated, so no
+    # per-run summary existed. The publisher fell back to the shared file, which
+    # held run 20260912_091611's result — and published 0/45 for a run that had
+    # passed 22. It even printed a warning about it, then used the numbers
+    # anyway.
+    #
+    # A wrong number that looks authoritative is worse than an admitted gap: it
+    # is indistinguishable from a real 0/45, and it silently discards a
+    # successful build. So on mismatch we return {} and let the caller report
+    # "no data", which is the truth.
+    if run_id and not per_run:
+        theirs = data.get("runId", "")
+        if theirs and theirs != run_id:
+            print(f"  [publish] REFUSING {result_file.name}: it belongs to run "
+                  f"{theirs}, not {run_id} — no per-run summary was written "
+                  f"(the run may have been interrupted before aggregating). "
+                  f"Reporting no data rather than another run's numbers.",
+                  file=sys.stderr)
+            return {}
+        # Same run or no runId recorded: the shared file IS ours.
+        print(f"  [publish] NOTE: no per-run summary file, but {result_file.name} "
+              f"carries this run's id ({run_id}) — using it", file=sys.stderr)
     return data
 
 

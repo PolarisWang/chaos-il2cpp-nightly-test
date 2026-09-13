@@ -123,6 +123,28 @@ pipeline {
                             // turns red with the actual review cause visible.
                             echo "Code review failed: ${err.message}"
 
+                            // Send a RED incident card so the team knows why NO card arrived.
+                            // Without this, a broken review silently produces zero output and
+                            // nobody sees anything until monitor-il2cpp-review.sh fires (up to 5m).
+                            try {
+                                sh """
+                                    export FEISHU_WEBHOOK_URL="${FEISHU_WEBHOOK_URL}"
+                                    export CARD_OUTDIR='/var/lib/report-server/daily'
+                                    export DATE_TAG='${DATE_TAG}'
+                                    python3 '${SCRIPT_DIR}/incident-card.py' \\
+                                        --level RED \\
+                                        --title '代码审查未完成' \\
+                                        --impact '本次 0/N 个文件被审查（脚本执行出错）' \\
+                                        --cause '审查流程异常: ${err.message.replace("'", "")}' \\
+                                        --action '查看构建日志定位失败环节' \\
+                                        --build-link "http://10.10.1.173:8080/job/${env.JOB_NAME}/${env.BUILD_NUMBER}/" \\
+                                        --extra "build|#${env.BUILD_NUMBER}" \\
+                                        --extra "error|${err.message.replace("'", "").take(200)}"
+                                """
+                            } catch (_) {
+                                echo "WARNING: failed to send failure incident card"
+                            }
+
                             // Release lock so subsequent commits can trigger a new review.
                             // Without this, any exception before Update State (script crash,
                             // model timeout, ARG_MAX, etc.) leaves the lock stuck and
@@ -1574,11 +1596,26 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def lowConf = false
                 def inComplete = false
                 def docsOnly = false
+                def covDone = ''
+                def covTotal = ''
+                def skippedFiles = ''
                 try {
                     def full = readJSON text: readFile("${findingsFile}").trim()
                     lowConf = (full.low_confidence == true)
                     inComplete = (full.incomplete == true)
                     docsOnly = (full.docs_only == true)
+                    // Coverage block (added alongside the incident-card work): how
+                    // many reviewable files the plan covered vs. dropped. Lets the
+                    // card name the uncovered files instead of saying "some files".
+                    def cov = full.coverage
+                    if (cov != null) {
+                        covDone = ((cov.covered_files ?: 0)).toString()
+                        covTotal = ((cov.total_files ?: 0)).toString()
+                        def sf = cov.skipped_files
+                        if (sf instanceof List) {
+                            skippedFiles = sf.join(',')
+                        }
+                    }
                 } catch (err) {
                     lowConf = false
                     inComplete = false
@@ -1590,6 +1627,9 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 env.REVIEW_LOW_CONF = lowConf ? '1' : '0'
                 env.REVIEW_INCOMPLETE = inComplete ? '1' : '0'
                 env.REVIEW_DOCS_ONLY = docsOnly ? '1' : '0'
+                env.REVIEW_COVERAGE_DONE = covDone
+                env.REVIEW_COVERAGE_TOTAL = covTotal
+                env.REVIEW_SKIPPED_FILES = skippedFiles
 
                 echo "Findings: ${env.FINDINGS_SEV} 严重 · ${env.FINDINGS_MED} 中 · ${env.FINDINGS_LIGHT} 轻 · ${env.FINDINGS_ADV} 建议${docsOnly ? " · docs-only" : ""}${lowConf ? " · low-confidence" : ""}${inComplete ? " · INCOMPLETE" : ""}"
 
@@ -1627,6 +1667,9 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                     export REVIEW_DOCS_ONLY='${docsOnly ? "1" : "0"}'
                     export REVIEW_INCOMPLETE='${inComplete ? "1" : "0"}'
                     export REVIEW_LOW_CONF='${lowConf ? "1" : "0"}'
+                    export REVIEW_COVERAGE_DONE='${covDone}'
+                    export REVIEW_COVERAGE_TOTAL='${covTotal}'
+                    export REVIEW_SKIPPED_FILES='${skippedFiles}'
                     bash '${SCRIPT_DIR}/send-code-review-card.sh' \\
                         --repo-dir    '${boomingDir}' \\
                         --workspace   '${workspaceDir}' \\

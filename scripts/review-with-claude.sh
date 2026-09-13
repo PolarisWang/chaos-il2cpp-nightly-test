@@ -254,15 +254,15 @@ chunk_diff_for() {
 # Needed when a merged chunk holds thousands of paths: a space-joined list
 # passed as argv exceeds ARG_MAX (E2BIG) and the git diff silently yields
 # nothing, which previously defeated the oversize-guard.
-# git pathspecs support :(literal) prefixing; pass them via --pathspec-from-file.
+# NOTE: `git diff` does NOT support --pathspec-from-file (that's a git-add/commit
+# option). Use xargs -0 to pipe NUL-separated paths from the temp file.
 chunk_diff_for_list() {
     local listfile="$1"
-    git diff "${FROM_COMMIT}".."${TO_COMMIT}" \
-        --pathspec-from-file="$listfile" --pathspec-file-nul 2>/dev/null
+    xargs -0 -r git diff "${FROM_COMMIT}".."${TO_COMMIT}" -- < "$listfile" 2>/dev/null
 }
 
 # write_path_list <outfile> <space-joined-paths>
-# Emit the paths NUL-separated (git --pathspec-file-nul format).
+# Emit the paths NUL-separated, for `xargs -0` consumption by chunk_diff_for_list.
 write_path_list() {
     local outfile="$1"; shift
     printf '%s\0' $1 > "$outfile"
@@ -357,7 +357,8 @@ if [ "${#CHUNKS[@]}" -gt "$MAX_CHUNKS" ]; then
         # paths, which would exceed ARG_MAX if passed as argv.
         _MERGED_SIZE_TMP=$(mktemp)
         write_path_list "$_MERGED_SIZE_TMP" "$_merged_files"
-        _merged_total_lines=$(chunk_diff_for_list "$_MERGED_SIZE_TMP" | wc -l | tr -d ' ')
+        _merged_total_lines=$(chunk_diff_for_list "$_MERGED_SIZE_TMP" | wc -l | tr -d ' ' || echo 0)
+        _merged_total_lines="${_merged_total_lines:-0}"
         rm -f "$_MERGED_SIZE_TMP"
         echo "  merged chunk diff size: ${_merged_total_lines} lines (max ${MERGED_CHUNK_MAX_LINES})"
         if [ "$_merged_total_lines" -gt "$MERGED_CHUNK_MAX_LINES" ]; then
@@ -959,27 +960,15 @@ AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
 INCOMPLETE=0
+# Files that fell out of the review (chunk failed after retries / dropped as
+# overflow). Reported to the card as a coverage gap so an incomplete review is
+# never rendered as a clean one.
+SKIPPED_FILES=""
 # Preserve any INCOMPLETE flag that was set during chunk-planning
 # (the merged-chunk overflow path ~line 356).  The declaration above
 # re-initialized it to 0; patch back the planning value if it was set.
 if [ -n "${_INCOMPLETE_PLAN-}" ] && [ "$_INCOMPLETE_PLAN" = "1" ]; then
     INCOMPLETE=1
-fi
-CHUNK_IDX=0
-# NOTE: INCOMPLETE may have been set earlier during chunk-planning
-# (lines ~356) when the merged chunk overflow->drop path fires.  That
-# flag was then reset here.  Re-read the planning-time value:
-
-# Re-read INCOMPLETE from the chunk-planning phase: the merged-chunk
-# overflow path (~356) may have set it before the loop.  Do not reset it.
-# Instead, start from the PLANNING-TIME value (which was clobbered above
-# when INCOMPLETE was declared as a local var with initialization).
-# BASH HACK: re-read the flag from the chunk-loop-state file if one exists,
-# or just re-initialize to the known-safe "0" — the overflow path now sets
-# INCOMPLETE via a callback file that we check here.
-if [ -f "$CHUNK_INCOMPLETE_MARKER" ]; then
-    INCOMPLETE=1
-    rm -f "$CHUNK_INCOMPLETE_MARKER"
 fi
 CHUNK_IDX=0
 # The chunk loop calls claude and pipes its output through extractors; a glitchy
@@ -1075,6 +1064,11 @@ except Exception:
         # pass / a definitive all-files review.
         echo "WARNING: could not review '$chunk_paths' after retries — skipping (模型异常，此文件稍后未覆盖)" >&2
         INCOMPLETE=1
+        # Record WHICH files went unreviewed so the card can name them instead of
+        # saying "some files" — an alert nobody can act on is noise.
+        for _f in $chunk_paths; do
+            [ -n "$_f" ] && SKIPPED_FILES="$SKIPPED_FILES $_f"
+        done
         continue
     fi
     AGG_SUM=$(python3 - "$AGG_SUM" "$chunk_sum" <<'PY'
@@ -1184,12 +1178,20 @@ print(json.dumps(fs, ensure_ascii=False))
 PY
 )
 printf '%s' "$AGG_FIND" > "$_AGG_FIND_TMP"
-CLAUDE_JSON=$(python3 - "$_AGG_SUM_TMP" "$_AGG_FIND_TMP" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" "$DOCS_ONLY" <<'PY'
+CLAUDE_JSON=$(python3 - "$_AGG_SUM_TMP" "$_AGG_FIND_TMP" "$_FROM_SHORT" "$LOW_CONF" "$INCOMPLETE" "$DOCS_ONLY" "${FILTERED_COUNT:-0}" "${SKIPPED_FILES:-}" <<'PY'
 import sys, json
 with open(sys.argv[1]) as f:
     summary = json.load(f)
 with open(sys.argv[2]) as f:
     findings = json.load(f)
+# Coverage: how many reviewable files the plan actually covered vs. dropped.
+# Reported on every card so a partial review can never read as a clean pass.
+try:
+    total_files = int(sys.argv[7])
+except Exception:
+    total_files = 0
+skipped = [f for f in sys.argv[8].split() if f] if len(sys.argv) > 8 else []
+covered = max(0, total_files - len(skipped))
 print(json.dumps({
     "summary": summary,
     "findings": findings,
@@ -1197,6 +1199,12 @@ print(json.dumps({
     "low_confidence": sys.argv[4] == "true",
     "incomplete": sys.argv[5] == "1",
     "docs_only": sys.argv[6] == "true",
+    "coverage": {
+        "total_files": total_files,
+        "covered_files": covered,
+        "skipped_files": skipped,
+        "skipped_count": len(skipped),
+    },
 }, ensure_ascii=False))
 PY
 )

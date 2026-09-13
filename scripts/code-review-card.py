@@ -164,6 +164,134 @@ ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
 bu = os.environ.get('JENKINS_EXT_URL', '') + '/job/' + os.environ.get('JOB_NAME','') + '/' + os.environ.get('BUILD_NUMBER','') + '/'
 
+# ── Abnormal-case handling via the unified incident-card template ──
+# Load it once; fall back to inline rendering if unavailable so a broken
+# incident-card.py can never take the whole card down.
+_INCIDENT = None
+try:
+    import importlib.util as _ilu
+    _ipath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'incident-card.py')
+    _spec = _ilu.spec_from_file_location('incident_card', _ipath)
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    _INCIDENT = _mod
+except Exception as _e:
+    print('WARNING: could not load incident-card.py: ' + str(_e))
+
+
+def _render_incident(level, title, impact='', cause='', action='',
+                     extra_pairs=None, minimal=False):
+    """Render an abnormal card via the shared template, then send it.
+
+    Returns True if a card was sent (caller should then SKIP the normal card),
+    False if the template was unavailable (caller falls back to the normal path).
+    """
+    if _INCIDENT is None:
+        return False
+    card = _INCIDENT.build_card(
+        level=level, title=title, impact=impact, cause=cause, action=action,
+        build_link=bu,
+        report_link=bu,
+        extra_pairs=extra_pairs or [],
+        minimal=minimal,
+        date_tag=os.environ.get('DATE_TAG', ''),
+    )
+    webhook = os.environ.get('FEISHU_WEBHOOK_URL', '').strip()
+    if not webhook:
+        print('WARNING: FEISHU_WEBHOOK_URL not set; printing card instead')
+        print(json.dumps(card, ensure_ascii=False))
+        return True   # handler owns this case; do not fall through
+    _INCIDENT.send_card(card, webhook)
+    return True
+
+
+# Decision: is this an abnormal case that must use the incident template?
+# Order matters — script errors and coverage gaps outrank a plain clean pass.
+# Deferred until the commit/finding counts are known (below), so the handler
+# can quote real numbers instead of placeholders.
+_script_error = os.environ.get('REVIEW_SCRIPT_ERROR', '0') == '1'
+_cov_done  = os.environ.get('REVIEW_COVERAGE_DONE', '')
+_cov_total = os.environ.get('REVIEW_COVERAGE_TOTAL', '')
+_skipped   = os.environ.get('REVIEW_SKIPPED_FILES', '')
+_error_detail = os.environ.get('REVIEW_ERROR_DETAIL', '')
+_docs_only = os.environ.get('REVIEW_DOCS_ONLY', '0') == '1'
+_incomplete = os.environ.get('REVIEW_INCOMPLETE', '0') == '1'
+_low_conf = os.environ.get('REVIEW_LOW_CONF', '0') == '1'
+
+# 🔴 Script-level error: the review produced NOTHING. Never render this as
+# "0 findings" — that is precisely the false-clean failure mode this guards.
+if _script_error:
+    _impact = ''
+    if _cov_done or _cov_total:
+        _impact = '本次 ' + str(_cov_done or 0) + '/' + str(_cov_total or 0) + ' 个文件被审查\n'
+    else:
+        _impact = '本次未产出审查结果\n'
+    _impact += '未产出审查结果，本次提交未被审查'
+    _cause = ''
+    if _error_detail:
+        _cause = (_INCIDENT.error_code_to_cause(_error_detail)
+                  if _INCIDENT else _error_detail)
+    _action = ('检查 review-with-claude.sh 的 chunk 合并逻辑\n'
+               '（历史同类问题：git 参数不兼容 / ARG_MAX）'
+               if _cause else '请查看构建日志定位失败环节')
+    if _render_incident(
+        level='RED',
+        title='代码审查未完成',
+        impact=_impact,
+        cause=_cause,
+        action=_action,
+        extra_pairs=[('技术细节', _error_detail)] if _error_detail else None,
+    ):
+        raise SystemExit(0)
+
+# ⚪ docs_only: normal behaviour, not an incident. Minimal one-line card.
+if _docs_only and not _incomplete and not _low_conf:
+    if _render_incident(
+        level='INFO',
+        title='代码审查 · ' + str(len(commits)) + ' 个提交（纯文档）',
+        minimal=True,
+    ):
+        raise SystemExit(0)
+
+# 🟡 Incomplete coverage: some files were never reviewed.
+if _incomplete:
+    _cov = ''
+    if _cov_done or _cov_total:
+        _cov = '已审查 ' + str(_cov_done) + '/' + str(_cov_total) + ' 个文件'
+        try:
+            _pct = int(100 * int(_cov_done) / max(1, int(_cov_total)))
+            _cov += '（' + str(_pct) + '%）'
+        except Exception:
+            pass
+    _skip_md = ''
+    if _skipped:
+        _files = [f for f in _skipped.replace(',', ' ').split() if f]
+        _shown = _files[:8]
+        _skip_md = ('未覆盖 ' + str(len(_files)) + ' 个：\n'
+                    + '\n'.join('  • ' + f for f in _shown))
+        if len(_files) > len(_shown):
+            _skip_md += '\n  • …等 ' + str(len(_files) - len(_shown)) + ' 个'
+    if _render_incident(
+        level='YELLOW',
+        title='代码审查部分完成',
+        impact=(_cov or '部分文件未被审查') + ('\n' + _skip_md if _skip_md else ''),
+        cause='模型对部分文件返回了无法解析的结果，重试后仍未成功',
+        action='稍后重跑本次审查，或人工抽查上述文件',
+    ):
+        raise SystemExit(0)
+
+# 🟡 Low confidence: 0 findings on substantive code — suspicious, needs a look.
+if _low_conf:
+    if _render_incident(
+        level='YELLOW',
+        title='本次审查 0 发现 — 置信度低',
+        impact='审查了 ' + str(len(commits)) + ' 个提交，未得到任何 finding',
+        cause=('该变更量级通常应有 finding，模型可能异常。\n'
+               '历史上出现过"假 clean"（提交 82089d6）。'),
+        action='查看变更内容人工判断，或稍后重跑本次审查',
+    ):
+        raise SystemExit(0)
+
 # Build risk overview line with emoji icons (rage 4-tier: 严重 中 轻 建议)
 risk_line = ''
 total = int(os.environ.get('CARD_TOTAL', '0') or 0)
@@ -179,14 +307,28 @@ if total > 0:
         parts.append('🟢 **' + os.environ.get('CARD_ADV','0') + '** 建议')
     risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
 else:
-    if os.environ.get('REVIEW_DOCS_ONLY','0') == '1':
-        risk_line = '📄 **纯文档变更**（本次仅改动 .md/.txt 文档，已按文档维度审查；如有代码改动请单独 review code 变更）'
-    elif os.environ.get('REVIEW_INCOMPLETE','0') == '1':
-        risk_line = '⚠️ **审查不完整**（部分文件因模型异常未能覆盖，建议稍后重跑以获得完整结果）'
-    elif os.environ.get('REVIEW_LOW_CONF','0') == '1':
-        risk_line = '⚠️ **0 发现 — 低置信**（在实质性代码上得到 0 条，可能是模型异常，建议人工复核）'
-    else:
-        risk_line = '✅ 本次未发现代码问题'
+    # No findings. docs_only / incomplete / low-confidence already took the
+    # incident-card path above, so reaching here means a genuine clean pass.
+    risk_line = '✅ 本次未发现代码问题'
+
+# Build risk overview line with emoji icons (rage 4-tier: 严重 中 轻 建议)
+risk_line = ''
+total = int(os.environ.get('CARD_TOTAL', '0') or 0)
+if total > 0:
+    parts = []
+    if int(os.environ.get('CARD_SEV','0')) > 0:
+        parts.append('🔴 **' + os.environ.get('CARD_SEV','0') + '** 严重')
+    if int(os.environ.get('CARD_MED','0')) > 0:
+        parts.append('🟠 **' + os.environ.get('CARD_MED','0') + '** 中')
+    if int(os.environ.get('CARD_LIGHT','0')) > 0:
+        parts.append('⚪ **' + os.environ.get('CARD_LIGHT','0') + '** 轻')
+    if int(os.environ.get('CARD_ADV','0')) > 0:
+        parts.append('🟢 **' + os.environ.get('CARD_ADV','0') + '** 建议')
+    risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
+else:
+    # No findings. docs_only / incomplete / low-confidence already took the
+    # incident-card path above, so reaching here means a genuine clean pass.
+    risk_line = '✅ 本次未发现代码问题'
 
 commit_count = len(commits)
 if is_pr and pr_number:

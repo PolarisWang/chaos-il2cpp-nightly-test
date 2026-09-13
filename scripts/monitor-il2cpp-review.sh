@@ -71,15 +71,45 @@ read_field() {
     " 2>/dev/null
 }
 
+# alert <level> <title> <impact> <cause> <action>
+# Routes through the unified incident-card template so every abnormal message
+# reads the same way: action-level tag, impact, cause, suggested action.
+#   level: RED | YELLOW | INFO | RECOVERED
+# Falls back to the legacy plain notifier if incident-card.py is unavailable,
+# so a broken template can never silence the monitor entirely.
+INCIDENT_CARD="$DID/incident-card.py"
 alert() {
-    local title="$1" body="$2"
-    if [ -n "${FEISHU_WEBHOOK_URL:-}" ]; then
-        FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" bash "$NOTIFY" \
-            --title "$title" --message "$body" --color red --build-link "$JENKINS_URL" >/dev/null 2>&1 \
-            && log "alert sent: $title" || log "alert FAILED to send: $title"
-    else
-        log "(FEISHU_WEBHOOK_URL unset; skipping alert) $title"
+    local level="$1" title="$2" impact="${3:-}" cause="${4:-}" action="${5:-}"
+    if [ -z "${FEISHU_WEBHOOK_URL:-}" ]; then
+        log "(FEISHU_WEBHOOK_URL unset; skipping alert) [$level] $title"
+        return 0
     fi
+    if [ -f "$INCIDENT_CARD" ]; then
+        FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" python3 "$INCIDENT_CARD" \
+            --level "$level" --title "$title" \
+            --impact "$impact" --cause "$cause" --action "$action" \
+            --build-link "$JENKINS_URL" --report-link "$JENKINS_URL" \
+            >/dev/null 2>&1 \
+            && log "alert sent: [$level] $title" \
+            || log "alert FAILED to send: [$level] $title"
+    else
+        FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" bash "$NOTIFY" \
+            --title "$title" --message "$impact" --color red --build-link "$JENKINS_URL" >/dev/null 2>&1 \
+            && log "alert sent (legacy): $title" || log "alert FAILED (legacy): $title"
+    fi
+}
+
+# failure_cause <raw-error-text> → human-readable cause string
+failure_cause() {
+    local t="$1"
+    case "$t" in
+        *"exit code 129"*)            echo "审查脚本参数错误（git 调用失败）—— 超大 diff 合并 chunk 时触发，脚本 bug，不会自愈" ;;
+        *"Argument list too long"*|*ARG_MAX*) echo "文件列表过长超出系统限制（ARG_MAX）—— 大 diff 时触发，脚本 bug，不会自愈" ;;
+        *"exit code 137"*)            echo "审查进程被系统终止（内存不足）" ;;
+        *[Tt]imeout*)                 echo "审查超时（模型响应超过阈值）" ;;
+        *"Failed in branch"*)         echo "构建分支失败（非审查环节）" ;;
+        *)                            echo "审查流程异常，需查看构建日志定位" ;;
+    esac
 }
 
 # ── Load previous state ──
@@ -124,12 +154,11 @@ if [ -f "$LOCK_FILE" ]; then
     LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
     if [ "$LOCK_AGE" -gt "$((LOCK_TIMEOUT + 300))" ]; then
         log "WARNING: cr-trigger.lock is ${LOCK_AGE}s old (> timeout ${LOCK_TIMEOUT}s) — reviews are blocked"
-        alert "⚠️ IL2CPP Code Review 触发锁卡住" \
-"cr-trigger.lock 已存在 $(( LOCK_AGE/60 )) 分钟，超过超时阈值 $(( LOCK_TIMEOUT/60 )) 分钟。
-后续所有提交都无法触发代码审查，直到锁被清除。
-锁文件: ${LOCK_FILE}
-清除命令: rm -f ${LOCK_FILE}
-打开 Jenkins: ${JENKINS_URL}"
+        alert "RED" "代码审查已阻塞" \
+"触发锁已持有 $(( LOCK_AGE/60 )) 分钟（阈值 $(( LOCK_TIMEOUT/60 )) 分钟）
+后续所有提交都无法触发审查" \
+"上一次审查未正常释放锁（可能构建中断 / 脚本异常退出）" \
+"清除锁：rm -f ${LOCK_FILE}"
     fi
 fi
 
@@ -166,13 +195,14 @@ if [ -f "$STATE_FILE_CR" ] && [ -d "$BOOMING_DIR/.git" ]; then
             LAST_BUILD_AGE=$(( NOW - ${TS:-0} ))
             if [ "$LAST_BUILD_AGE" -gt "$STALL_S" ]; then
                 log "WARNING: state behind HEAD by ${BEHIND}, no build for $(( LAST_BUILD_AGE/60 ))m — likely stalled"
-                alert "⚠️ IL2CPP Code Review 可能已停止" \
-"状态落后仓库 HEAD ${BEHIND} 个提交，且已 $(( LAST_BUILD_AGE/60 )) 分钟没有新的审查构建（无锁占用）。
-可能原因：触发轮询停止 / 状态文件损坏。
+                alert "RED" "代码审查可能已停止" \
+"状态落后仓库 HEAD ${BEHIND} 个提交
+已 $(( LAST_BUILD_AGE/60 )) 分钟没有新的审查构建（且无锁占用）" \
+"触发轮询停止 / 状态文件损坏
 last_reviewed: ${LAST_REVIEWED:0:10}
 repo HEAD:     ${REPO_HEAD:0:10}
-上次构建:      #${NUM} ${WHEN}
-打开 Jenkins: ${JENKINS_URL}"
+上次构建:      #${NUM} ${WHEN}" \
+"检查 poller cron 是否仍在运行（trigger-code-review.sh）"
             else
                 log "state behind HEAD by ${BEHIND}, last build ${WHEN} — within grace, OK"
             fi
@@ -201,19 +231,41 @@ cat >"$STATE_FILE" <<JSON
 JSON
 
 # ── Notify on transitions ──
+CAUSE="$(failure_cause "${broken:-}")"
+
 if [ -n "$NEW_FAILURE" ]; then
-    alert "⚠️ IL2CPP Code Review 构建失败" \
-"job chaos-il2cpp-code-review 最近完成构建 #${NUM} = ${RESULT}（${WHEN}）。
-${broken:+失败环节：${broken}\n}
-打开 Jenkins: ${JENKINS_URL}"
+    alert "RED" "代码审查构建失败" \
+"构建 #${NUM} = ${RESULT}（${WHEN}）
+本次提交未被审查，飞书无审查卡片" \
+"${CAUSE}" \
+"查看构建日志定位失败环节（Jenkins 构建 #${NUM}）"
 elif [ -n "$RECOVERED" ]; then
-    alert "✅ IL2CPP Code Review 已恢复" \
-"job 最近完成构建 #${NUM} = SUCCESS。\n${JENKINS_URL}"
+    # Quantify the outage: how long it was broken and how much went unreviewed.
+    OUTAGE_MIN=$(( (now - ${LAST_ALERT_TS:-$now}) / 60 ))
+    alert "RECOVERED" "代码审查已恢复正常" \
+"构建 #${NUM} = SUCCESS
+中断时长约 ${OUTAGE_MIN} 分钟" \
+"" \
+"无需操作"
 elif [ -n "$REALERT" ]; then
-    alert "⚠️ IL2CPP Code Review 持续失败" \
-"job 从 ${PREV_STATUS} 起持续失败，最近完成构建 #${NUM} = ${RESULT}（${WHEN}）。
-${broken:+失败环节：${broken}\n}
-打开 Jenkins: ${JENKINS_URL}"
+    # Cumulative impact, not a repeat of the first alert. The first alert said
+    # "it broke"; this one must say "it is STILL broken and here is the cost".
+    SUSTAINED_H=$(( (now - ${LAST_ALERT_TS:-$now}) / 3600 ))
+    # Compute the unreviewed count here rather than reusing LAST_REVIEWED/
+    # REPO_HEAD — those are only assigned inside the silent-stoppage guard
+    # (which closes well above this block) and may be unset.
+    UNREVIEWED=0
+    _lr=$(python3 -c "import json;print(json.load(open('$STATE_FILE_CR')).get('last_reviewed_commit',''))" 2>/dev/null || echo "")
+    _rh=$(git -C "$BOOMING_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$_lr" ] && [ -n "$_rh" ]; then
+        UNREVIEWED=$(git -C "$BOOMING_DIR" rev-list --count "$_lr".."$_rh" 2>/dev/null || echo 0)
+    fi
+    alert "RED" "代码审查持续失败" \
+"最近完成构建 #${NUM} = ${RESULT}（${WHEN}）
+已持续失败约 ${SUSTAINED_H} 小时
+期间约 ${UNREVIEWED} 个提交未被审查" \
+"根因与首次告警相同：${CAUSE}" \
+"该问题不会自愈，需人工修复"
 else
     log "no status transition (${PREV_STATUS} -> $STATUS)"
 fi

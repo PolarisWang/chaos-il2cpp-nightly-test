@@ -143,11 +143,12 @@ def main() -> int:
         got = m.read_nightly_summary(race, run_id="20260912_045412-c3d475811")
         check("per-run summary is preferred over the shared file",
               got.get("passed") == 21, str(got.get("passed")))
-        # A run with no per-run copy must still publish (backward compat) but
-        # should not silently claim the shared file's numbers are its own.
+        # A run with no per-run copy must NOT silently adopt the shared file's
+        # numbers when that file belongs to someone else (see the refusal checks
+        # below) — it reports nothing instead.
         got2 = m.read_nightly_summary(race, run_id="20260912_999999-xxxxxxx")
-        check("absent per-run summary falls back to the shared file",
-              got2.get("passed") == 0, str(got2))
+        check("absent per-run summary does not adopt a foreign shared file",
+              got2 == {}, str(got2))
         # With no run id at all, behave exactly as before the change.
         got3 = m.read_nightly_summary(race)
         check("no run_id -> shared file (unchanged legacy behaviour)",
@@ -163,6 +164,27 @@ def main() -> int:
         empty.mkdir()
         check("latest_run_id -> '' when there is no run-state tree",
               m.latest_run_id(empty) == "")
+
+        # A summary belonging to ANOTHER run must be refused, not published.
+        # Build 283: the windows run built 22 chunks, was Ctrl-C'd before it
+        # aggregated, so no per-run summary existed; the publisher fell back to
+        # the shared file (run 20260912_091611) and published 0/45 for it. It
+        # printed a warning and then used the numbers anyway.
+        stray = tmp / "stray"
+        write_json(stray / "summary" / "nightly-result.json",
+                   {"passed": 0, "total": 45, "runId": "20260912_091611-6e39a059e"})
+        check("refuses a shared summary owned by another run",
+              m.read_nightly_summary(stray, run_id="20260913_035640-a9fa0def7") == {})
+        # ...but ACCEPTS the shared file when it really is ours (the run was
+        # interrupted after aggregating but before the per-run copy landed).
+        write_json(stray / "summary" / "nightly-result.json",
+                   {"passed": 22, "total": 45, "runId": "20260913_035640-a9fa0def7"})
+        ok = m.read_nightly_summary(stray, run_id="20260913_035640-a9fa0def7")
+        check("accepts the shared summary when its runId is ours",
+              ok.get("passed") == 22, str(ok.get("passed")))
+        # Backward compatibility: no run_id supplied -> behave as before.
+        check("no run_id still reads the shared file",
+              m.read_nightly_summary(stray).get("passed") == 22)
 
         print("\n[2] parse_legacy_summary_md — old markdown fallback")
         legacy = tmp / "legacy"
