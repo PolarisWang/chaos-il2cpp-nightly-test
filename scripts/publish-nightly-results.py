@@ -202,10 +202,11 @@ def read_nightly_summary(report_dir: Path, run_id: str = "") -> dict:
     return data
 
 
-def parse_legacy_summary_md(report_dir: Path) -> dict:
+def parse_legacy_summary_md(report_dir: Path, run_id: str = "") -> dict:
     """Best-effort parse of the LEGACY `nightly-summary.md` (old reporting stack).
 
     Shape (see full-run/<run-id>/summary/nightly-summary.md):
+        - Run: `<run-id>`
         | Assemblies | 28 |
         | Chunks | 54 / 71 verified |
         | Fact pass rate | 97.8%  |
@@ -216,6 +217,17 @@ def parse_legacy_summary_md(report_dir: Path) -> dict:
     Only used when nightly-result.json is absent.  Returns a partial summary in
     the same key space as read_nightly_summary() so downstream code needs no
     branch; any field we cannot parse is simply left out.
+
+    RUN GUARD: `nightly-summary.md` is a SINGLE shared file that every run
+    overwrites — exactly like `nightly-result.json`, whose guard was added in
+    v5. This fallback had none, so when the JSON was refused the publisher fell
+    straight through to whatever run wrote the markdown last. On build 288 the
+    JSON guard correctly refused run dad53c583, and this function then read the
+    markdown written by that same run and reported it (as `0/0`, only by luck —
+    the interrupted run's worklist happened to match no chunk entries). Reading
+    a foreign run's file here is the same bug the JSON guard exists to prevent,
+    so it gets the same treatment: when a run_id is known and the file declares
+    a different one, refuse and say so.
     """
     md_file = next((c for c in (
         report_dir / "nightly-summary.md",
@@ -228,6 +240,22 @@ def parse_legacy_summary_md(report_dir: Path) -> dict:
     except OSError as e:
         print(f"  [publish] WARNING: failed to read {md_file}: {e}")
         return {}
+
+    if run_id:
+        m = re.search(r"^-\s*Run:\s*`([^`]+)`", text, re.M)
+        if m and m.group(1).strip() != run_id:
+            print(f"  [publish] REFUSING nightly-summary.md: it belongs to run "
+                  f"{m.group(1).strip()}, not {run_id} — same shared-file hazard "
+                  f"as nightly-result.json. Reporting no data rather than "
+                  f"another run's numbers.")
+            return {}
+        if not m:
+            # No Run: header at all — cannot establish provenance. The header is
+            # always emitted by aggregate.py, so its absence means this is not a
+            # file we produced; refuse rather than guess.
+            print(f"  [publish] REFUSING nightly-summary.md: no `Run:` header, "
+                  f"so its provenance cannot be established (need {run_id}).")
+            return {}
 
     def _metric(label: str):
         m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*([^|]+?)\s*\|", text, re.M)
@@ -577,7 +605,7 @@ def build_nightly_data(
     nightly_summary = read_nightly_summary(report_dir, run_id=run_id)
     summary_source = "nightly-result.json"
     if not nightly_summary:
-        nightly_summary = parse_legacy_summary_md(report_dir)
+        nightly_summary = parse_legacy_summary_md(report_dir, run_id=run_id)
         summary_source = ("legacy nightly-summary.md" if nightly_summary
                           else "NONE — metrics unavailable")
     print(f"  [publish] Summary source: {summary_source}")
@@ -866,6 +894,13 @@ def main() -> int:
     print(f"  Date tag:       {date_tag_full}")
     print(f"  Build number:   {args.build_number or '(none)'}")
 
+    # Resolve the run id ONCE, up front. build_nightly_data() also discovers it
+    # from run-state, but the pre-flight check below needs the same value — with
+    # an empty args.run_id it would report "nothing to publish" for a run that
+    # is actually fine, and (worse) would not apply the same foreign-file
+    # refusal the real read does.
+    effective_run_id = args.run_id or latest_run_id(report_dir)
+
     # Verify report dir exists
     if not report_dir.exists():
         print(f"ERROR: Report directory not found: {report_dir}")
@@ -873,8 +908,8 @@ def main() -> int:
     # NOTE: the absence of per-chunk/ is NOT a problem under the Route-3 CLI —
     # it never creates that tree.  Only complain when we also have no summary,
     # i.e. when there is genuinely nothing to publish.
-    if not (report_dir / "per-chunk").exists() and not read_nightly_summary(report_dir, run_id=args.run_id) \
-            and not parse_legacy_summary_md(report_dir):
+    if not (report_dir / "per-chunk").exists() and not read_nightly_summary(report_dir, run_id=effective_run_id) \
+            and not parse_legacy_summary_md(report_dir, run_id=effective_run_id):
         print(f"WARNING: no per-chunk/ tree and no nightly-result.json under {report_dir} "
               f"— nothing to publish")
 
@@ -884,7 +919,7 @@ def main() -> int:
                                      run_tag, args.build_number,
                                      engine_sha=args.engine_sha,
                                      platform=args.platform,
-                                     run_id=args.run_id)
+                                     run_id=effective_run_id)
 
     data_path = output_dir / f"nightly-data-{date_tag_full}.json"
     data_path.write_text(

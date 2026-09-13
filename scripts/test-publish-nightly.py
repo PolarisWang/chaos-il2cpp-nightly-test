@@ -502,12 +502,31 @@ def main() -> int:
             # the partial state, so a 20/45 default silently rewrote the meaning
             # of every test that used it.
             def P(**kw):
-                base = {"present": True, "chunk_passed": 45, "chunk_total": 45}
+                # has_data defaults True: this fixture represents a platform
+                # that produced numbers. `present` alone is not enough — an
+                # interrupted run publishes an artifact with NO chunk_total,
+                # which is present-but-dataless (see the 无数据 checks below).
+                base = {"present": True, "has_data": True,
+                        "chunk_passed": 45, "chunk_total": 45}
                 base.update(kw)
                 return base
 
             v = fm.verdict({"linux": P(), "windows": P()}, [], ["linux", "windows"])
             check("Z: all healthy -> green", v["level"] == "green", str(v))
+
+            # ── present but dataless (build 288) ──
+            # An interrupted run writes a payload whose chunk_total is None.
+            # `present` is True because the artifact exists, so the old
+            # missing-platform check passed and the card rendered a green
+            # "✅ 0/0" — a tick against a platform that produced nothing.
+            v = fm.verdict({"linux": P(), "windows": P(has_data=False,
+                                                       chunk_passed=0, chunk_total=0)},
+                           [], ["linux", "windows"])
+            check("dataless platform -> red, not green",
+                  v["level"] == "red", str(v))
+            check("dataless platform is named as such",
+                  "windows" in v.get("reason", "") and "未产出数据" in v.get("reason", ""),
+                  str(v))
 
             v = fm.verdict({"linux": P(chunk_passed=0), "windows": P()}, [],
                            ["linux", "windows"])
@@ -563,16 +582,26 @@ def main() -> int:
 
             # ── Y: trend vs previous ──
             cur = {"linux": P(chunk_passed=20), "windows": P(chunk_passed=25)}
-            prev = {"linux": {"present": True, "chunk_passed": 15, "chunk_total": 45},
-                    "windows": {"present": True, "chunk_passed": 25, "chunk_total": 45}}
+            prev = {"linux": {"present": True, "has_data": True, "chunk_passed": 15, "chunk_total": 45},
+                    "windows": {"present": True, "has_data": True, "chunk_passed": 25, "chunk_total": 45}}
             t = fm.compare_previous(cur, prev)
             check("Y: delta computed", t["linux"]["delta"] == 5, str(t["linux"]))
             check("Y: unchanged platform gives 0", t["windows"]["delta"] == 0)
             check("Y: same_total marked comparable", t["linux"]["same_total"] is True)
 
+            # A dataless previous run has no numbers to compare against. It must
+            # report "not comparable" rather than a delta against its zeros,
+            # which would read as a real regression from a night that failed.
+            prev_empty = {"linux": {"present": True, "has_data": False,
+                                    "chunk_passed": 0, "chunk_total": 0}}
+            t = fm.compare_previous(cur, prev_empty)
+            check("Y: dataless baseline -> not comparable",
+                  t["linux"]["comparable"] is False, str(t.get("linux")))
+
             # A different total means the worklist moved — not a like-for-like
             # comparison, so it must not be rendered as a delta.
-            prev_diff_total = {"linux": {"present": True, "chunk_passed": 15, "chunk_total": 40}}
+            prev_diff_total = {"linux": {"present": True, "has_data": True,
+                                         "chunk_passed": 15, "chunk_total": 40}}
             t = fm.compare_previous(cur, prev_diff_total)
             check("Y: total change -> not a like-for-like delta",
                   t["linux"]["same_total"] is False, str(t["linux"]))
@@ -718,6 +747,25 @@ def main() -> int:
                   "endlocal & set" not in bat_code)
             check("delayed expansion enabled in bat code",
                   "setlocal EnableDelayedExpansion" in bat_code)
+
+            # The windows CLI call must record its exit status. It had no guard
+            # at all — no exit-code read, no `||` (the linux branch at least
+            # has `|| echo`) — so build 288's interrupted run fell through to
+            # "Pipeline Complete" and Jenkins reported SUCCESS on a run that
+            # produced nothing.
+            check("windows captures the nightly cli exit code",
+                  "NIGHTLY_RC=!ERRORLEVEL!" in bat_code,
+                  "the cli call must record its exit status")
+            check("windows fails the branch when the cli fails",
+                  "NIGHTLY_FAILED=1" in bat_code and "exit /b 1" in bat_code,
+                  "an interrupted run must not exit 0")
+            # `if defined` is evaluated at RUN time, so it sees a value set
+            # earlier inside the same parenthesised block. `if "%NIGHTLY_FAILED%"==...`
+            # would expand at PARSE time and see nothing — the same trap the
+            # %ERRORLEVEL% comment above documents.
+            check("windows tests the failure flag with `if defined`",
+                  "if defined NIGHTLY_FAILED" in bat_code,
+                  "a %VAR% test would expand at parse time and miss it")
             check("windows forwards --skip-report-server",
                   "--skip-report-server" in jf)
             # No CDN 'main' fallback anywhere: /main was measured serving the

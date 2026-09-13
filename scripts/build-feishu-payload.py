@@ -94,6 +94,19 @@ def verdict(platforms: dict, missing: list, expect: list,
         return {"level": "red", "word": "需要处理",
                 "reason": "缺少平台报告: " + "、".join(missing)}
 
+    # A platform whose artifact exists but holds no results. The file is
+    # present, so the old `missing` check passed and the card rendered a green
+    # "✅ 0/0" — a tick against a platform that produced nothing. That is how
+    # build 288's interrupted windows run presented: no chunk_total at all.
+    empty = [
+        p for p in expect
+        if platforms.get(p, {}).get("present")
+        and not platforms[p].get("has_data", False)
+    ]
+    if empty:
+        return {"level": "red", "word": "需要处理",
+                "reason": "、".join(empty) + " 未产出数据（可能被中断）"}
+
     # A platform that produced a report but passed NOTHING is unambiguously
     # broken — that is the shape both the linux and windows outages took.
     dead = [
@@ -134,10 +147,13 @@ def compare_previous(cur: dict, prev: dict | None) -> dict:
     """
     out = {}
     for plat, info in (cur or {}).items():
-        if not info.get("present"):
+        # Only compare runs that actually produced numbers on BOTH sides. A
+        # platform with an empty artifact would otherwise show a delta against
+        # its zero-valued placeholders, which reads as a real regression.
+        if not info.get("present") or not info.get("has_data"):
             continue
         prev_info = (prev or {}).get(plat) or {}
-        if not prev_info.get("present"):
+        if not prev_info.get("present") or not prev_info.get("has_data"):
             out[plat] = {"comparable": False}
             continue
         delta = info.get("chunk_passed", 0) - prev_info.get("chunk_passed", 0)
@@ -163,7 +179,14 @@ def summarise(data: dict | None) -> dict:
     passed = s.get("chunk_passed")
     pct = f"{passed / total * 100:.1f}%" if total else "N/A"
     return {
+        # `present` means "the artifact was found"; it does NOT mean it carries
+        # results. An interrupted run publishes a payload whose chunk_total is
+        # None — the file exists, so present=True, but there is nothing in it.
+        # Collapsing those two states to 0 made the card render "✅ 0/0", a
+        # tick against a platform that produced no data at all (build 288).
+        # `has_data` distinguishes them so callers can say 无数据 instead.
         "present": True,
+        "has_data": total is not None and passed is not None,
         "chunk_passed": passed if passed is not None else 0,
         "chunk_total": total if total is not None else 0,
         "chunk_pct": pct,
@@ -231,6 +254,12 @@ def build_payload(build_url: str, date_tag: str, run_tag: str,
         label = "Windows" if plat == "windows" else "Linux"
         if not info.get("present"):
             lines.append(f"**{label}**  ⚠️ 无报告")
+            continue
+        if not info.get("has_data"):
+            # Artifact exists but carries no results — an interrupted run
+            # publishes exactly this shape. A tick here would claim a healthy
+            # platform on a night it produced nothing.
+            lines.append(f"**{label}**  ⚠️ 无数据（本轮可能被中断）")
             continue
         passed, total = info["chunk_passed"], info["chunk_total"]
         mark = "❌" if (total and passed == 0) else ("✅" if passed == total else "⚠️")

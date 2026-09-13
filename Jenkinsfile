@@ -627,6 +627,30 @@ sh """
                                     --max-workers %NIGHTLY_WORKERS% ^
                                     --native-config "${BUILD_CONFIG}"
 
+                                REM Capture the CLI's exit status IMMEDIATELY. This call
+                                REM used to have no guard at all (the linux branch at
+                                REM least has `|| echo`), so when the run was interrupted
+                                REM the script fell straight through to "Pipeline
+                                REM Complete" and the build reported SUCCESS on a run
+                                REM that produced nothing. Build 288 lost all 45 chunks
+                                REM to a KeyboardInterrupt this way and nothing said so.
+                                REM
+                                REM `!ERRORLEVEL!` is required, not `%ERRORLEVEL%`:
+                                REM this is inside a parenthesised block, where %VAR%
+                                REM expands at parse time and would capture a stale
+                                REM value. Delayed expansion is enabled at script level.
+                                set "NIGHTLY_RC=!ERRORLEVEL!"
+                                echo === [win-x64] nightly cli exit=!NIGHTLY_RC! ===
+                                if not "!NIGHTLY_RC!"=="0" (
+                                    echo === [win-x64] ERROR: nightly cli FAILED with exit !NIGHTLY_RC! ===
+                                    echo === [win-x64] ERROR: this platform produced no usable results ===
+                                    REM Still publish: the payload records what little
+                                    REM exists, and the publisher's runId guard turns
+                                    REM "no data" into an explicit 无数据 rather than a
+                                    REM green 0/0.
+                                    set "NIGHTLY_FAILED=1"
+                                )
+
                                 echo === [win-x64] Pipeline Complete ===
                                 set "REPORT=${winBoomin}\\tests\\e2e\\nightly-build-report"
 
@@ -751,7 +775,28 @@ sh """
                                 if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
                                 echo === [win-x64] published artifacts ===
                                 if exist "${winArtifacts}" (dir /b "${winArtifacts}" 2>nul)
+
+                                REM Final statement decides this bat's exit code, which
+                                REM Groovy reads below. Without an explicit failure the
+                                REM branch always exited 0 and an interrupted run was
+                                REM indistinguishable from a clean one.
+                                if defined NIGHTLY_FAILED (
+                                    echo === [win-x64] branch finished with FAILURES ===
+                                    exit /b 1
+                                )
+                                exit /b 0
                             """
+                            // The bat above exits 1 when NIGHTLY_FAILED is set, which
+                            // makes `bat` throw and FAILS this branch — deliberately.
+                            // A windows run that produced nothing must not leave the
+                            // build green: build 288 lost all 45 chunks to an
+                            // interruption and still reported SUCCESS, so the gap went
+                            // unnoticed until the published numbers were inspected by
+                            // hand. Failing the branch makes Jenkins say so directly.
+                            //
+                            // The job-level verdict still comes from the payload (the
+                            // card reads a dataless platform as 无数据), so this is the
+                            // transport, not the judgement.
                             // Archive on THIS node: the post block's archiveArtifacts
                             // runs on the linux-x64 agent and cannot see a Windows
                             // workspace, so without this the windows-x64
