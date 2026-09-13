@@ -1,11 +1,58 @@
 # IL2CPP Nightly Build — 综合报告与优化方案
 
-> 更新: 2026-09-11 晚（第二次） · 数据源: build 263/264 + 发布链路修复
-> 引擎 HEAD: `2250e18f7` · Jenkins job: `chaos-il2cpp-nightly`
+> 更新: 2026-09-13 · 数据源: **build 285（SUCCESS）**
+> 引擎 HEAD: `4f5d0097a` · Jenkins job: `chaos-il2cpp-nightly`
+>
+> **状态：Windows 首次产出非零发布数据 —— 18/45。**
+> 完整交接细节见 `WINDOWS_NIGHTLY_HANDOFF.md`（v5）。
 
 ---
 
-## 🆕 本轮修复（发布链路）
+## 🆕 build 285 结果
+
+| 平台 | 发布 | 失败分布 |
+|---|---|---|
+| **windows-x64** | ✅ **18/45**（首次非零） | atg-combined-cs=8, csharp-error=5, unknown=13, native-linker-error=1 |
+| linux-x64 | 0/45 | atg-combined-cs=1, unknown=44 |
+
+**四个目标全部达成**：定时跑 ✅ · 正确数据 ✅ · 汇总报告 ✅ · 同步到群 ✅
+
+### 🔑 卡住数日的共同根因：`GcAllocateFast` 未定义
+
+```
+async_stubs.obj : error LNK2019: unresolved external symbol
+  "...GcAllocateFast(unsigned __int64)" referenced in function async_task_create_gc
+chaos_entry.exe : fatal error LNK1120: 1 unresolved externals
+→ cmake build FAILED → 每个 chunk 都挂
+```
+
+`async_stubs.cpp` 使用 `CHAOS_IL2CPP_NEW_GC` 宏（展开为 `GcAllocateFast`），但
+**没有 include 定义它的 `gc_alloc_stubs.h`** —— 只能看到 `gc_helpers.h` 的普通声明，
+编译器无法内联，于是发出真实外部调用，链接失败。
+
+修复：`#include "core/gc_alloc_stubs.h"`（引擎 `8c226c063`）。
+
+**为什么之前三次都找错方向**：这个错误只暴露为分类器认不出的 `unknown`，而且
+chunk 日志里 `fact` 阶段仍显示 **passed**（它跑的是**上一次遗留的 `entry.exe`**），
+所以看起来像 "1/2 passed"，不像构建全挂。
+
+### 本轮修复清单
+
+| # | 问题 | 状态 |
+|---|---|---|
+| 1 | `GcAllocateFast` 缺 include（两平台共同根因） | ✅ 引擎 `8c226c063` |
+| 2 | 发布出**别的 run** 的数字（build 283：建出 22 个却发布 0/45） | ✅ per-run summary + 拒绝外来 runId |
+| 3 | `record_from_run` 静默吞异常（证据被丢） | ✅ 打完整 traceback |
+| 4 | worker 用满 24 核 → 共享 C# 项目构建竞争 `CS2012` | ✅ 封顶 4 |
+| 5 | 僵尸验证树触发硬门禁（每 chunk 都挂） | ✅ 运行前删除 |
+| 6 | `DOTNET_ROOT` 跨节点污染（**我引入的**） | ✅ Windows 无条件覆盖 |
+| 7 | bat/Groovy 陷阱 7 处（解析期展开、CPS 丢变量、反斜杠） | ✅ 详见 handoff §2 |
+
+**自测 148/148。**
+
+---
+
+## 🔄 上一轮修复（发布链路，build 264 起）
 
 **一句话**：Windows 之所以「没跑出数据」，不是 Windows 挂了，而是**整条发布链路
 从来没有真正的数据生产者** —— 发布脚本读 `per-chunk/` + `reports/`，而这两个目录
