@@ -415,17 +415,16 @@ _SHELL_SCRIPTS_WITH_PYTHON = [
 
 
 def test_code_review_card_python_compiles():
-    """The standalone card-render script (moved out of the Jenkinsfile inline
-    python in layer 3) must compile cleanly, so a future edit there can't
-    slip a SyntaxError past the review flow. This is the file that now owns the
-    commit-parse + ghost-filter + card build."""
-    card = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
-    assert os.path.isfile(card), "code-review-card.py missing"
+    """The feishu/ package (replaced code-review-card.py + incident-card.py)
+    must compile cleanly. This verifies that all modules under scripts/feishu/
+    are valid Python before they ever reach a Jenkins agent."""
+    package = os.path.join(REPO_ROOT, "scripts", "feishu")
+    assert os.path.isdir(package), "feishu/ package missing at " + package
     result = subprocess.run(
-        ["python3", "-m", "py_compile", card], capture_output=True, text=True
+        ["python3", "-m", "compileall", "-q", package], capture_output=True, text=True
     )
     assert result.returncode == 0, (
-        "code-review-card.py has a Python syntax error:\n" + result.stderr.strip()
+        "feishu/ package has a Python syntax error:\n" + result.stderr.strip()
     )
 
 
@@ -625,12 +624,14 @@ def test_review_script_emits_low_confidence_marker():
 def test_jenkinsfile_consumes_low_confidence():
     """The low-confidence '0 发现' fallback card text must be produced instead of
     '✅ 本次未发现代码问题' when the review is low-confidence. Since the card
-    render loop (incl. the low_confidence risk line) moved out of the Jenkinsfile
-    inline python into scripts/code-review-card.py (layer 3), check that file."""
-    card = os.path.join(REPO_ROOT, "scripts", "code-review-card.py")
-    body = _read(card)
-    assert "REVIEW_LOW_CONF" in body or "low_confidence" in body
-    assert "低置信" in body  # the card fallback text when low-confidence
+    render logic moved from Jenkinsfile inline python to the feishu/ package,
+    check that engine."""
+    engine = os.path.join(REPO_ROOT, "scripts", "feishu", "engine.py")
+    body = _read(engine)
+    assert "YELLOW" in body or "orange" in body
+    src_review = os.path.join(REPO_ROOT, "scripts", "feishu", "sources", "review.py")
+    src_body = _read(src_review)
+    assert "置信度低" in src_body or "低置信" in src_body
     # Jenkinsfile still gates on the flag before deciding to send a docs/lc card:
     jbody = _read(JENKINSFILE)
     assert "REVIEW_LOW_CONF" in jbody

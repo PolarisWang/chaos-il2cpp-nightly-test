@@ -1,24 +1,10 @@
 #!/bin/bash
-# send-code-review-card.sh — Shell wrapper for code-review-card.py
+# send-code-review-card.sh — findings.json → Notice → Feishu card
 #
-# Invoked by Jenkinsfile's runCodeReview stage (replacing the old inline python
-# that was triple-nested in Groovy sh triplequote + the python -c string + shell
-# escapes).
+# Invoked by Jenkinsfile's runCodeReview stage. Builds a Notice via the
+# unified feishu/ engine (sources/review.py), then sends via engine.send().
 #
-# Sets the env vars the python script reads (CARD_* prefix for its own params,
-# plus standard Jenkins env vars for others), then invokes the script from
-# the same location.  Stdout is fully visible in the Jenkins build log as plain
-# shell output — no more inline-python echo hiding the card-send result.
-#
-# Usage:
-#   send-code-review-card.sh \
-#       --repo-dir    <path>  \
-#       --workspace   <path>  \
-#       --findings    <path>  \
-#       --jenkins-url <url>   \
-#       --job         <name>  \
-#       --build-num   <num>   \
-#       --date-tag    <tag>
+# Usage: see --help flags below.
 
 set -euo pipefail
 
@@ -45,15 +31,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-export CARD_BOOMING_DIR="$REPO_DIR"
-export CARD_FINDINGS="$FINDINGS"
-export CARD_OUTDIR="/var/lib/report-server/daily"
-export JENKINS_EXT_URL="$JENKINS_URL"
-export JOB_NAME="$JOB_NAME"
-export BUILD_NUMBER="$BUILD_NUM"
-export DATE_TAG="$DATE_TAG"
-# REVIEW_FROM/REVIEW_TO/REVIEW_PR_* are passed by Jenkins as env vars already
-# via the trigger-script (trigger-code-review.sh or trigger-pr-review.sh set
-# them in the buildWithParameters call), so they arrive naturally.
+BUILD_URL="${JENKINS_URL}/job/${JOB_NAME}/${BUILD_NUM}"
 
-exec python3 "$SCRIPT_DIR/code-review-card.py"
+# File SHA for blob links — prefer env, fall back to git HEAD
+FILE_SHA="${CARD_FILE_SHA:-}"
+if [ -z "$FILE_SHA" ] && [ -n "$REPO_DIR" ]; then
+    FILE_SHA=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")
+fi
+
+exec python3 -c "
+import sys, os
+sys.path.insert(0, '${SCRIPT_DIR}')
+
+from feishu.sources.review import to_notice
+from feishu.engine import send
+
+n = to_notice(
+    '${FINDINGS}',
+    build_url='${BUILD_URL}',
+    date_tag='${DATE_TAG}',
+    file_sha='${FILE_SHA}',
+    is_pr=os.environ.get('CARD_IS_PR', '') == 'true',
+    pr_number=os.environ.get('REVIEW_PR_NUMBER', ''),
+    coverage_done=os.environ.get('REVIEW_COVERAGE_DONE', ''),
+    coverage_total=os.environ.get('REVIEW_COVERAGE_TOTAL', ''),
+    skipped_files=os.environ.get('REVIEW_SKIPPED_FILES', ''),
+)
+result = send(n, os.environ.get('FEISHU_WEBHOOK_URL', ''), force=True)
+sys.exit(0 if result == 'sent' else 1 if result == 'failed' else 0)
+" 2>&1

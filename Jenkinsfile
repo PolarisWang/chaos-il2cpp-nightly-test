@@ -266,7 +266,7 @@ pipeline {
                         fi
                         RAWT="https://raw.githubusercontent.com/PolarisWang/chaos-il2cpp-nightly-test/\$NIGHTLY_SHA"
                         echo "Downloading nightly scripts from \$RAWT"
-                        for script in publish-nightly-results.py generate-nightly-report.py build-feishu-payload.py send-feishu.py notify-feishu.sh notify-feishu-text.sh test-publish-nightly.py; do
+                        for script in publish-nightly-results.py generate-nightly-report.py build-feishu-payload.py notify-feishu.sh test-publish-nightly.py; do
                             # curl can return rc=0 even on a GnuTLS handshake failure (this box's flaky
                             # link to GitHub), so ALWAYS sanity-check the downloaded content rather than
                             # trusting rc alone. A corrupt/empty script would otherwise silently break
@@ -1412,14 +1412,26 @@ def runCodeReview(Map params = [:]) {
                 echo "Downloading from \$RAWT"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/review-with-claude.sh' \
                     "\$RAWT/scripts/review-with-claude.sh"
-                curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu-text.sh' \
-                    "\$RAWT/scripts/notify-feishu-text.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/notify-feishu.sh' \
                     "\$RAWT/scripts/notify-feishu.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-code-review-card.sh' \
                     "\$RAWT/scripts/send-code-review-card.sh"
-                curl -sL --max-time 30 -o '${SCRIPT_DIR}/code-review-card.py' \
-                    "\$RAWT/scripts/code-review-card.py"
+                # feishu/ package: the unified card engine used by all senders.
+                # The sources are fetched individually because curl does not
+                # recurse; keep this list in sync with scripts/feishu/sources/.
+                mkdir -p '${SCRIPT_DIR}/feishu/sources'
+                for f in __init__.py engine.py notice.py; do
+                    curl -sL --max-time 30 -o "\${SCRIPT_DIR}/feishu/\$f" \
+                        "\$RAWT/scripts/feishu/\$f"
+                done
+                for f in __init__.py review.py nightly.py health.py; do
+                    curl -sL --max-time 30 -o "\${SCRIPT_DIR}/feishu/sources/\$f" \
+                        "\$RAWT/scripts/feishu/sources/\$f"
+                done
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-health-card.sh' \
+                    "\$RAWT/scripts/send-health-card.sh"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-nightly-card.sh' \
+                    "\$RAWT/scripts/send-nightly-card.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/incident-card.py' \
                     "\$RAWT/scripts/incident-card.py"
                 chmod +x '${SCRIPT_DIR}/'*.sh
@@ -1455,8 +1467,19 @@ def runCodeReview(Map params = [:]) {
                     echo "ERROR: send-code-review-card.sh has a shell syntax error"
                     exit 1
                 }
-                python3 -m py_compile '${SCRIPT_DIR}/code-review-card.py' || {
-                    echo "ERROR: code-review-card.py has a Python syntax error"
+                # The feishu/ engine must be importable — a syntax error in any
+                # module would otherwise surface only as a silent card-send
+                # failure at the end of a review.
+                ( cd '${SCRIPT_DIR}' && python3 -m compileall -q feishu ) || {
+                    echo "ERROR: feishu/ package has a Python syntax error"
+                    exit 1
+                }
+                python3 -c "
+import sys; sys.path.insert(0, '${SCRIPT_DIR}')
+from feishu import Notice, send
+from feishu.sources.review import to_notice
+" || {
+                    echo "ERROR: feishu/ package is not importable"
                     exit 1
                 }
                 echo "Scripts synced to ${SCRIPT_DIR}"

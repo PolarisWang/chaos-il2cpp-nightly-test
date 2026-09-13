@@ -72,21 +72,31 @@ read_field() {
 }
 
 # alert <level> <title> <impact> <cause> <action>
-# Routes through the unified incident-card template so every abnormal message
-# reads the same way: action-level tag, impact, cause, suggested action.
+# Routes through the unified feishu engine so every abnormal message reads the
+# same way: action-level tag, impact, cause, suggested action.
 #   level: RED | YELLOW | INFO | RECOVERED
-# Falls back to the legacy plain notifier if incident-card.py is unavailable,
-# so a broken template can never silence the monitor entirely.
-INCIDENT_CARD="$DID/incident-card.py"
+# Falls back to the legacy plain notifier if the engine is unavailable, so a
+# broken template can never silence the monitor entirely. The legacy fallback
+# flattens every level to red — that is a known limitation, and the reason the
+# engine path is preferred.
+HEALTH_CARD="$DID/send-health-card.sh"
 alert() {
     local level="$1" title="$2" impact="${3:-}" cause="${4:-}" action="${5:-}"
     if [ -z "${FEISHU_WEBHOOK_URL:-}" ]; then
         log "(FEISHU_WEBHOOK_URL unset; skipping alert) [$level] $title"
         return 0
     fi
-    if [ -f "$INCIDENT_CARD" ]; then
-        FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" python3 "$INCIDENT_CARD" \
-            --level "$level" --title "$title" \
+    # Map the action level onto an engine event so the source module can pick
+    # the right level/title decorator.
+    local event="system"
+    case "$level" in
+        RED)       event="new_failure" ;;
+        RECOVERED) event="recovered" ;;
+        YELLOW)    event="system" ;;
+    esac
+    if [ -f "$HEALTH_CARD" ]; then
+        FEISHU_WEBHOOK_URL="$FEISHU_WEBHOOK_URL" bash "$HEALTH_CARD" \
+            --event "$event" --title "$title" \
             --impact "$impact" --cause "$cause" --action "$action" \
             --build-link "$JENKINS_URL" --report-link "$JENKINS_URL" \
             >/dev/null 2>&1 \
