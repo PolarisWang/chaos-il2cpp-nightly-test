@@ -22,6 +22,12 @@ readonly LOCK_FILE="/tmp/${PROGNAME}.lock"
 readonly NOTIFY_SCRIPT="/home/debian/agent/chaos-il2cpp-nightly-test/scripts/notify-feishu.sh"
 
 # Thresholds
+# NOTE: these are RATIOS of nproc, not absolute load values. They assume an IDLE
+# machine, which this box is not: it runs nightly builds that intentionally drive
+# load to 1-2x core count for hours. A plain ratio threshold therefore fires on
+# normal operation — historically 100% of all alerts (7 days: 59/59 were CPU).
+# check_cpu() compensates by downgrading to INFO whenever a build is running; the
+# thresholds below only decide "is this high for an IDLE machine".
 readonly CPU_WARN_THRESHOLD=0.9
 readonly CPU_CRIT_THRESHOLD=2.0
 readonly MEM_WARN_THRESHOLD=20
@@ -60,6 +66,23 @@ get_swap_used_pct() {
     free | awk 'NR==3 {total=$2; used=$3; if (total+0>0) printf "%d", used/total*100; else print 0}'
 }
 
+# Return 1 if any Jenkins job is currently building, 0 otherwise.
+# Scans the most recent 5 builds of each relevant job; beyond 5 proves stale.
+detect_running_builds() {
+    sudo docker exec chaos-master bash -c '
+        for job in chaos-il2cpp-code-review chaos-il2cpp-nightly chaos-il2cpp-pr-review; do
+            d="/var/jenkins_home/jobs/$job/builds"
+            [ -d "$d" ] || continue
+            for b in $(ls -t "$d" 2>/dev/null | grep -E "^[0-9]+$" | head -5); do
+                f="$d/$b/build.xml"
+                [ -f "$f" ] || continue
+                grep -q "<building>true</building>" "$f" && echo 1 && exit 0
+            done
+        done
+        echo 0
+    ' 2>/dev/null || echo 0
+}
+
 # Return integer (0-100) for disk used percent
 get_disk_used_pct() {
     df --output=pcent "$1" 2>/dev/null | tail -1 | tr -d ' %' || echo 0
@@ -70,15 +93,27 @@ get_disk_used_pct() {
 # level is one of: OK, WARN, CRIT, INFO
 
 check_cpu() {
-    local cores load level msg warn_thr crit_thr
+    local cores load level msg warn_thr crit_thr building
     cores=$(nproc 2>/dev/null || echo 1)
     load=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)
     warn_thr=$(echo "$cores * $CPU_WARN_THRESHOLD" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}')
     crit_thr=$(echo "$cores * $CPU_CRIT_THRESHOLD" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}')
-    msg="CPU load ${load}/${cores} cores (warn>${warn_thr} crit>${crit_thr})"
+    building=$(detect_running_builds)
+
     level="OK"
     if (echo "$load > $crit_thr" | bc -l 2>/dev/null | grep -q 1); then level="CRIT"
     elif (echo "$load > $warn_thr" | bc -l 2>/dev/null | grep -q 1); then level="WARN"
+    fi
+
+    # A running build EXPLAINS high load — it is the machine doing its job, not a
+    # fault. Report it as INFO so it stays visible in the health report without
+    # raising an incident. Only load that is high while the box is IDLE tells us
+    # something is wrong (runaway process, leaked task).
+    if [ "$level" != "OK" ] && [ "$building" = "1" ]; then
+        msg="CPU load ${load}/${cores} cores — build in progress (expected, thresholds ${warn_thr}/${crit_thr} do not apply)"
+        level="INFO"
+    else
+        msg="CPU load ${load}/${cores} cores (warn>${warn_thr} crit>${crit_thr})"
     fi
     printf "cpu\t%s\t%s\n" "$level" "$msg"
 }
@@ -257,6 +292,24 @@ state_file = os.environ.get('MONITOR_STATE_FILE', '/var/lib/report-server/daily/
 webhook = os.environ.get('FEISHU_WEBHOOK_URL', '')
 dry_run = os.environ.get('MONITOR_DRY_RUN', '0') == '1'
 
+# Hysteresis: how many consecutive checks must agree before a transition is
+# considered real. CPU crosses its threshold line momentarily all the time (a
+# compile spike, a GC pause); without this, one 5-min sample flips the state and
+# emits BOTH 「异常告警」 and 「已恢复」 within minutes of each other. Observed
+# 2026-09-13 03:25-03:50: 5 messages in 25 minutes, all CPU flapping.
+# 2 checks = 10 minutes of agreement.
+DEBOUNCE_CHECKS = int(os.environ.get('MONITOR_DEBOUNCE_CHECKS', '2'))
+
+# A recovery notice is only worth sending if there was a real outage to recover
+# FROM. Flapping up and down for 10 minutes is noise, not an incident. Emit the
+# recovery only when the issue was actually held for this long.
+RECOVERY_MIN_HOLD_S = int(os.environ.get('MONITOR_RECOVERY_MIN_HOLD_S', '1800'))
+
+# Checks that are subject to debounce. Others (docker down, disk full, sshd
+# dead) are unambiguous and must alert immediately — debouncing those would
+# delay a real outage by 10 minutes for no benefit.
+DEBOUNCED = {'cpu'}
+
 # Parse tab-separated check results
 lines = sys.stdin.read().strip().split('\n')
 checks = {}
@@ -279,35 +332,128 @@ if os.path.exists(state_file):
         prev = {}
 
 # Detect changes
-new_issues = []    # OK → WARN/CRIT
+new_issues = []    # OK → WARN/CRIT (confirmed by debounce where applicable)
 recovered = []     # WARN/CRIT → OK
 ongoing = []       # WARN/CRIT still WARN/CRIT
 summary_issues = []
 summary_ok = []
 
+# Debounce bookkeeping, persisted in state across runs.
+#   _streak_<name>_<level> = consecutive checks seen at that level
+
+timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+streaks = {}
+effective = {}
+for k, v in prev.items():
+    if k.startswith('_streak_'):
+        try:
+            streaks[k] = int(v)
+        except (TypeError, ValueError):
+            streaks[k] = 0
+
+# When did each check first enter its CURRENT bad level? Used to decide whether a
+# recovery notice is warranted. Keyed by check name.
+onset = {}
+for k, v in prev.items():
+    if k.startswith('_onset_'):
+        onset[k[len('_onset_'):]] = v
+
+def bump(name, level):
+    # Increment the consecutive-check counter for (name, level) and return it.
+    key = '_streak_%s_%s' % (name, level)
+    streaks[key] = streaks.get(key, 0) + 1
+    return streaks[key]
+
+def reset_streaks(name):
+    # Clear counters for a check — call when it returns to OK.
+    for k in list(streaks):
+        if k.startswith('_streak_%s_' % name):
+            del streaks[k]
+
 for name, c in checks.items():
     if name.startswith('_'):
         continue
     prev_level = prev.get(name, {}).get('level', 'OK')
+    # What the PREVIOUS run actually told the user. Differs from prev_level on the
+    # first sample of a debounced check: we write WARN into the state (so the
+    # health report shows it) while telling the user NOTHING. Recovery must be
+    # measured against what was announced — otherwise a check that was never
+    # alerted can never be 「recovered」 from, and the OK-streak counter is wiped
+    # by the WARN branch forever (a real bug found by simulation).
+    prev_effective = prev.get('_effective_' + name, prev_level)
     cur_level = c['level']
 
     if cur_level in ('WARN', 'CRIT'):
         summary_issues.append(f'  • [{cur_level}] {c[\"msg\"]}')
-        if prev_level == 'OK':
-            new_issues.append(f'{name}({cur_level})')
-        else:
+
+        reset_streaks(name + '__ok')
+        if prev_effective in ('WARN', 'CRIT'):
+            # User already knows. Stay quiet, just keep the onset time.
             ongoing.append(f'{name}({cur_level})')
+            onset.setdefault(name, prev.get('_onset_' + name, timestamp))
+        else:
+            # Not yet announced to the user — require sustained agreement.
+            n = bump(name, cur_level)
+            if name in DEBOUNCED and n < DEBOUNCE_CHECKS:
+                ongoing.append(f'{name}({cur_level}?{n})')   # candidate, silent
+            else:
+                new_issues.append(f'{name}({cur_level})')
+                onset[name] = timestamp
     else:
         summary_ok.append(f'  • {c[\"msg\"]}')
-        if prev_level in ('WARN', 'CRIT'):
-            recovered.append(f'{name}({prev_level}→OK)')
+        if prev_effective in ('WARN', 'CRIT'):
+            # Was announced bad; confirm the recovery before saying so.
+            n = bump(name + '__ok', 'OK')
+            if name in DEBOUNCED and n < DEBOUNCE_CHECKS:
+                ongoing.append(f'{name}({cur_level}?recovering)')  # not yet
+            else:
+                since = onset.get(name, prev.get('_onset_' + name, ''))
+                held = 0
+                if since:
+                    try:
+                        t0 = time.mktime(time.strptime(since, '%Y-%m-%d %H:%M:%S'))
+                        held = time.time() - t0
+                    except (ValueError, TypeError):
+                        held = 0
+                if name in DEBOUNCED and held < RECOVERY_MIN_HOLD_S:
+                    pass   # flap, not an outage — no recovery card
+                else:
+                    recovered.append(f'{name}({prev_effective}→OK)')
+                reset_streaks(name)
+                reset_streaks(name + '__ok')
+                onset.pop(name, None)
+        else:
+            reset_streaks(name + '__ok')
 
-# Determine overall status levels
+    # Record what the user will now believe about this check: the announced level
+    # for confirmed states, or the previous effective level while still pending.
+    if cur_level in ('WARN', 'CRIT'):
+        announced = (cur_level if f'{name}({cur_level})' in new_issues
+                     else prev_effective)
+    else:
+        if any(x.startswith(name + '(') for x in recovered):
+            announced = 'OK'
+        elif any(x.startswith(name + '(') for x in ongoing):
+            announced = prev_effective   # pending recovery — still believed bad
+        else:
+            announced = 'OK'
+    effective[name] = announced
+
+# Determine overall status levels (derived from the raw check levels, BEFORE the
+# debounce filter — a persistent problem must still be visible in the report
+# during its debounce window, it just should not page anyone yet).
 has_crit = any(c['level'] == 'CRIT' for c in checks.values())
 has_warn = any(c['level'] == 'WARN' for c in checks.values())
 has_info = any(c['level'] == 'INFO' for c in checks.values())
 
-timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+# ── Sustained CRIT re-alert ──
+# When every known issue is ongoing (not new, not recovered), the user got their
+# first alert when it BECAME new. They still need a periodic reminder that it is
+# still broken. The original code had 'and not ongoing' here, which made the
+# branch mathematically UNREACHABLE: if has_crit and not new_issues and not
+# recovered, then every issue is ongoing, so 'not ongoing' is always False.
+# Net effect: a CRIT that persisted past detection went permanently silent.
+sustained_crit = (has_crit and not new_issues and not recovered and ongoing)
 
 # Build message
 msg_lines = ['📋 **系统健康检查报告**', f'🕐 {timestamp}', '───', '']
@@ -338,9 +484,10 @@ elif recovered and ongoing:
     notify = True
     color = 'blue'
     title = f'🔄 系统状态变化 [{timestamp}]'
-elif has_crit and not new_issues and not recovered and not ongoing:
-    # Ongoing critical without any change — still alert periodically
-    # Only if last notification was > 30 min ago (handled via state's _last_alerted)
+elif sustained_crit and has_crit:
+    # Everything is ongoing and at least one is CRIT — remind periodically.
+    # Guarded by _last_alerted so a permanently-broken box does not spam; the
+    # 30-min cadence matches the original intent, it just never actually ran.
     last_alerted = prev.get('_last_alerted', 0)
     if time.time() - last_alerted > 1800:
         notify = True
@@ -352,6 +499,15 @@ state_out = {k: v for k, v in checks.items()}
 state_out['_last_check'] = timestamp
 if notify:
     state_out['_last_alerted'] = time.time()
+# Persist debounce streaks so they survive across cron runs (every 5 min).
+for k, v in streaks.items():
+    state_out[k] = v
+for name, ts in onset.items():
+    state_out['_onset_' + name] = ts
+# Persist the level the user currently BELIEVES, so recovery is detected against
+# what was announced rather than against the raw (possibly still-pending) level.
+for name, lv in effective.items():
+    state_out['_effective_' + name] = lv
 with open(state_file, 'w') as f:
     json.dump(state_out, f, ensure_ascii=False)
 
@@ -385,8 +541,9 @@ if notify:
 # Print summary to log
 new_str = ','.join(new_issues) if new_issues else '-'
 rec_str = ','.join(recovered) if recovered else '-'
+ongoing_str = ','.join(ongoing) if ongoing else '-'
 print(f'crit={has_crit} warn={has_warn} info={has_info} notify={notify}')
-print(f'new=[{new_str}] recovered=[{rec_str}]')
+print(f'new=[{new_str}] recovered=[{rec_str}] ongoing=[{ongoing_str}]')
 " <<< "$raw"
 
     log "Done."
