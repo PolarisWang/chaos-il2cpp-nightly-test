@@ -88,6 +88,118 @@ def _format_header(title: str, level_info: dict, template: dict) -> str:
                       color=level_info['color'])
 
 
+def _render_sections(sections) -> list:
+    """Render structured Sections into Feishu elements.
+
+    Each section becomes its own element group so the card has visual
+    structure. The layouts here are the ones measured to render well in
+    Feishu's client:
+
+      summary  → a 4-column `fields` grid (is_short pairs). This is the ONLY
+                 Feishu construct that produces true column alignment, which
+                 is why the counters read as a dashboard row rather than a
+                 run-on sentence.
+      fault    → vertical: one line per issue, with the diagnosis and the fix
+                 command indented underneath. Faults need room to explain
+                 themselves, so they do NOT go in a grid.
+      pending  → same vertical shape, one level quieter.
+      ok_line  → a single dot-separated markdown line. Healthy checks do not
+                 deserve grid cells; they only need to be confirmable at a
+                 glance, so they are folded into one row.
+      trend    → one markdown line.
+      text     → raw markdown block.
+    """
+    elements = []
+
+    def _field(label, value):
+        content = '**%s**\n%s' % (label, value) if label else str(value)
+        return {'is_short': True, 'text': {'tag': 'lark_md', 'content': content}}
+
+    def _get(sec, key, default=''):
+        """Read a section field from either a dataclass or a plain dict.
+
+        Sources produce Section dataclasses; the monitor's embedded Python
+        emits plain dicts (it cannot import the package at check time). Support
+        both so neither caller has to care.
+        """
+        if isinstance(sec, dict):
+            return sec.get(key, default)
+        return getattr(sec, key, default)
+
+    def _items(sec):
+        v = _get(sec, 'items', None)
+        # A dict has a builtin .items() method — never treat that as the value.
+        if isinstance(sec, dict):
+            return v if isinstance(v, list) else []
+        return list(v) if v else []
+
+    for sec in sections:
+        stype = _get(sec, 'type', 'text')
+        items = _items(sec)
+
+        if stype == 'summary':
+            fields = []
+            for it in items:
+                fields.append(_field(it.get('label', ''), it.get('value', '')))
+            if fields:
+                elements.append({'tag': 'div', 'fields': fields})
+                elements.append({'tag': 'hr'})
+
+        elif stype in ('fault', 'pending'):
+            lines = []
+            if _get(sec, 'title', ''):
+                lines.append('**%s**' % _get(sec, 'title'))
+            for it in items:
+                head = '%s %s' % (it.get('icon', '•'), it.get('name', ''))
+                if it.get('extra'):
+                    head += '  %s' % it['extra']
+                lines.append(head)
+                if it.get('diagnosis'):
+                    lines.append('　　→ %s' % it['diagnosis'])
+                if it.get('advice'):
+                    lines.append('　　🔧 %s' % it['advice'])
+                if it.get('detail'):
+                    lines.append('　　%s' % it['detail'])
+            if lines:
+                elements.append({
+                    'tag': 'div',
+                    'text': {'tag': 'lark_md', 'content': '\n'.join(lines)},
+                })
+                elements.append({'tag': 'hr'})
+
+        elif stype == 'ok_line':
+            if items:
+                elements.append({
+                    'tag': 'div',
+                    'text': {'tag': 'lark_md',
+                             'content': ' · '.join(str(x) for x in items)},
+                })
+                elements.append({'tag': 'hr'})
+
+        elif stype == 'trend':
+            if items:
+                elements.append({
+                    'tag': 'div',
+                    'text': {'tag': 'lark_md',
+                             'content': '📊 **趋势（较昨日同期）**  '
+                                        + '  ·  '.join(str(x) for x in items)},
+                })
+                elements.append({'tag': 'hr'})
+
+        else:  # 'text' and anything unknown
+            for raw in items:
+                if str(raw).strip():
+                    elements.append({
+                        'tag': 'div',
+                        'text': {'tag': 'lark_md', 'content': str(raw)},
+                    })
+
+    # The trailing hr from the last section would butt against the buttons.
+    if elements and elements[-1].get('tag') == 'hr':
+        elements.pop()
+    return elements
+
+
 def _plan_card(notice) -> dict:
     """Build the Feishu interactive card JSON from a notice.
 
@@ -117,11 +229,16 @@ def _plan_card(notice) -> dict:
 
     # Build elements
     elements = []
-    # raw_body: use the source's verbatim markdown instead of rendering `body`.
-    body_text = getattr(notice, 'raw_body', '') or _render_body(notice)
-    if body_text.strip():
-        elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': body_text}})
-        elements.append({'tag': 'hr'})
+    sections = getattr(notice, 'sections', None) or []
+    if sections:
+        # Structured layout — each section renders to its own element group.
+        elements.extend(_render_sections(sections))
+    else:
+        # Legacy flat body (raw_body override, or InfoLine list).
+        body_text = getattr(notice, 'raw_body', '') or _render_body(notice)
+        if body_text.strip():
+            elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': body_text}})
+            elements.append({'tag': 'hr'})
 
     # Action buttons (if any)
     if notice.actions:

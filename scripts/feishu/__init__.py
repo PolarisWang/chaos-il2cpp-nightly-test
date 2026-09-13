@@ -10,7 +10,7 @@ the engine and its templates stay unchanged.
 """
 
 from .engine import send, LEVEL_MAP
-from .notice import Notice, InfoLine, RED, YELLOW, INFO, RECOVERED
+from .notice import Notice, InfoLine, Section, RED, YELLOW, INFO, RECOVERED
 
-__all__ = ['send', 'Notice', 'InfoLine', 'LEVEL_MAP',
+__all__ = ['send', 'Notice', 'InfoLine', 'Section', 'LEVEL_MAP',
            'RED', 'YELLOW', 'INFO', 'RECOVERED']

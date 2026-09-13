@@ -517,7 +517,7 @@ def build_trend():
             parts.append('%s %s%.1f' % (label, '↑' if d > 0 else '↓', abs(d)))
     if not parts:
         return []
-    return ['📊 **趋势（较昨日同期）:** ' + '  ·  '.join(parts)]
+    return parts
 
 for name, c in checks.items():
     if name.startswith('_'):
@@ -642,58 +642,112 @@ for name, c in checks.items():
 escalated = [f for f in faults if f[3] == 'WARN']
 any_fault = bool(faults)
 
-# Build message
-msg_lines = ['🕐 %s' % timestamp, '───', '']
+# ── Build the structured card (hybrid layout) ──
+# Layout, in reading order:
+#   1. summary grid   — counts, so the shape of the situation is one glance
+#   2. fault detail   — vertical, each with its diagnosis and fix command
+#   3. pending detail — vertical, one level quieter
+#   4. noise detail   — things we have already explained (build running)
+#   5. ok line        — healthy checks folded into ONE row (not a grid: they
+#                       only need to be confirmable, not scannable)
+#   6. trend          — answers a different question ("is it getting worse")
+#
+# Faults deliberately do NOT go in a grid. A grid cell is too narrow for a
+# diagnosis plus a fix command, and truncating those is what made the old card
+# useless. Grid for counts, vertical for anything that needs explaining.
+card_sections = []
 
-if faults:
-    msg_lines.append('❌ **故障（%d 项）**' % len(faults))
-    for name, c, held, lvl in faults:
-        badge = '🔴' if lvl == 'CRIT' else '🟡'
-        line = '%s %s' % (badge, c['msg'])
-        if lvl == 'WARN':
-            line += ' — 已持续 %s（WARN 长期未恢复）' % fmt_dur(held)
-            if held >= WARN_URGENT_S:
-                line += '，建议立即处理'
-        msg_lines.append(line)
-        if c.get('diagnosis'):
-            msg_lines.append('    → %s' % c['diagnosis'])
-        if c.get('advice'):
-            msg_lines.append('    🔧 %s' % c['advice'])
-else:
-    msg_lines.append('❌ **故障（0 项）**')
-msg_lines.append('')
+card_sections.append({
+    'type': 'summary',
+    'items': [
+        {'label': '❌ 故障', 'value': str(len(faults))},
+        {'label': '⚠️ 待确认', 'value': str(len(pending))},
+        {'label': '⏸ 噪音', 'value': str(len(noise))},
+        {'label': '✅ 正常', 'value': str(len(ok_names))},
+    ],
+})
 
-if pending:
-    msg_lines.append('⚠️ **待确认（%d 项）**' % len(pending))
-    for name, c, held in pending:
-        suffix = ('（已 %s，超 2 小时将升级）' % fmt_dur(held)) if held else ''
-        msg_lines.append('• %s%s' % (c['msg'], suffix))
-        if c.get('diagnosis'):
-            msg_lines.append('    → %s' % c['diagnosis'])
-        elif name not in DIAGNOSABLE:
-            # Say so explicitly. An empty arrow would read as 「no explanation
-            # needed」; this reads as 「we genuinely cannot tell you why」.
-            msg_lines.append('    → 无诊断信息（该指标需要历史对比才能判断）')
-    msg_lines.append('')
+for name, c, held, lvl in faults:
+    extra = ''
+    if lvl == 'WARN':
+        extra = '已持续 %s' % fmt_dur(held)
+        if held >= WARN_URGENT_S:
+            extra += '，建议立即处理'
+    card_sections.append({
+        'type': 'fault',
+        'items': [{
+            'icon': '🔴',
+            'name': c['msg'],
+            'extra': extra,
+            'diagnosis': c.get('diagnosis', ''),
+            'advice': c.get('advice', ''),
+        }],
+    })
 
-if noise:
-    msg_lines.append('⏸ **已知噪音（%d 项）**' % len(noise))
-    for name, c in noise:
-        msg_lines.append('• %s' % c['msg'])
-        if c.get('diagnosis'):
-            msg_lines.append('    → %s' % c['diagnosis'])
-    msg_lines.append('')
+for name, c, held in pending:
+    diag = c.get('diagnosis', '')
+    if not diag and name not in DIAGNOSABLE:
+        # Say so explicitly. A blank would read as 「nothing to explain」;
+        # this reads as 「we genuinely cannot tell you why」.
+        diag = '无诊断信息（该指标需要历史对比才能判断）'
+    detail = ('已持续 %s，超 2 小时将升级为故障' % fmt_dur(held)) if held else ''
+    card_sections.append({
+        'type': 'pending',
+        'items': [{
+            'icon': '🟡',
+            'name': c['msg'],
+            'detail': detail,
+            'diagnosis': diag,
+        }],
+    })
+
+for name, c in noise:
+    card_sections.append({
+        'type': 'pending',
+        'items': [{
+            'icon': '⏸',
+            'name': c['msg'],
+            'detail': '',
+            'diagnosis': c.get('diagnosis', ''),
+        }],
+    })
 
 if ok_names:
-    msg_lines.append('✅ **%d 项正常**' % len(ok_names))
+    short = []
+    for name in ok_names:
+        m = (checks.get(name) or {}).get('msg', name)
+        # Keep the compact line genuinely compact: the first clause only.
+        m = m.split('(')[0].strip()
+        short.append(m)
+    card_sections.append({'type': 'ok_line', 'items': short})
 
-# Append the trend block if we have enough history to say something true.
-trend_text = build_trend()
-if trend_text:
-    msg_lines.append('')
-    msg_lines.extend(trend_text)
+trend_items = build_trend()
+if trend_items:
+    card_sections.append({'type': 'trend', 'items': trend_items})
+
+# Plain-text rendering for the dry-run / log, so the same information is
+# visible without opening Feishu.
+msg_lines = ['🕐 %s' % timestamp]
+for sec in card_sections:
+    items = sec.get('items') or []
+    if sec['type'] == 'summary':
+        msg_lines.append('  '.join('%s %s' % (i['label'], i['value']) for i in items))
+    elif sec['type'] in ('fault', 'pending'):
+        for it in items:
+            msg_lines.append('%s %s %s' % (it.get('icon', ''), it.get('name', ''),
+                                           it.get('extra', '') or it.get('detail', '')))
+            if it.get('diagnosis'):
+                msg_lines.append('    -> %s' % it['diagnosis'])
+            if it.get('advice'):
+                msg_lines.append('    fix: %s' % it['advice'])
+    elif sec['type'] == 'ok_line':
+        msg_lines.append('OK: ' + ' · '.join(items))
+    elif sec['type'] == 'trend':
+        msg_lines.append('趋势: ' + '  ·  '.join(items))
 
 full_message = '\n'.join(msg_lines)
+# JSON for the sender (shlex-quoted-safe single line)
+card_sections_json = json.dumps(card_sections, ensure_ascii=False)
 
 # ── Written the sample last so it includes the grouping above ──
 write_sample()
@@ -721,6 +775,15 @@ write_sample()
 notify = False
 title = ''
 color = 'green'
+# The action level handed to the engine. Derived from the GROUPS rather than
+# from raw check levels: a build-running CPU is INFO even though its check
+# level is INFO too, but a WARN that has escalated to 故障 must read RED even
+# though the underlying check is still WARN.
+level_for_notice = 'INFO'
+if faults:
+    level_for_notice = 'RED'
+elif pending:
+    level_for_notice = 'YELLOW'
 
 if new_issues:
     notify = True
@@ -765,28 +828,51 @@ with open(state_file, 'w') as f:
 if notify:
     if dry_run:
         print(f'[DRY-RUN] title={title} color={color}')
-        print(full_message[:500])
+        print(full_message[:800])
     else:
-        # Use notify-feishu.sh
-        notify_script = '/home/debian/agent/chaos-il2cpp-nightly-test/scripts/notify-feishu.sh'
-        if os.path.exists(notify_script):
-            subprocess.run(
-                ['bash', notify_script, '--title', title, '--message', full_message, '--color', color],
-                capture_output=True, timeout=30
+        # Route through the unified feishu engine so the health card gets the
+        # same structured layout (summary grid + fault detail + folded OK row)
+        # as every other notification.
+        feishu_dir = os.environ.get(
+            'FEISHU_ENGINE_DIR',
+            '/home/debian/agent/chaos-il2cpp-nightly-test/scripts')
+        sent = False
+        try:
+            if feishu_dir not in sys.path:
+                sys.path.insert(0, feishu_dir)
+            from feishu import Notice, send as feishu_send
+            n = Notice(
+                channel='health',
+                level=level_for_notice,
+                title=title,
+                raw_header=True,
+                color_override=color,
+                sections=card_sections,
+                footer_text='chaos-il2cpp 系统监控 · ' + time.strftime('%Y%m%d'),
             )
-        else:
-            # Fallback: direct curl
-            import urllib.request
-            payload = json.dumps({
-                'msg_type': 'text',
-                'content': {'text': f'{title}\\n\\n{full_message}'}
-            }).encode()
-            req = urllib.request.Request(webhook, data=payload,
-                headers={'Content-Type': 'application/json'})
-            try:
-                urllib.request.urlopen(req, timeout=15)
-            except Exception:
-                pass
+            sent = feishu_send(n, webhook, force=True) in ('sent', 'deduped')
+        except Exception as e:
+            print('WARNING: feishu engine unavailable (%s), falling back' % e)
+        if not sent:
+            # Legacy fallback so a broken engine can never silence the monitor.
+            notify_script = '/home/debian/agent/chaos-il2cpp-nightly-test/scripts/notify-feishu.sh'
+            if os.path.exists(notify_script):
+                subprocess.run(
+                    ['bash', notify_script, '--title', title,
+                     '--message', full_message, '--color', color],
+                    capture_output=True, timeout=30)
+            else:
+                import urllib.request
+                payload = json.dumps({
+                    'msg_type': 'text',
+                    'content': {'text': f'{title}\\n\\n{full_message}'}
+                }).encode()
+                req = urllib.request.Request(webhook, data=payload,
+                    headers={'Content-Type': 'application/json'})
+                try:
+                    urllib.request.urlopen(req, timeout=15)
+                except Exception:
+                    pass
 
 # Print summary to log
 new_str = ','.join(new_issues) if new_issues else '-'
