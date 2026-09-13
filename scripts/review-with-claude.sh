@@ -217,7 +217,7 @@ REVIEW_MODEL="${REVIEW_AGENT_MODEL:-deepseek-v4-flash}"
 # Prompt version: bump this whenever the prompt template (review dimensions, severity
 # rubric, output format) changes meaningfully. Included in the cache key so cache
 # auto-invalidates when the review criteria change.
-PROMPT_VERSION="1"
+PROMPT_VERSION="2"
 # Small enough that no single chunk exceeds what the model handles reliably
 # (dense GC/pointer code starts glitching around ~200 diff lines), but large
 # enough to still merge many tiny files into one call. A file larger than this
@@ -640,7 +640,19 @@ PROMPT_HEADER
         fi
 
         echo ""
-        echo "变更文件: ${cpaths}"
+        # Emit the chunk's files as a NUMBERED list rather than one space-joined
+        # wall. With 20+ files in a merged chunk the old single line was unreadable
+        # and the model stopped binding findings to files at all: it emitted
+        # `line` but no `file`, so the card rendered "[il2cpp] :43" — no way for a
+        # reader to know which file to open. The numbered list gives the model a
+        # short, citable token ("见文件 #3") instead of a name it has to copy
+        # correctly out of a 2000-line diff.
+        echo "变更文件（$(echo $cpaths | wc -w | tr -d ' ') 个，finding 的 \"file\" 必须从此列表选取）:"
+        _cp_i=0
+        for _cp in $cpaths; do
+            _cp_i=$((_cp_i + 1))
+            echo "  #${_cp_i} ${_cp}"
+        done
         echo "提交范围: ${FROM_COMMIT}..${TO_COMMIT}"
         echo "${COMMIT_LOG}"
         echo ""
@@ -654,8 +666,9 @@ PROMPT_HEADER
 
 每条 finding 必须包含:
 - **repo**: 仓库标签（本项目统一 "il2cpp"）
-- **file**: 文档文件相对路径
-- **line**: 问题起始行号
+- **file**: 文档文件相对路径 —— **必须逐字取自上文「变更文件」编号列表**。
+  必填：缺了它，飞书卡片只能渲染成 ":43"，读者无法定位到具体文档。
+- **line**: 问题起始行号 —— **必填**
 - **line_range**: 如适用，形如 "85-120"（跨行）或与 line 相同（单行）
 - **severity**: "严重" | "中" | "轻" | "建议"
 - **message**: 中文问题描述
@@ -691,8 +704,12 @@ PROMPT_FOOTER
 
 每条 finding 必须包含:
 - **repo**: 仓库标签（本项目统一 "il2cpp"）
-- **file**: 文件相对路径
-- **line**: 问题起始行号
+- **file**: 文件相对路径 —— **必须逐字取自上文「变更文件」编号列表中的某一项**。
+  这是必填字段：少了它，这条 finding 在飞书卡片上只会渲染成 ":43"，
+  读者无法知道该打开哪个文件，等于这条审查结果作废。
+  **不要把文件名只写在 message 里**，一定要填进 `file` 字段。
+  即使问题涉及多个文件，每条 finding 也要选定一个最具代表性的 file。
+- **line**: 问题起始行号 —— **必填**，对应 file 中的行号
 - **line_range**: 如适用，形如 "85-120"（跨行）或与 line 相同（单行）；整文件问题可省略
 - **severity**: "严重" | "中" | "轻" | "建议"
 - **message**: 中文问题描述
@@ -879,6 +896,11 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
         echo "请按 严重/中/轻/建议 四级分级。如无问题则全部为 0。"
         echo ""
         echo "变更文件: ${cpaths}"
+        echo ""
+        echo "注意：如果你的回答包含 specific 的 finding（不推荐，summay-only 模式",
+        echo "不要输出具体 finding），每条 finding 必须包含 file 字段，并且 file",
+        echo "必须逐字取自上方「变更文件」中的某一项。缺少 file 的 finding",
+        echo "在飞书卡片上是不可读的（只显示 ':43'），等同于没有这条审查结果。",
         echo '```diff'
         printf '%s\n' "$cdiff"
         echo '```'
@@ -943,7 +965,7 @@ if [ -n "$CACHED_JSON" ]; then
     # bypassed by this exit, so findings cached before that fix would still carry
     # the wrong shape). Apply the same field-name mapping here.
     CACHED_JSON=$(printf '%s' "$CACHED_JSON" | python3 -c '
-import sys, json
+import sys, json, re
 d = json.load(sys.stdin)
 fs = d.get("findings") or []
 _MSG_KEYS = ("message", "summary", "short_summary", "description", "title")
@@ -958,6 +980,24 @@ for _f in fs:
             _v = _f.get("failure_scenario")
             if isinstance(_v, str) and _v.strip():
                 _f["message"] = _v
+    # Same file-rescue as the live aggregation path (see the comment there):
+    # without a `file` the card renders ":43" and the finding is unactionable.
+    if not str(_f.get("file") or "").strip():
+        _m = re.match(
+            r"^\s*[*`\[]*([A-Za-z0-9_][A-Za-z0-9_./+-]*\."
+            r"(?:cpp|cc|cxx|h|hpp|cs|py|md|txt|json|sh|yml|yaml|cmake|bat|ps1))"
+            r"(?::(\d+)(?:-(\d+))?)?",
+            str(_f.get("message") or ""))
+        if _m:
+            _f["file"] = _m.group(1)
+            if not _f.get("line") and _m.group(2):
+                try:
+                    _f["line"] = int(_m.group(2))
+                except ValueError:
+                    pass
+            if not _f.get("line_range") and _m.group(2):
+                _f["line_range"] = (_m.group(2) + "-" + _m.group(3)
+                                    if _m.group(3) else _m.group(2))
     _f.setdefault("repo", "il2cpp")
 d["findings"] = fs
 print(json.dumps(d, ensure_ascii=False))
@@ -1211,7 +1251,7 @@ _AGG_SUM_TMP=$(mktemp)
 printf '%s' "$AGG_FIND" > "$_AGG_FIND_TMP"
 printf '%s' "$AGG_SUM" > "$_AGG_SUM_TMP"
 AGG_FIND=$(python3 - "$_AGG_FIND_TMP" <<'PY'
-import sys, json
+import sys, json, re
 with open(sys.argv[1]) as f:
     fs = json.load(f)
 
@@ -1253,6 +1293,29 @@ for _f in fs:
             if isinstance(_v, str) and _v.strip():
                 _f["verify"] = _v
                 break
+    # Rescue a missing `file` from the message text. The model sometimes knows the
+    # file (it writes "async_stubs.cpp:91-99 — ..." into message) but leaves the
+    # `file` field empty. The card renders such a finding as "[il2cpp] :43" — no way
+    # to know which file to open, and the blob link points at the repo root. A
+    # finding you cannot locate is not actionable, so salvage the name rather than
+    # drop it. (Measured on a real card: findings #2/#3/#5/#7/#8/#9/#10 all lost
+    # their file this way.)
+    if not str(_f.get("file") or "").strip():
+        _m = re.match(
+            r'^\s*[*`\[]*([A-Za-z0-9_][A-Za-z0-9_./+-]*\.'
+            r'(?:cpp|cc|cxx|h|hpp|cs|py|md|txt|json|sh|yml|yaml|cmake|bat|ps1))'
+            r'(?::(\d+)(?:-(\d+))?)?',
+            str(_f.get("message") or ""))
+        if _m:
+            _f["file"] = _m.group(1)
+            if not _f.get("line") and _m.group(2):
+                try:
+                    _f["line"] = int(_m.group(2))
+                except ValueError:
+                    pass
+            if not _f.get("line_range") and _m.group(2):
+                _f["line_range"] = (_m.group(2) + '-' + _m.group(3)
+                                    if _m.group(3) else _m.group(2))
     _f.setdefault("repo", "il2cpp")
 
 order = {"严重": 0, "中": 1, "轻": 2, "建议": 3}

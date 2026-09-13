@@ -155,11 +155,25 @@ for ndx, fx in enumerate(flist_sorted, start=1):
         lr = str(lr).strip()
     loc = ':' + lr if lr else ''
     msg = fx.get('message', '')
-    fname = fp.split('/')[-1] if '/' in fp else fp
-    furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + ('#L' + str(lr.split('-')[0]) if lr else '')
+    # A finding with no `file` renders as "fname:43" = ":43" and its blob link
+    # points at the repo root — the reader cannot tell which file to open. The
+    # generator now salvages the name from the message and the prompt requires it,
+    # but a finding can still arrive bare. Make the gap VISIBLE rather than
+    # silently emitting a meaningless ":43", so nobody mistakes it for a real
+    # location. Do not fabricate a name — we do not know it.
+    if not fp.strip():
+        fname = '⚠️未标注文件'
+        furl = ''
+    else:
+        fname = fp.split('/')[-1] if '/' in fp else fp
+        furl = 'https://github.com/PolarisWang/booming-il2cpp/blob/' + file_sha + '/' + fp + ('#L' + str(lr.split('-')[0]) if lr else '')
     # rage line: #N [严重] [il2cpp] fname:line_range — filename is the Feishu link
-    flines.append('{0} **#{1} [{2}] [{3}]** [{4}]({5}) — {6}'.format(
-        icon, ndx, sev, repo, fname + loc, furl, msg))
+    if furl:
+        flines.append('{0} **#{1} [{2}] [{3}]** [{4}]({5}) — {6}'.format(
+            icon, ndx, sev, repo, fname + loc, furl, msg))
+    else:
+        flines.append('{0} **#{1} [{2}] [{3}]** {4} — {5}'.format(
+            icon, ndx, sev, repo, fname + loc, msg))
 ft = chr(10).join(flines) if flines else '  ✅ 未发现问题'
 
 bu = os.environ.get('JENKINS_EXT_URL', '') + '/job/' + os.environ.get('JOB_NAME','') + '/' + os.environ.get('BUILD_NUMBER','') + '/'
