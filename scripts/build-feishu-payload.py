@@ -75,8 +75,16 @@ def verdict(platforms: dict, missing: list, expect: list,
     function is the place to add it, because the card AND the web report both
     read from here.
 
-    Returns {level: red|green, word, reason}. `level` drives colour everywhere,
-    so the card and the page can never disagree about whether a run is healthy.
+    Returns {level: red|yellow|green, word, reason}. `level` drives colour
+    everywhere, so the card and the page can never disagree about whether a run
+    is healthy.
+
+    Three levels, not two. A two-level (dead/alive) verdict reads a platform
+    that passes SOME chunks as fully healthy: windows at 18/45 scored "正常"
+    while the same page showed 27 failures under a red "失败归因" heading. The
+    card and the web report are rendered from this one function, so the
+    contradiction was visible in a single glance at either one. "Some chunks
+    fail" is its own state — not健康, and not the total outage that red means.
     """
     if jenkins_result.upper() in ("FAILURE", "ABORTED"):
         return {"level": "red", "word": "构建失败",
@@ -97,6 +105,20 @@ def verdict(platforms: dict, missing: list, expect: list,
     if dead:
         return {"level": "red", "word": "需要处理",
                 "reason": "、".join(dead) + " 全部失败"}
+
+    # Partial: chunks are failing, but not everything. Deliberately a WARNING
+    # and not a failure — there is no pass-rate threshold here (see decision Z
+    # below), only the absolute fact that some chunks did not pass.
+    partial = [
+        (p, platforms[p].get("chunk_passed", 0), platforms[p].get("chunk_total", 0))
+        for p in expect
+        if platforms.get(p, {}).get("present")
+        and platforms[p].get("chunk_total", 0) > 0
+        and platforms[p].get("chunk_passed", 0) < platforms[p].get("chunk_total", 0)
+    ]
+    if partial:
+        detail = "、".join(f"{p} {a}/{b}" for p, a, b in partial)
+        return {"level": "yellow", "word": "部分通过", "reason": detail}
 
     return {"level": "green", "word": "正常", "reason": ""}
 
@@ -200,7 +222,7 @@ def build_payload(build_url: str, date_tag: str, run_tag: str,
     # mattered.
     lines: list[str] = []
 
-    icons = {"red": "🔴", "green": "✅"}
+    icons = {"red": "🔴", "yellow": "🟡", "green": "✅"}
     lines.append(f"{icons.get(v['level'], '⚪')} **{v['word']}**"
                  + (f" — {v['reason']}" if v["reason"] else ""))
 

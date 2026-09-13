@@ -39,6 +39,12 @@ def LINUX_DATE_TAG = "${DATE_TAG}${LINUX_SUFFIX}"
 def WIN_DATE_TAG   = "${DATE_TAG}${WIN_SUFFIX}"
 def FAILED_PLATFORMS = []
 
+// Trend baseline for the notification card. MUST live outside ${WORKSPACE}:
+// the post block runs cleanWs with cleanWhenSuccess: true, which wipes the
+// workspace at the end of every build. Stored next to the report-server's
+// daily output, which is on a persistent volume and already survives wipes.
+def TREND_STATE_DIR = '/var/lib/report-server/daily/trend'
+
 pipeline {
     agent none
 
@@ -1084,12 +1090,17 @@ except Exception:
         try {
             def payloadOut = "${WORKSPACE}/.notify/platform-payload.json"
             def localLinux = "${artifacts}/nightly-data-${LINUX_DATE_TAG}-${RUN_TAG}.json"
-            // Trend baseline (decision Y): the PREVIOUS build's payload, kept in
-            // the workspace by the previous run's notify step. First run after a
-            // workspace wipe has none, and the trend reports "首轮" rather than a
-            // misleading "no change".
-            def prevPayload = "${WORKSPACE}/.notify/platform-payload.prev.json"
-            sh "cp -f '${payloadOut}' '${prevPayload}' 2>/dev/null || true"
+            // Trend baseline (decision Y): the PREVIOUS build's payload.
+            //
+            // This used to live at ${WORKSPACE}/.notify/platform-payload.prev.json,
+            // which could never work: the post block runs cleanWs with
+            // cleanWhenSuccess: true, so the workspace is wiped at the end of
+            // every build and the "previous" payload was always absent. Every
+            // card therefore reported 首轮 and the trend feature never once
+            // produced a delta. Kept outside the workspace now, on the node's
+            // persistent volume, so it survives cleanWs and workspace wipes.
+            def prevPayload = "${TREND_STATE_DIR}/platform-payload.prev.json"
+            sh "mkdir -p '${TREND_STATE_DIR}' && cp -f '${payloadOut}' '${prevPayload}' 2>/dev/null || true"
             sh """
                 python3 "\${WORKSPACE}/scripts/build-feishu-payload.py" \
                     --build-url "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
@@ -1200,6 +1211,11 @@ verdict = data.get('verdict') or {}
 vlevel = verdict.get('level', '')
 if vlevel == 'red':
     color, icon = 'red', '🔴'
+elif vlevel == 'yellow':
+    # Partial: some chunks failed but the platform is not dead. Without this
+    # branch a 18/45 run fell through to the "no verdict" fallback below and
+    # rendered a green header over 27 failures.
+    color, icon = 'orange', '🟡'
 elif vlevel == 'green':
     color, icon = 'green', '✅'
 else:
@@ -1299,7 +1315,7 @@ elements.append({
 payload = json.dumps({
     'msg_type': 'interactive',
     'card': {
-        'header': {'title': {'tag': 'plain_text', 'content': title}, 'template': color if color in ('red','blue','green') else 'green'},
+        'header': {'title': {'tag': 'plain_text', 'content': title}, 'template': color if color in ('red','orange','blue','green') else 'green'},
         'elements': elements,
     },
 }, ensure_ascii=False).encode('utf-8')

@@ -497,8 +497,12 @@ def main() -> int:
             check("artifact name: windows is -win suffixed",
                   fm.artifact_name("20260911", "run2", "windows") == "nightly-data-20260911-win-run2.json")
             # ── Z: absolute-only health verdict ──
+            # Default fixture is a FULLY passing platform. It used to be 20/45,
+            # which was "healthy" under the old two-level verdict — now it is
+            # the partial state, so a 20/45 default silently rewrote the meaning
+            # of every test that used it.
             def P(**kw):
-                base = {"present": True, "chunk_passed": 20, "chunk_total": 45}
+                base = {"present": True, "chunk_passed": 45, "chunk_total": 45}
                 base.update(kw)
                 return base
 
@@ -521,10 +525,35 @@ def main() -> int:
             # Decision 1c: NO percentage threshold. A low-but-nonzero pass rate
             # must NOT raise the alarm — a threshold picked out of the air goes
             # off every night once a build settles below it.
+            # It is NOT silent either: partial failure gets its own warning
+            # level rather than being reported as healthy (see below).
             v = fm.verdict({"linux": P(chunk_passed=1), "windows": P(chunk_passed=1)}, [],
                            ["linux", "windows"])
-            check("Z: 1/45 is NOT flagged (absolute-only, no threshold)",
-                  v["level"] == "green", str(v))
+            check("Z: 1/45 is NOT given the red alarm (absolute-only, no threshold)",
+                  v["level"] != "red", str(v))
+
+            # ── Three-level verdict ──
+            # A two-level verdict called windows 18/45 "正常" while the same
+            # page rendered 27 failures under a red heading. Partial failure is
+            # its own state: not healthy, not the total outage red means.
+            v = fm.verdict({"linux": P(), "windows": P(chunk_passed=18, chunk_total=45)}, [],
+                           ["linux", "windows"])
+            check("partial failure -> yellow, not green",
+                  v["level"] == "yellow", str(v))
+            check("partial failure names the platform and numbers",
+                  "windows" in v.get("reason", "") and "18/45" in v.get("reason", ""),
+                  str(v))
+
+            # All-pass must still be green — the new level must not swallow it.
+            v = fm.verdict({"linux": P(), "windows": P(chunk_passed=45, chunk_total=45)}, [],
+                           ["linux", "windows"])
+            check("all chunks pass -> green", v["level"] == "green", str(v))
+
+            # red outranks yellow: one dead platform is not a partial pass.
+            v = fm.verdict({"linux": P(chunk_passed=0), "windows": P(chunk_passed=18)}, [],
+                           ["linux", "windows"])
+            check("a dead platform outranks a partial one (red wins)",
+                  v["level"] == "red", str(v))
 
             # A platform with no chunks at all is not "dead", it's empty.
             v = fm.verdict({"linux": P(chunk_total=0, chunk_passed=0), "windows": P()}, [],
@@ -632,6 +661,16 @@ def main() -> int:
                   "test-publish-nightly.py" in jf)
             check("self-test gate stage present",
                   "Publish-Chain Self-Test" in jf)
+            # The trend baseline must survive cleanWs. It was stored under
+            # ${WORKSPACE}/.notify/, which the post block wipes on success, so
+            # "previous payload" was always absent and every card said 首轮 —
+            # the trend feature never once emitted a delta.
+            # Assert on the assignment, not a bare grep: the old path is also
+            # mentioned in the explanatory comment above it.
+            check("trend baseline stored outside the workspace",
+                  'def prevPayload = "${TREND_STATE_DIR}/' in jf
+                  and 'def prevPayload = "${WORKSPACE}' not in jf,
+                  "prev payload must not live under ${WORKSPACE}")
             # Bug seen on the real Windows agent: only the publisher was
             # downloaded, so the HTML step warned "generate-nightly-report.py
             # not found" and produced JSON only.
@@ -800,6 +839,50 @@ def main() -> int:
                         break
             check("no single backslash escapes in any bat block",
                   not bad_escapes, f"found {bad_escapes[:3]}")
+
+            # ── Every Python script the Jenkinsfile GENERATES must compile ──
+            #
+            # The nightly card is not a file in this repo: the Jenkinsfile
+            # writes it out with writeFile and runs it. That made it invisible
+            # to every other check here, and it broke undetected for 8 builds —
+            # 278 through 285 — with 25 JS-style `//` comments and a whole
+            # Groovy body (`if (x) { ... parts.addAll(...) }`) inside what is
+            # supposed to be a Python script. It failed at RUNTIME as a
+            # SyntaxError, the failure was swallowed by a `returnStatus: true`
+            # + echo WARNING, and the build stayed green while the group got
+            # no card at all.
+            #
+            # Compiling it here is the whole point: a syntax error in a
+            # generated script is invisible in the repo diff and invisible in
+            # the build result. py_compile catches it in milliseconds.
+            gen = re.findall(
+                r'writeFile\s+file:\s*"\$\{WORKSPACE\}/[^"]*?/([\w.-]+\.py)"\s*,\s*text:\s*"""(.*?)"""',
+                jf, re.S)
+            check("Jenkinsfile generates at least one python script", bool(gen),
+                  f"found {len(gen)}")
+            for fname, body in gen:
+                try:
+                    compile(body, f"<generated {fname}>", "exec")
+                    check(f"generated {fname} compiles", True)
+                except SyntaxError as e:
+                    check(f"generated {fname} compiles", False,
+                          f"line {e.lineno}: {e.text.strip() if e.text else e.msg}")
+                # Groovy/JS constructs that are NOT valid Python. A generation
+                # site is easy to write in the wrong language because the
+                # surrounding file IS Groovy — that is exactly what happened.
+                smells = []
+                for n, line in enumerate(body.splitlines(), 1):
+                    s = line.strip()
+                    if s.startswith('//'):
+                        smells.append(f"line {n}: JS comment")
+                    elif re.search(r'\bdef\s+\w+\s*=', s):
+                        smells.append(f"line {n}: groovy `def`")
+                    elif re.search(r'\b\w+\.addAll\(|\b\w+\.add\(', s):
+                        smells.append(f"line {n}: groovy .addAll/.add")
+                    elif s.endswith('{') and re.match(r'^(if|for|while|else|elif|try|catch|def)\b', s):
+                        smells.append(f"line {n}: groovy brace block")
+                check(f"generated {fname} has no groovy/js syntax",
+                      not smells, f"{smells[:3]}")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

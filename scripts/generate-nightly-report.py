@@ -158,6 +158,10 @@ def generate_report(data: dict, build_number: str = "",
     mem_alloc = summary.get("memory_alloc_bytes", 0)
     mem_gc_pause = summary.get("memory_gc_pause_ns", 0)
     mem_fast_path = summary.get("memory_fast_path_rate", 0) * 100
+    # The gate for the memory card. The payload records how many methods were
+    # actually profiled; if nothing was, the card would show "0 B / 0.0 ms"
+    # which reads as a real measurement of zero rather than "not measured".
+    mem_methods = summary.get("memory_methods_profiled", 0)
 
     total_dlls = len(dlls)
     has_data_count = sum(1 for v in dlls.values()
@@ -383,7 +387,7 @@ def generate_report(data: dict, build_number: str = "",
                      "chunk_passed": _s.get("chunk_passed", 0),
                      "chunk_total": _s.get("chunk_total", 0)}},
             [], [_plat])
-        _banner_level = "bad" if _v["level"] == "red" else "ok"
+        _banner_level = {"red": "bad", "yellow": "warn-lv"}.get(_v["level"], "ok")
         _banner_word = _v["word"]
     except Exception as _e:
         print(f"  [report] verdict unavailable ({_e}); banner shows platform only")
@@ -399,32 +403,80 @@ def generate_report(data: dict, build_number: str = "",
     # stage has no fact data at all, so a 0/45 run rendered as "no data" with
     # no indication of WHY.  These two cards close that gap.
     chunk_section = ""
+    chunk_card = ""
     if chunk_status:
         cp = summary.get("chunk_passed", 0)
         ct = summary.get("chunk_total", 0)
         cf = summary.get("chunk_failed", 0)
         cs = summary.get("chunk_stalled", 0)
         cp_pct = (cp / ct * 100) if ct else 0
-        chunk_section += f"""
-<div class="grid">
+        # The chunk numbers are THE result of a Route-3 run, so they lead the
+        # grid. The four fact/bench/hotupdate/memory cards below them were
+        # rendered unconditionally from fields the CLI never populates, so the
+        # page opened on four rows of "0/0 (N/A)" / "0 方法" and pushed the one
+        # number that matters below the fold. Same rule as the Feishu card:
+        # a metric with nothing in it is omitted, not printed as a zero.
+        chunk_card = f"""
   <div class="card">
     <h2>Chunk 构建</h2>
-    <div class="value {'pass' if cp == ct else 'fail'}">{cp}/{ct}</div>
+    <div class="value {'pass' if cp == ct else 'warn' if cp else 'fail'}">{cp}/{ct}</div>
     <div class="sub">chunks passed ({cp_pct:.1f}%){f' · {cs} stalled' if cs else ''}</div>
   </div>
   <div class="card">
     <h2>失败数</h2>
     <div class="value {'pass' if cf == 0 else 'fail'}">{cf}</div>
     <div class="sub">chunks failed</div>
-  </div>
-</div>"""
+  </div>"""
+        chunk_section += ""
+
+    # Metrics only when they carry a value. Each is emitted independently so
+    # the day the engine starts emitting one, it appears without a redesign.
+    metric_cards = ""
+    if fact_total and fact_total > 0:
+        metric_cards += f"""
+  <div class="card">
+    <h2>正确性</h2>
+    <div class="value {fact_color}">{fact_pct_val}</div>
+    <div class="sub">{fact_passed}/{fact_total} facts</div>{bl_fact_delta}
+  </div>"""
+    if bmk_methods and bmk_methods > 0:
+        metric_cards += f"""
+  <div class="card">
+    <h2>性能</h2>
+    <div class="value warn">{bmk_methods}</div>
+    <div class="sub">benchmarked methods</div>{bl_bmk_delta}
+  </div>"""
+    if hot_total and hot_total > 0:
+        metric_cards += f"""
+  <div class="card">
+    <h2>热更新</h2>
+    <div class="value {hot_color}">{hot_pct_val}</div>
+    <div class="sub">{hot_passed}/{hot_total} patches</div>{bl_hot_delta}
+  </div>"""
+    if mem_methods and mem_methods > 0:
+        metric_cards += f"""
+  <div class="card">
+    <h2>内存</h2>
+    <div class="value">{fmt_bytes(mem_alloc)}</div>
+    <div class="sub">{fmt_ns_to_ms(mem_gc_pause)} GC · {mem_fast_path:.1f}% fast path</div>{bl_mem_delta}
+  </div>"""
+    metric_cards = chunk_card + metric_cards
 
     error_class_section = ""
     error_classes = summary.get("error_classes") or {}
     if error_classes:
         total_err = sum(error_classes.values())
+        # `unknown` is a bucket, not a cause. It means the classifier did not
+        # recognise the log — it does NOT mean "no problem" and it does NOT mean
+        # "code defect". Marked inline so a reader does not mistake a large
+        # unknown row for a diagnosed one; on build 285 that row was 98% of the
+        # linux failures and the real cause (SDK build failure) was only visible
+        # by opening a chunk log.
+        def _cls_label(k: str) -> str:
+            return f"{k} <span style='color:#92400e'>(未诊断)</span>" if k == "unknown" else k
+
         rows = "".join(
-            f"<tr><td>{k}</td><td>{v}</td>"
+            f"<tr><td>{_cls_label(k)}</td><td>{v}</td>"
             f"<td>{(v / total_err * 100) if total_err else 0:.0f}%</td></tr>"
             for k, v in sorted(error_classes.items(), key=lambda kv: -kv[1])
         )
@@ -439,11 +491,20 @@ def generate_report(data: dict, build_number: str = "",
 </div>"""
 
     # Named failing chunks per bucket — turns "8 csharp-error" into a worklist.
+    #
+    # NOTE on "code_defect": the engine's aggregate.py assigns this bucket in the
+    # `else` branch — everything that is not in its _TRANSLATION_DEFECT or
+    # _INFRA_FAIL sets lands here, including `unknown`. It is a fallback, not a
+    # diagnosis. Labelling it "code-defect / crash" asserts a root cause the
+    # classifier never established, and on build 285 it put 14 chunks under that
+    # heading while the error-class table on the same page said 13 of the
+    # failures were simply unclassified. Renamed to describe what it really is,
+    # so an engine reader is handed "not yet diagnosed" rather than a wrong lead.
     failing_chunks = summary.get("failing_chunks") or {}
     _BUCKET_LABEL = {
         "translation_defect": "translation-defect (codegen 问题)",
         "infra": "infra / timeout (环境问题)",
-        "code_defect": "code-defect / crash",
+        "code_defect": "未分类 (需读 chunk 日志)",
         "unknown": "未分类",
     }
     failing_section = ""
@@ -561,6 +622,7 @@ tr.fail td {{ background:#fef2f2; }}
                 font-size:.85rem; }}
 .plat-banner.ok {{ background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }}
 .plat-banner.bad {{ background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }}
+.plat-banner.warn-lv {{ background:#fffbeb; border:1px solid #fde68a; color:#92400e; }}
 .plat-banner code {{ background:rgba(0,0,0,.06); padding:1px 5px; border-radius:3px; }}
 .no-data-warn {{ background:#fffbeb; border:1px solid #fde68a; border-radius:6px;
                 padding:10px 16px; margin-bottom:12px; font-size:.85rem; color:#92400e; }}
@@ -583,26 +645,7 @@ tr.fail td {{ background:#fef2f2; }}
     <div class="value {'pass' if has_data_count == total_dlls else 'warn'}">{has_data_count}/{total_dlls}</div>
     <div class="sub">assemblies with data</div>
   </div>
-  <div class="card">
-    <h2>正确性</h2>
-    <div class="value {fact_color}">{fact_pct_val}</div>
-    <div class="sub">{fact_passed}/{fact_total} facts</div>{bl_fact_delta}
-  </div>
-  <div class="card">
-    <h2>性能</h2>
-    <div class="value warn">{bmk_methods}</div>
-    <div class="sub">benchmarked methods</div>{bl_bmk_delta}
-  </div>
-  <div class="card">
-    <h2>热更新</h2>
-    <div class="value {hot_color}">{hot_pct_val}</div>
-    <div class="sub">{hot_passed}/{hot_total} patches</div>{bl_hot_delta}
-  </div>
-  <div class="card">
-    <h2>内存</h2>
-    <div class="value">{fmt_bytes(mem_alloc)}</div>
-    <div class="sub">{fmt_ns_to_ms(mem_gc_pause)} GC · {mem_fast_path:.1f}% fast path</div>{bl_mem_delta}
-  </div>
+{metric_cards}
 </div>
 
 {chunk_section}
