@@ -137,7 +137,7 @@ pipeline {
                                     export FEISHU_WEBHOOK_URL="${FEISHU_WEBHOOK_URL}"
                                     export CARD_OUTDIR='/var/lib/report-server/daily'
                                     export DATE_TAG='${DATE_TAG}'
-                                    python3 '${SCRIPT_DIR}/incident-card.py' \\
+                                    python3 '${env.WORKSPACE}/code-review/scripts/incident-card.py' \\
                                         --level RED \\
                                         --title '代码审查未完成' \\
                                         --impact '本次 0/N 个文件被审查（脚本执行出错）' \\
@@ -1100,7 +1100,6 @@ except Exception:
             // produced a delta. Kept outside the workspace now, on the node's
             // persistent volume, so it survives cleanWs and workspace wipes.
             def prevPayload = "${TREND_STATE_DIR}/platform-payload.prev.json"
-            sh "mkdir -p '${TREND_STATE_DIR}' && cp -f '${payloadOut}' '${prevPayload}' 2>/dev/null || true"
             sh """
                 python3 "\${WORKSPACE}/scripts/build-feishu-payload.py" \
                     --build-url "${JENKINS_EXT_URL}/job/chaos-il2cpp-nightly/${BUILD_NUMBER}" \
@@ -1110,6 +1109,12 @@ except Exception:
                     --previous-json "${prevPayload}" \
                     --output "${payloadOut}" 2>&1 || true
             """
+            // Roll the baseline forward ONLY after this build's payload exists.
+            // The copy used to run BEFORE the generator above, so it read a file
+            // that had not been written yet, failed silently behind `|| true`,
+            // and the trend state directory was never created at all — every
+            // card read `previous=None` and rendered 首轮 forever.
+            sh "mkdir -p '${TREND_STATE_DIR}' && cp -f '${payloadOut}' '${prevPayload}' 2>/dev/null || true"
             def payload = readJSON text: sh(
                 script: "cat '${payloadOut}' 2>/dev/null || echo '{}'",
                 returnStdout: true).trim()
@@ -1415,6 +1420,8 @@ def runCodeReview(Map params = [:]) {
                     "\$RAWT/scripts/send-code-review-card.sh"
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/code-review-card.py' \
                     "\$RAWT/scripts/code-review-card.py"
+                curl -sL --max-time 30 -o '${SCRIPT_DIR}/incident-card.py' \
+                    "\$RAWT/scripts/incident-card.py"
                 chmod +x '${SCRIPT_DIR}/'*.sh
                 # Sanity: the review script must carry the docs-reviewable marker (the
                 # EXTS_KEEP-with-.md fix that makes the docs path actually run). Without it
@@ -1614,6 +1621,11 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def lowConf = false
                 def inComplete = false
                 def docsOnly = false
+                // script_error: the review produced NO findings file at all — the
+                // script crashed or was never delivered. Drives the RED
+                // "代码审查未完成" card. Distinct from low_confidence, which means the
+                // file exists but we could not trust what is in it.
+                def scriptError = findingsUnreadable
                 def covDone = ''
                 def covTotal = ''
                 def skippedFiles = ''
@@ -1661,6 +1673,11 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 // findings count / severity breakdown (those came from the first try).
                 // Only the warning flags get overridden.
                 if (suspectReview) {
+                    // We could not read the findings, so we do not know the outcome.
+                    // low_confidence (orange "需确认") is the honest signal — NOT
+                    // script_error (RED "需人工处理"), which would assert a failure we
+                    // have not established. Reserve RED for the case where the review
+                    // script itself did not produce a file at all.
                     lowConf = true
                 }
                 // Interpolate as 1/0 (not .toString() "true"/"false") so the flag is a
@@ -1669,6 +1686,12 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 env.REVIEW_LOW_CONF = lowConf ? '1' : '0'
                 env.REVIEW_INCOMPLETE = inComplete ? '1' : '0'
                 env.REVIEW_DOCS_ONLY = docsOnly ? '1' : '0'
+                // script_error: the review produced NOTHING interpretable. The card
+                // must show a RED incident card ("代码审查未完成"), never "0 findings".
+                // This was a known unreachable branch: REVIEW_SCRIPT_ERROR was read
+                // by code-review-card.py but never written by anything.
+                env.REVIEW_SCRIPT_ERROR = scriptError ? '1' : '0'
+                env.REVIEW_ERROR_DETAIL = findingsUnreadable ? 'findings.json 缺失或无法解析' : ''
                 env.REVIEW_COVERAGE_DONE = covDone
                 env.REVIEW_COVERAGE_TOTAL = covTotal
                 env.REVIEW_SKIPPED_FILES = skippedFiles
@@ -1709,6 +1732,8 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                     export REVIEW_DOCS_ONLY='${docsOnly ? "1" : "0"}'
                     export REVIEW_INCOMPLETE='${inComplete ? "1" : "0"}'
                     export REVIEW_LOW_CONF='${lowConf ? "1" : "0"}'
+                    export REVIEW_SCRIPT_ERROR='${scriptError ? "1" : "0"}'
+                    export REVIEW_ERROR_DETAIL='${findingsUnreadable ? "findings.json 缺失或无法解析" : ""}'
                     export REVIEW_COVERAGE_DONE='${covDone}'
                     export REVIEW_COVERAGE_TOTAL='${covTotal}'
                     export REVIEW_SKIPPED_FILES='${skippedFiles}'
