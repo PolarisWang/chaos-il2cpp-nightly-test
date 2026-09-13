@@ -860,18 +860,58 @@ def main() -> int:
                 jf, re.S)
             check("Jenkinsfile generates at least one python script", bool(gen),
                   f"found {len(gen)}")
+
+            def groovy_unescape(body: str) -> str:
+                r"""What Groovy's triple-quoted string delivers to Python.
+
+                The generated source passes through GROOVY first, so every
+                backslash escape is Groovy's, not Python's. '\n' arrives as a
+                real newline; '\\' arrives as one backslash; '\$' arrives as a
+                literal '$'. Compiling the RAW text instead hides exactly the
+                bugs this gate exists to catch — the first version of this
+                check compiled the raw text and PASSED a script that failed in
+                CI with "unterminated string literal" because a '\n'.join(...)
+                had become a real newline. Model the transformation, then
+                compile the result.
+                """
+                out, i = [], 0
+                simple = {'n': '\n', 't': '\t', 'r': '\r', 'b': '\b',
+                          'f': '\f', '\\': '\\', "'": "'", '"': '"', '$': '$'}
+                while i < len(body):
+                    c = body[i]
+                    if c == '\\' and i + 1 < len(body):
+                        nx = body[i + 1]
+                        if nx in simple:
+                            out.append(simple[nx])
+                            i += 2
+                            continue
+                        if nx == 'u' and i + 5 < len(body):
+                            try:
+                                out.append(chr(int(body[i + 2:i + 6], 16)))
+                                i += 6
+                                continue
+                            except ValueError:
+                                pass
+                        out.append(nx)   # unknown escape: Groovy drops the backslash
+                        i += 2
+                        continue
+                    out.append(c)
+                    i += 1
+                return ''.join(out)
+
             for fname, body in gen:
+                delivered = groovy_unescape(body)
                 try:
-                    compile(body, f"<generated {fname}>", "exec")
-                    check(f"generated {fname} compiles", True)
+                    compile(delivered, f"<generated {fname}>", "exec")
+                    check(f"generated {fname} compiles (after Groovy unescape)", True)
                 except SyntaxError as e:
-                    check(f"generated {fname} compiles", False,
-                          f"line {e.lineno}: {e.text.strip() if e.text else e.msg}")
+                    check(f"generated {fname} compiles (after Groovy unescape)", False,
+                          f"line {e.lineno}: {(e.text or '').strip() or e.msg}")
                 # Groovy/JS constructs that are NOT valid Python. A generation
                 # site is easy to write in the wrong language because the
                 # surrounding file IS Groovy — that is exactly what happened.
                 smells = []
-                for n, line in enumerate(body.splitlines(), 1):
+                for n, line in enumerate(delivered.splitlines(), 1):
                     s = line.strip()
                     if s.startswith('//'):
                         smells.append(f"line {n}: JS comment")

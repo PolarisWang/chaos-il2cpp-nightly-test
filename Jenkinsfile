@@ -1292,7 +1292,11 @@ if fail_lines:
     else:
         parts.append('**失败详情:**')
         parts.extend(fail_lines.split('||'))
-message = '\n'.join(parts)
+# NOTE: chr(10), not a backslash-n escape. A backslash escape inside a Groovy
+# triple-quoted string is processed by GROOVY before Python ever sees it, so
+# it arrives as a literal newline and splits this line into an unterminated
+# string literal. Every backslash in the generated source is Groovy's.
+message = chr(10).join(parts)
 
 elements = [
     {'tag': 'div', 'text': {'tag': 'lark_md', 'content': message}},
