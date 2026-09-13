@@ -127,10 +127,11 @@ check_cpu() {
     else
         msg="CPU load ${load}/${cores} cores (warn>${warn_thr} crit>${crit_thr})"
         if [ "$level" != "OK" ]; then
-            # No build running, yet load is high: that is the actual signal this
-            # check exists to find (runaway process / leaked worker).
-            diag="无构建运行但负载仍超阈值 — 可能存在失控进程"
-            advice="top -bn1 -o %CPU | head; 检查是否有残留的 dotnet/cc1plus"
+            # No build running, yet load is high: the Python block will enrich
+            # the diagnosis with process classification. Keep this short here
+            # so the fallback text is meaningful even if Python is unavailable.
+            diag="无构建运行但负载仍超阈值 — 归因分析在 Python 块中完成"
+            advice="检查是否有残留的构建进程或失控任务"
         fi
     fi
     printf "cpu\t%s\t%s\t%s\t%s\n" "$level" "$msg" "$diag" "$advice"
@@ -620,6 +621,120 @@ def fmt_dur(sec):
         return '%d 小时' % (sec // 3600)
     return '%d 分钟' % (sec // 60)
 
+# ── Process attribution (for an idle-but-loaded CPU) ──
+# When load is high and NO build is running, "CPU is high" is not actionable —
+# the reader needs to know WHOSE cpu it is. Classify into stable categories
+# and report the percentages only:
+#
+#   * Categories, not process names. "构建 85% / 未知 8%" survives a toolchain
+#     change (cc1plus → clang, dotnet → dotnet8) without an edit here, and it
+#     answers the actual question — is this ours, or is it a stranger?
+#   * 未知 is the signal. Everything we recognise running is normal; the part
+#     we cannot account for is what deserves a human.
+#   * Process names go to the snapshot file, not the card. The card stays
+#     scannable; the detail is one click away when someone actually digs in.
+PROC_CATEGORIES = [
+    ('构建', r'\b(cc1plus|cc1\b|collect2|as\b|ld\b|VBCSCompiler|msbuild|make|cmake|ninja)\b'),
+    ('构建', r'dotnet\s+(build|run|msbuild|restore|publish|test)\b'),
+    ('构建', r'python3.*verification\.(chunk_pipeline|nightly|cli|e2e)'),
+    ('构建', r'/home/jenkins/workspace/'),
+    ('AI审查', r'\b(claude|code-review)\b'),
+    ('Jenkins', r'\b(java.*jenkins|sonar|slave\b)'),
+    ('监控', r'\b(victoria|grafana|prometheus|node_exporter|alertmanager)'),
+    ('系统', r'\b(systemd|journald|sshd|cron|rsyslog|dbus|polkit|udevd|'
+             r'NetworkManager|containerd|dockerd|init\b|ntpd|chronyd|'
+             r'feishu|postfix|nginx|redis)\b'),
+]
+PROC_ORDER = ['构建', 'AI审查', 'Jenkins', '监控', '系统', '未知']
+# Only a category above this share is worth naming in the advice line.
+UNKNOWN_ALERT_PCT = 5
+
+SNAPSHOT_DIR = os.environ.get('MONITOR_SNAPSHOT_DIR',
+                              '/var/lib/report-server/daily/cpu-snapshots')
+SNAPSHOT_KEEP = 20
+
+def classify_procs():
+    # Returns (category_pct: dict, unknown_top: list[str], snapshot_path: str|None)
+    import re as _re
+    try:
+        out = subprocess.run(
+            ['ps', '-eo', 'pcpu,comm,args', '--no-headers', '--sort=-pcpu'],
+            capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return {}, [], None
+
+    cat_cpu, unk_comm = {}, {}
+    for line in out.splitlines()[:400]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            cpu = float(parts[0])
+        except ValueError:
+            continue
+        if cpu < 0.5:
+            continue
+        comm, args = parts[1], parts[2]
+        cat = '未知'
+        for name, pat in PROC_CATEGORIES:
+            if _re.search(pat, args, _re.IGNORECASE):
+                cat = name
+                break
+        cat_cpu[cat] = cat_cpu.get(cat, 0) + cpu
+        if cat == '未知':
+            unk_comm[comm] = unk_comm.get(comm, 0) + cpu
+
+    total = sum(cat_cpu.values()) or 1
+    pct = {k: v / total * 100 for k, v in cat_cpu.items()}
+    top = [c for c, _ in sorted(unk_comm.items(), key=lambda kv: -kv[1])[:3]]
+    return pct, top, write_snapshot(out)
+
+def write_snapshot(ps_out):
+    # Only written when we are about to alert, so this is a rare write.
+    # The card carries categories; this file carries the names for follow-up.
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        ts = time.strftime('%Y-%m-%d-%H%M%S', time.localtime())
+        path = os.path.join(SNAPSHOT_DIR, ts + '.txt')
+        with open(path, 'w') as f:
+            f.write('# cpu snapshot %s\n' % timestamp)
+            f.write('loadavg: %s\n\n' % open('/proc/loadavg').read().strip())
+            f.write(ps_out)
+        # Retention
+        files = sorted(fn for fn in os.listdir(SNAPSHOT_DIR)
+                       if fn.endswith('.txt'))
+        for fn in files[:-SNAPSHOT_KEEP]:
+            try:
+                os.remove(os.path.join(SNAPSHOT_DIR, fn))
+            except OSError:
+                pass
+        return path
+    except Exception:
+        return None
+
+def build_attribution():
+    # Compose the diagnosis/advice for an idle-but-loaded CPU.
+    pct, top, snap = classify_procs()
+    if not pct:
+        return '', '', None
+    lines = ['无构建运行但负载仍超阈值 — 归因分析:']
+    for cat in PROC_ORDER:
+        v = pct.get(cat, 0)
+        if v < 1:
+            continue
+        suffix = ''
+        if cat == '未知' and v > UNKNOWN_ALERT_PCT:
+            suffix = '  ← 建议排查'
+        lines.append('　　%-6s %3.0f%%%s' % (cat, v, suffix))
+    diag = '\n'.join(lines)
+    if pct.get('未知', 0) > UNKNOWN_ALERT_PCT:
+        advice = '未知进程占比偏高，优先排查; 完整进程名见快照'
+    else:
+        advice = '均为已知类别, 检查构建是否未正常退出'
+    if snap:
+        advice += '\n📎 进程快照: %s' % os.path.basename(snap)
+    return diag, advice, snap
+
 faults, pending, noise, ok_names = [], [], [], []
 for name, c in checks.items():
     if name.startswith('_'):
@@ -641,6 +756,17 @@ for name, c in checks.items():
 
 escalated = [f for f in faults if f[3] == 'WARN']
 any_fault = bool(faults)
+
+# ── Enrich the CPU fault with process attribution ──
+# Only for the case that is actually mysterious: load high, no build running.
+# A build-running CPU is already explained and is INFO (never a fault), so
+# this runs at most once and only when a human would otherwise be guessing.
+for _i, (_name, _c, _held, _lvl) in enumerate(faults):
+    if _name == 'cpu' and '无构建运行' in str(_c.get('diagnosis', '')):
+        _diag, _advice, _snap = build_attribution()
+        if _diag:
+            faults[_i][1]['diagnosis'] = _diag
+            faults[_i][1]['advice'] = _advice
 
 # ── Build the structured card (hybrid layout) ──
 # Layout, in reading order:
