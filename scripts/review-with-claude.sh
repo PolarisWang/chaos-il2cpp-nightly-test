@@ -983,6 +983,12 @@ AGG_SUM=$'{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
 AGG_FIND="[]"
 CHUNK_FAILED=0
 INCOMPLETE=0
+# Chunks that only survived via the summary-only fallback AND came back with 0
+# findings. That combination is NOT evidence of clean code: the fallback runs
+# only after the model failed a full review twice, and a confused model asked
+# "roughly how many issues?" reliably answers 0. Counted so a review built
+# entirely from degraded chunks still carries low_confidence upstream.
+DEGRADED_CHUNKS=0
 # Files that fell out of the review (chunk failed after retries / dropped as
 # overflow). Reported to the card as a coverage gap so an incomplete review is
 # never rendered as a clean one.
@@ -1073,9 +1079,16 @@ except Exception:
                 chunk_find="$sfind"; chunk_sum="$ssum"
                 echo "  chunk '$chunk_paths' — summary-only retry produced ${total} findings, accepted"
             else
-                # 0 findings from summary-only is trustworthy — model reliably counts
+                # A 0 from summary-only is NOT trustworthy. This path is only reached
+                # after the model failed the full review 2x AND the minimal prompt.
+                # The minimal prompt asks for "a single number" and 0 is precisely
+                # what a confused model returns. Measured: builds 3943/3945/3946 all
+                # took this path, all reported "0 findings", all were false cleans.
+                # Accept the 0 for the aggregate, but record it so the final result
+                # carries low_confidence even if every chunk "succeeded".
                 chunk_find="$sfind"; chunk_sum="$ssum"
-                echo "  chunk '$chunk_paths' — summary-only confirmed 0 findings, accepted"
+                DEGRADED_CHUNKS=$((DEGRADED_CHUNKS + 1))
+                echo "  chunk '$chunk_paths' — summary-only returned 0 findings after full-review failure (degraded, marking low_confidence)"
             fi
         fi
     fi
@@ -1161,6 +1174,12 @@ fi
 if [ "$INCOMPLETE" != "0" ]; then
     LOW_CONF=true
     echo "WARNING: review incomplete (one or more chunks skipped) — marking low_confidence"
+fi
+if [ "${DEGRADED_CHUNKS:-0}" -gt 0 ]; then
+    # One or more chunks only produced an answer via the summary-only downgrade,
+    # and that answer was 0. Cannot be reported as a confident clean pass.
+    LOW_CONF=true
+    echo "WARNING: ${DEGRADED_CHUNKS} chunk(s) fell back to summary-only with 0 findings — marking low_confidence"
 fi
 if [ "$LOW_CONF" = "false" ] && [ "$_TOTAL" -eq 0 ]; then
     # substantive code present? (any non-note file)

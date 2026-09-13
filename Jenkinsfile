@@ -1193,9 +1193,9 @@ build_link = data.get('build_link', '')
 report_link = data.get('report_link', '')
 
 run_label = '午后' if run_tag == 'run2' else '凌晨'
-// Colour and icon follow the VERDICT, not the Jenkins result. A build that
-// finished successfully while a platform passed 0/45 must not render green —
-// that is precisely the case that went unnoticed before.
+# Colour and icon follow the VERDICT, not the Jenkins result. A build that
+# finished successfully while a platform passed 0/45 must not render green —
+# that is precisely the case that went unnoticed before.
 verdict = data.get('verdict') or {}
 vlevel = verdict.get('level', '')
 if vlevel == 'red':
@@ -1209,73 +1209,69 @@ else:
     icon = '⚠️'
 title = f'{icon} chaos-il2cpp Nightly #{build_num} — {date_tag} ({run_label})'
 
-// ── Card body (decision A) ──
-// Answers "do I need to act?" in the first line, then the per-platform numbers
-// people actually scan, then only the details that carry information.
-//
-// The previous body opened with 构建配置/状态 and then rendered four metric
-// lines — 正确率, 基准测试, 热更新, 内存Profile — that the Route-3 CLI never
-// populates, so they always read "0/0 (N/A)" and "0 方法". Four lines of
-// zeros pushed the real signal below the fold and made the card look fuller
-// than it was. They are gone; if those metrics ever do get populated, render
-// them conditionally (see metric_lines below) rather than unconditionally.
-//
-// 状态: SUCCESS is also gone as the headline. It came from Jenkins, which only
-// reports whether the pipeline finished — build 272 was SUCCESS while linux
-// passed 0/45, so the card said SUCCESS on a night when one platform was
-// completely dead. The headline is now `verdict`, computed in
-// build-feishu-payload.py from what the payloads actually contain, and shared
-// with the web report so the two can never disagree.
+# ── Card body (decision A) ──
+# Answers "do I need to act?" in the first line, then the per-platform numbers
+# people actually scan, then only the details that carry information.
+#
+# The previous body opened with 构建配置/状态 and then rendered four metric
+# lines — 正确率, 基准测试, 热更新, 内存Profile — that the Route-3 CLI never
+# populates, so they always read "0/0 (N/A)" and "0 方法". Four lines of
+# zeros pushed the real signal below the fold and made the card look fuller
+# than it was. They are gone; if those metrics ever do get populated, render
+# them conditionally (see metric_lines below) rather than unconditionally.
+#
+# 状态: SUCCESS is also gone as the headline. It came from Jenkins, which only
+# reports whether the pipeline finished — build 272 was SUCCESS while linux
+# passed 0/45, so the card said SUCCESS on a night when one platform was
+# completely dead. The headline is now `verdict`, computed in
+# build-feishu-payload.py from what the payloads actually contain, and shared
+# with the web report so the two can never disagree.
 parts = []
-bodyLines = data.get('platform_lines') or []
-if (bodyLines) {
-    // body_lines[0] is the verdict line produced by build-feishu-payload.py.
-    parts.addAll(bodyLines)
-} else {
-    // Payload builder unavailable — degrade to the raw Jenkins status rather
-    // than render an empty card, and say so.
-    parts.add("⚠️ **无法获取平台数据** — 请查看 Jenkins 构建")
-    parts.add("status: " + status)
-}
+body_lines = data.get('platform_lines') or []
+if body_lines:
+    # body_lines[0] is the verdict line produced by build-feishu-payload.py.
+    parts.extend(body_lines)
+else:
+    # Payload builder unavailable — degrade to the raw Jenkins status rather
+    # than render an empty card, and say so.
+    parts.append("⚠️ **无法获取平台数据** — 请查看 Jenkins 构建")
+    parts.append("status: " + str(status))
 
-// Only show metrics that carry a value. Kept as a list so the day the engine
-// starts emitting them they appear without another redesign.
-def metricLines = []
-if ((data.get('fact_total') ?: 0) > 0) {
-    metricLines.add("正确率 " + data.get('fact_passed', 0) + "/" + data.get('fact_total', 0))
-}
-if ((data.get('bmk_methods') ?: 0) > 0) {
-    metricLines.add("基准测试 " + data.get('bmk_methods') + " 方法")
-}
-if ((data.get('hot_total') ?: 0) > 0) {
-    metricLines.add("热更新 " + data.get('hot_passed', 0) + "/" + data.get('hot_total', 0))
-}
-if ((data.get('mem_methods') ?: 0) > 0) {
-    metricLines.add("内存Profile " + data.get('mem_methods') + " 方法")
-}
-if (metricLines) {
-    parts.add('')
-    parts.add("　" + metricLines.join(' · '))
-}
+# Only show metrics that carry a value. The engine's Route-3 CLI never
+# populates fact/benchmark/hotupdate/memory, so rendering them unconditionally
+# produced four lines of "0/0 (N/A)" that buried the one line that mattered.
+metric_lines = []
+if (data.get('fact_total') or 0) > 0:
+    metric_lines.append("正确率 %s/%s" % (data.get('fact_passed', 0), data.get('fact_total', 0)))
+if (data.get('bmk_methods') or 0) > 0:
+    metric_lines.append("基准测试 %s 方法" % data.get('bmk_methods'))
+if (data.get('hot_total') or 0) > 0:
+    metric_lines.append("热更新 %s/%s" % (data.get('hot_passed', 0), data.get('hot_total', 0)))
+if (data.get('mem_methods') or 0) > 0:
+    metric_lines.append("内存Profile %s 方法" % data.get('mem_methods'))
+if metric_lines:
+    parts.append('')
+    parts.append("　" + ' · '.join(metric_lines))
 
 missing = data.get('missing_platforms') or []
-if (missing) {
-    parts.add('')
-    parts.add('⚠️ **缺少平台报告:** ' + missing.join('、')
-              + ' — 该平台本轮未产出数据，请检查该分支是否失败')
-}
-fail_lines = data.get('fail_lines', '')
-if (fail_lines) {
-    if (fail_lines.startsWith('__MANY__')) {
-        parts.add('')
-        parts.add('**失败详情:** ' + fail_lines.replace('__MANY__', '') + ' DLL(s) 有失败')
-    } else {
-        parts.add('')
-        parts.add('**失败详情:**')
-        parts.add(fail_lines.replace('||', chr(10)))
-    }
-}
-message = parts.join(chr(10))
+if missing:
+    parts.append('')
+    parts.append('⚠️ **缺少平台报告:** ' + '、'.join(missing)
+                 + ' — 该平台本轮未产出数据，请检查该分支是否失败')
+
+# Fail detail. fail_lines is a "||"-joined blob (or the __MANY__ sentinel);
+# it was built that way to survive being embedded in a Jenkins @NonCPS string,
+# so it is unpacked here rather than upstream.
+fail_lines = data.get('fail_lines') or ''
+if fail_lines:
+    parts.append('')
+    if fail_lines.startswith('__MANY__'):
+        n = fail_lines[len('__MANY__'):]
+        parts.append('**失败详情:** %s 个 DLL 有失败 chunk' % n)
+    else:
+        parts.append('**失败详情:**')
+        parts.extend(fail_lines.split('||'))
+message = '\n'.join(parts)
 
 elements = [
     {'tag': 'div', 'text': {'tag': 'lark_md', 'content': message}},
@@ -1570,14 +1566,20 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 """
 
                 def summaryStr = ''
+                // If we cannot READ the findings, we do not know that the code is clean.
+                // Treat a parse failure as suspect, never as "0 findings". (The old
+                // fallback printed a 0/silent-OK summary, which is exactly the false
+                // green this whole path is meant to prevent.)
+                def findingsUnreadable = false
                 try {
                     summaryStr = sh(
                         script: "python3 -c \"import json; print(json.dumps(json.load(open('${findingsFile}'))['summary']))\" || echo '{\"严重\":0,\"中\":0,\"轻\":0,\"建议\":0,\"total_findings\":0}'",
                         returnStdout: true
                     ).trim()
                 } catch (err) {
-                    echo "WARNING: findings parsing failed (${err.message}), using defaults"
+                    echo "WARNING: findings parsing failed (${err.message}) — marking review as suspect"
                     summaryStr = '{"严重":0,"中":0,"轻":0,"建议":0,"total_findings":0}'
+                    findingsUnreadable = true
                 }
 
                 def parsed = readJSON text: summaryStr
@@ -1599,6 +1601,15 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                 def covDone = ''
                 def covTotal = ''
                 def skippedFiles = ''
+                // When the findings file itself is unreadable we are flying blind.
+                // Pessimistic default: ASSUME a problem (low confidence / suspect)
+                // rather than silently presenting an empty clean pass. This exact
+                // bug was hit because a Jenkins sandbox rejection of sf.join(',')
+                // (JSONArray.join is not in the approved-signatures list) threw in
+                // the coverage block, the catch swallowed it, and zeroed every flag
+                // — turning a properly-marked low_confidence review into a green
+                // "✅ 本次未发现代码问题" card. See monitor.md task #11.
+                def suspectReview = findingsUnreadable
                 try {
                     def full = readJSON text: readFile("${findingsFile}").trim()
                     lowConf = (full.low_confidence == true)
@@ -1612,14 +1623,29 @@ git rev-parse --verify --quiet '${toCommit}^{commit}' >/dev/null
                         covDone = ((cov.covered_files ?: 0)).toString()
                         covTotal = ((cov.total_files ?: 0)).toString()
                         def sf = cov.skipped_files
-                        if (sf instanceof List) {
-                            skippedFiles = sf.join(',')
+                        if (sf != null) {
+                            // Groovy's safe iteration avoids the Jenkins sandbox rejection
+                            // of JSONArray.join(String). A sandbox denial in this block
+                            // previously crashed the entire try, reset all three flags,
+                            // and erased the review's low_confidence → false-clean card.
+                            def parts = []
+                            for (Object o : sf) {
+                                parts.add(o.toString())
+                            }
+                            skippedFiles = parts.join(',')
                         }
                     }
                 } catch (err) {
-                    lowConf = false
-                    inComplete = false
-                    docsOnly = false
+                    echo "WARNING: findings flag parsing failed: ${err.message} — marking suspect"
+                    suspectReview = true
+                }
+                // Merge the pessimistic flags: if the findings were unreadable OR the
+                // flag parsing blew up, force low_confidence so the card never presents
+                // a false clean. The individual parsed values are STILL used for the
+                // findings count / severity breakdown (those came from the first try).
+                // Only the warning flags get overridden.
+                if (suspectReview) {
+                    lowConf = true
                 }
                 // Interpolate as 1/0 (not .toString() "true"/"false") so the flag is a
                 // valid Python int literal when spliced into the Feishu card python below
