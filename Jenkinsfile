@@ -39,12 +39,6 @@ def LINUX_DATE_TAG = "${DATE_TAG}${LINUX_SUFFIX}"
 def WIN_DATE_TAG   = "${DATE_TAG}${WIN_SUFFIX}"
 def FAILED_PLATFORMS = []
 
-// Trend baseline for the notification card. MUST live outside ${WORKSPACE}:
-// the post block runs cleanWs with cleanWhenSuccess: true, which wipes the
-// workspace at the end of every build. Stored next to the report-server's
-// daily output, which is on a persistent volume and already survives wipes.
-def TREND_STATE_DIR = '/var/lib/report-server/daily/trend'
-
 pipeline {
     agent none
 
@@ -96,6 +90,19 @@ pipeline {
         // This is pulled from the buildWithParameters call or falls back to a sensible
         // Windows default, and is only meaningful inside a `windows-x64` node context.
         WINDOWS_BOOMING_DIR = "${params.WINDOWS_BOOMING_DIR}"
+        // Trend baseline for the notification card. MUST live outside
+        // ${WORKSPACE}: the post block runs cleanWs with cleanWhenSuccess:
+        // true, which wipes the workspace at the end of every build, so a
+        // baseline kept there is always absent and every card says 首轮.
+        // Published to env.* for the same CPS reason as the tags above — as a
+        // top-level `def` it raises NoSuchPropertyException inside node()
+        // (observed on build 287, which silently degraded the card to the
+        // linux-only fallback).
+        TREND_STATE_DIR = "/var/lib/report-server/daily/trend"
+        // Read by the notification payload in post{}. As a top-level `def` it
+        // hits the same CPS binding loss as TREND_STATE_DIR above; it has not
+        // visibly broken yet only because this field is cosmetic in the card.
+        BUILD_CONFIG = "${BUILD_CONFIG}"
     }
 
     stages {

@@ -40,6 +40,66 @@ class InfoLine:
         return not self.label.strip()
 
 
+# ── Structured card sections (A3 hybrid layout) ──
+# These replace flat markdown `body` when a source wants element-level control.
+# Each section type is rendered by engine into a specific Feishu element shape.
+
+@dataclass
+class Section:
+    """A typed section in a card body.
+
+    The engine renders each section into its own element(s), so the card has
+    structure rather than one big markdown block. Sources choose the section
+    type based on what they are communicating and the engine handles layout.
+
+    Types:
+      summary    → header row with aligned fields (4-column grid)
+      fault      → vertical list: [icon] name — diagnosis; advice
+      pending    → vertical list: [icon] name (same shape, yellow)
+      ok_line    → compact single markdown line with dot-separated items
+      trend      → single markdown line with trend arrows
+      text       → arbitrary markdown block (for notes, hr separators)
+    """
+    type: str  # 'summary' | 'fault' | 'pending' | 'ok_line' | 'trend' | 'text'
+    items: List  # type-dependent: list of {name,value,note} or list of str
+    title: str = ''
+
+    @classmethod
+    def summary_count(cls, n_faults, n_pending, n_noise, n_ok):
+        return cls(type='summary', items=[
+            {'label': '❌ 故障', 'value': str(n_faults or 0)},
+            {'label': '⚠️ 待确认', 'value': str(n_pending or 0)},
+            {'label': '⏸ 噪音', 'value': str(n_noise or 0)},
+            {'label': '✅ 正常', 'value': str(n_ok or 0)},
+        ])
+
+    @classmethod
+    def fault(cls, name, diagnosis='', advice='', icon='🔴', extra=''):
+        return cls(type='fault', items=[{
+            'icon': icon, 'name': name, 'extra': extra,
+            'diagnosis': diagnosis, 'advice': advice,
+        }])
+
+    @classmethod
+    def pending(cls, name, diagnosis='', detail='', icon='🟡'):
+        return cls(type='pending', items=[{
+            'icon': icon, 'name': name, 'detail': detail,
+            'diagnosis': diagnosis,
+        }])
+
+    @classmethod
+    def ok_line(cls, *items):
+        return cls(type='ok_line', items=list(items))
+
+    @classmethod
+    def trend(cls, *items):
+        return cls(type='trend', items=list(items))
+
+    @classmethod
+    def text(cls, content):
+        return cls(type='text', items=[content])
+
+
 @dataclass
 class Notice:
     """A notification, before any presentation decisions are made.
@@ -62,6 +122,12 @@ class Notice:
 
     # Card body, as a list of labelled blocks in reading order.
     body: List[InfoLine] = field(default_factory=list)
+
+    # Structured sections (alternative to `body`). When set, the engine renders
+    # these as typed element groups instead of a flat markdown block — giving
+    # the card real structure (aligned grids, per-fault detail blocks) rather
+    # than one wall of text. Takes precedence over `body` and `raw_body`.
+    sections: List['Section'] = field(default_factory=list)
 
     # Buttons: (label, url) pairs, rendered in order.
     actions: List[Tuple[str, str]] = field(default_factory=list)

@@ -665,12 +665,32 @@ def main() -> int:
             # ${WORKSPACE}/.notify/, which the post block wipes on success, so
             # "previous payload" was always absent and every card said 首轮 —
             # the trend feature never once emitted a delta.
-            # Assert on the assignment, not a bare grep: the old path is also
-            # mentioned in the explanatory comment above it.
+            # It must also be an env.* entry, not a top-level `def`: a `def`
+            # raises NoSuchPropertyException inside node() (CPS drops the
+            # binding) and build 287 silently degraded the card to its
+            # linux-only fallback because of exactly that.
             check("trend baseline stored outside the workspace",
-                  'def prevPayload = "${TREND_STATE_DIR}/' in jf
-                  and 'def prevPayload = "${WORKSPACE}' not in jf,
-                  "prev payload must not live under ${WORKSPACE}")
+                  'TREND_STATE_DIR = "/var/lib/report-server' in jf
+                  and 'def TREND_STATE_DIR' not in jf,
+                  "must be an env.* entry, not a top-level def")
+
+            # Top-level `def` variables do not survive into node() — CPS drops
+            # the binding and any read raises NoSuchPropertyException. In the
+            # post block that is worse than a crash: the throw is caught by the
+            # enclosing try/catch, which echoes a WARNING and falls back to a
+            # degraded card, so the run looks fine and the notification is
+            # quietly missing the platform data. Build 287 shipped exactly that.
+            # Values the post block needs must be declared in environment{}.
+            _post = jf[jf.index('post {'):] if 'post {' in jf else ''
+            _env_declared = set(re.findall(r'^\s{8}(\w+)\s*=', jf, re.M))
+            _top_defs = set(re.findall(r'^def\s+(\w+)\s*=', jf, re.M))
+            _leaked = sorted(
+                v for v in _top_defs
+                if v not in _env_declared
+                and v not in ('ARTIFACTS_DIR',)   # assigned at runtime, not read here
+                and re.search(r'\$\{?' + v + r'\b|\b' + v + r'\b', _post))
+            check("no top-level def read inside post{} (CPS drops the binding)",
+                  not _leaked, f"leaked: {_leaked}")
             # Bug seen on the real Windows agent: only the publisher was
             # downloaded, so the HTML step warned "generate-nightly-report.py
             # not found" and produced JSON only.
