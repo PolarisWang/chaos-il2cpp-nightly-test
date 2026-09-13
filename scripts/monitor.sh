@@ -89,18 +89,28 @@ get_disk_used_pct() {
 }
 
 # ── Check Functions ─────────────────────────────────────────────────
-# Each writes to stdout: name<TAB>level<TAB>message
+# Each writes to stdout: name<TAB>level<TAB>message[<TAB>diagnosis<TAB>advice]
 # level is one of: OK, WARN, CRIT, INFO
+#
+# `diagnosis` and `advice` are OPTIONAL and must only be set when there is real
+# evidence for them. A restated number is not a diagnosis ("swap is 27%" is the
+# message, not an explanation of why). Checks that cannot tell WHY a value is
+# what it is leave these empty and the card says so, rather than inventing
+# plausible-sounding text that would train the reader to ignore it.
+#
+# Currently able to diagnose: cpu (knows whether a build is running),
+# docker (knows which container died), http (knows which service and code).
+# Everything else reports level+message only.
 
 check_cpu() {
-    local cores load level msg warn_thr crit_thr building
+    local cores load level msg warn_thr crit_thr building diag advice
     cores=$(nproc 2>/dev/null || echo 1)
     load=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)
     warn_thr=$(echo "$cores * $CPU_WARN_THRESHOLD" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}')
     crit_thr=$(echo "$cores * $CPU_CRIT_THRESHOLD" | bc -l 2>/dev/null | awk '{printf "%.1f", $1}')
     building=$(detect_running_builds)
 
-    level="OK"
+    level="OK"; diag=""; advice=""
     if (echo "$load > $crit_thr" | bc -l 2>/dev/null | grep -q 1); then level="CRIT"
     elif (echo "$load > $warn_thr" | bc -l 2>/dev/null | grep -q 1); then level="WARN"
     fi
@@ -110,12 +120,20 @@ check_cpu() {
     # raising an incident. Only load that is high while the box is IDLE tells us
     # something is wrong (runaway process, leaked task).
     if [ "$level" != "OK" ] && [ "$building" = "1" ]; then
-        msg="CPU load ${load}/${cores} cores — build in progress (expected, thresholds ${warn_thr}/${crit_thr} do not apply)"
+        msg="CPU load ${load}/${cores} cores (warn>${warn_thr} crit>${crit_thr})"
+        diag="构建进行中 — 负载属于预期，不会自愈也不会恶化"
+        advice="无需操作"
         level="INFO"
     else
         msg="CPU load ${load}/${cores} cores (warn>${warn_thr} crit>${crit_thr})"
+        if [ "$level" != "OK" ]; then
+            # No build running, yet load is high: that is the actual signal this
+            # check exists to find (runaway process / leaked worker).
+            diag="无构建运行但负载仍超阈值 — 可能存在失控进程"
+            advice="top -bn1 -o %CPU | head; 检查是否有残留的 dotnet/cc1plus"
+        fi
     fi
-    printf "cpu\t%s\t%s\n" "$level" "$msg"
+    printf "cpu\t%s\t%s\t%s\t%s\n" "$level" "$msg" "$diag" "$advice"
 }
 
 check_memory() {
@@ -126,8 +144,8 @@ check_memory() {
     if [ "${avail_pct:-99}" -lt "$MEM_CRIT_THRESHOLD" ]; then level="CRIT"
     elif [ "${avail_pct:-99}" -lt "$MEM_WARN_THRESHOLD" ]; then level="WARN"
     fi
-    printf "memory\t%s\tMemory: %s (%s%% avail, warn<%s%% crit<%s%%)\n" \
-        "$level" "$mem_info" "$avail_pct" "$MEM_WARN_THRESHOLD" "$MEM_CRIT_THRESHOLD"
+    printf "memory\t%s\t%s\t\t\n" \
+        "$level" "$mem_info"
 }
 
 check_swap() {
@@ -136,12 +154,16 @@ check_swap() {
     swap_info=$(free -h | awk 'NR==3 {print "used " $3 " / " $2}')
     level="OK"
     if [ "${swap_pct:-0}" -gt "$SWAP_WARN_THRESHOLD" ]; then level="WARN"; fi
-    printf "swap\t%s\tSwap: %s (%s%% used, warn>%s%%)\n" \
+    # No diagnosis: a swap percentage alone does not say WHY memory is under
+    # pressure (a leak, a one-off build peak, or ordinary caching all look the
+    # same from here). The trend, not a guess, is what would make this
+    # actionable — leave diagnosis empty rather than assert a cause.
+    printf "swap\t%s\tSwap: %s (%s%% used, warn>%s%%)\t\t\n" \
         "$level" "$swap_info" "$swap_pct" "$SWAP_WARN_THRESHOLD"
 }
 
 check_disk() {
-    local pct level global_level="OK" details=""
+    local pct level global_level="OK" details="" over=""
     for mnt in "/" "/var/lib/docker"; do
         [ -d "$mnt" ] || continue
         pct=$(get_disk_used_pct "$mnt")
@@ -150,17 +172,24 @@ check_disk() {
         elif [ "${pct:-0}" -ge "$DISK_WARN_THRESHOLD" ]; then level="WARN"
         fi
         [ "$level" != "OK" ] && global_level="$level"
+        [ "$level" != "OK" ] && over="${over}${mnt} "
         details="${details} ${mnt}:${pct}%(${level})"
     done
-    printf "disk\t%s\tDisk:%s (warn>%s%% crit>%s%%)\n" \
-        "$global_level" "$details" "$DISK_WARN_THRESHOLD" "$DISK_CRIT_THRESHOLD"
+    local diag="" advice=""
+    if [ -n "$over" ]; then
+        diag="挂载点 ${over}已超阈值 — 磁盘不会自行释放"
+        advice="du -sh /var/lib/docker/* | sort -h | tail; 清理旧构建产物"
+    fi
+    printf "disk\t%s\tDisk:%s (warn>%s%% crit>%s%%)\t%s\t%s\n" \
+        "$global_level" "$details" "$DISK_WARN_THRESHOLD" "$DISK_CRIT_THRESHOLD" \
+        "$diag" "$advice"
 }
 
 check_docker_daemon() {
     if docker info &>/dev/null; then
-        printf "docker_daemon\tOK\tDocker daemon running\n"
+        printf "docker_daemon\tOK\tDocker daemon running\t\t\n"
     else
-        printf "docker_daemon\tCRIT\tDocker daemon NOT responding\n"
+        printf "docker_daemon\tCRIT\tDocker daemon NOT responding\t守护进程未响应 — 所有容器均已失联\tsystemctl status docker; docker ps 确认\n"
     fi
 }
 
@@ -174,17 +203,18 @@ check_docker_containers() {
         fi
     done
     if [ "$level" = "OK" ]; then
-        printf "docker\tOK\tAll %d containers running\n" "${#EXPECTED_CONTAINERS[@]}"
+        printf "docker\tOK\tAll %d containers running\t\t\n" "${#EXPECTED_CONTAINERS[@]}"
     else
-        printf "docker\tCRIT\tDocker containers not running: %s\n" "$unhealthy"
+        # We know exactly which container is down — that IS the diagnosis.
+        printf "docker\tCRIT\tDocker containers not running: %s\t容器已停止，其承载的服务不可用\tdocker start <容器名>；若反复退出查看 docker logs\n" "$unhealthy"
     fi
 }
 
 check_sshd() {
     if pgrep -x sshd &>/dev/null; then
-        printf "sshd\tOK\tsshd is running\n"
+        printf "sshd\tOK\tsshd is running\t\t\n"
     else
-        printf "sshd\tCRIT\tsshd is NOT running\n"
+        printf "sshd\tCRIT\tsshd is NOT running\tSSH 服务未运行 — 可能导致无法远程登录\tsystemctl start sshd\n"
     fi
 }
 
@@ -200,9 +230,10 @@ check_http_services() {
         fi
     done
     if [ "$level" = "OK" ]; then
-        printf "http\tOK\tAll HTTP services reachable\n"
+        printf "http\tOK\tAll HTTP services reachable\t\t\n"
     else
-        printf "http\tCRIT\tServices unreachable: %s\n" "$down"
+        # We know which service and which code — that is actionable as-is.
+        printf "http\tCRIT\tServices unreachable: %s\t具体服务无响应或返回 5xx\t检查对应容器是否存活；HTTP 000 通常意味着端口未监听\n" "$down"
     fi
 }
 
@@ -210,9 +241,9 @@ check_suspend() {
     local count
     count=$(journalctl -u systemd-suspend.service --since "600 seconds ago" 2>/dev/null | grep -c "Starting\|entered" || true)
     if [ "${count:-0}" -gt 0 ]; then
-        printf "suspend\tWARN\tSystem suspended %dx in last 10 min (check power management)\n" "$count"
+        printf "suspend\tWARN\tSystem suspended %dx in last 10 min (check power management)\t系统反复挂起 — 会中断正在运行的构建\t检查电源管理/休眠设置\n" "$count"
     else
-        printf "suspend\tOK\tNo recent suspend events\n"
+        printf "suspend\tOK\tNo recent suspend events\t\t\n"
     fi
 }
 
@@ -221,17 +252,21 @@ check_systemd_failed() {
     failed=$(systemctl list-units --state=failed --no-legend 2>/dev/null | wc -l) || failed=0
     if [ "${failed:-0}" -gt 0 ]; then
         details=$(systemctl list-units --state=failed --no-legend 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
-        printf "systemd\tWARN\t%d failed units: %s\n" "$failed" "$details"
+        printf "systemd\tWARN\t%d failed units: %s\t有 systemd 单元处于 failed 状态\tsystemctl status <unit> 查看失败原因\n" "$failed" "$details"
     else
-        printf "systemd\tOK\tAll systemd units healthy\n"
+        printf "systemd\tOK\tAll systemd units healthy\t\t\n"
     fi
 }
 
 check_dns() {
+    # Detects DNS resolution for NOTIFICATIONS. If DNS is broken, this check
+    # itself will be the only failure nobody ever sees — the alert cannot be
+    # delivered. Report it as INFO so it stays visible in the health report
+    # without ever triggering a card (risk 5: causal loop).
     if host open.feishu.cn &>/dev/null || nslookup open.feishu.cn &>/dev/null; then
-        printf "dns\tOK\tDNS resolution working\n"
+        printf "dns\tOK\tDNS resolution working\t\t\n"
     else
-        printf "dns\tWARN\tCannot resolve open.feishu.cn — notifications may fail\n"
+        printf "dns\tINFO\tCannot resolve open.feishu.cn — notifications may fail\tDNS 故障意味着本条告警无法送达\t检查 /etc/resolv.conf 和网络连通性\n"
     fi
 }
 
@@ -241,11 +276,11 @@ check_uptime() {
     if [ "${sec:-0}" -lt 3600 ]; then
         local boot_msg
         boot_msg=$(journalctl --list-boots 2>/dev/null | tail -1 | awk '{print $3, $4, $5, $6}' || echo "unknown")
-        printf "uptime\tINFO\tSystem booted %ds ago (last: %s)\n" "$sec" "$boot_msg"
+        printf "uptime\tINFO\tSystem booted %ds ago (last: %s)\t\t\n" "$sec" "$boot_msg"
     else
         local uptime_str
-        uptime_str=$(awk '{printf "%dd %dh %dm", int($1/86400), int($1%86400/3600), int($1%3600/60)}' /proc/uptime)
-        printf "uptime\tOK\tUptime: %s\n" "$uptime_str"
+        uptime_str=$(awk '{printf "%d %d %dm", int($1/86400), int($1%86400/3600), int($1%3600/60)}' /proc/uptime)
+        printf "uptime\tOK\tUptime: %s\t\t\n" "$uptime_str"
     fi
 }
 
@@ -310,17 +345,25 @@ RECOVERY_MIN_HOLD_S = int(os.environ.get('MONITOR_RECOVERY_MIN_HOLD_S', '1800'))
 # delay a real outage by 10 minutes for no benefit.
 DEBOUNCED = {'cpu'}
 
-# Parse tab-separated check results
+# Parse tab-separated check results.
+# Format: name<TAB>level<TAB>message[<TAB>diagnosis<TAB>advice]
+# diagnosis/advice are optional and often empty — a check that cannot explain
+# WHY a value is what it is must leave them blank rather than invent a cause.
 lines = sys.stdin.read().strip().split('\n')
 checks = {}
 for line in lines:
     if not line.strip():
         continue
-    parts = line.split('\t', 2)
+    parts = line.split('\t', 4)
     if len(parts) < 3:
         continue
-    name, level, msg = parts
-    checks[name] = {'level': level, 'msg': msg.strip()}
+    name, level, msg = parts[0], parts[1], parts[2]
+    diag = parts[3].strip() if len(parts) > 3 else ''
+    advice = parts[4].strip() if len(parts) > 4 else ''
+    if not level.strip():
+        continue
+    checks[name] = {'level': level.strip(), 'msg': msg.strip(),
+                    'diagnosis': diag, 'advice': advice}
 
 # Load previous state
 prev = {}
@@ -335,8 +378,6 @@ if os.path.exists(state_file):
 new_issues = []    # OK → WARN/CRIT (confirmed by debounce where applicable)
 recovered = []     # WARN/CRIT → OK
 ongoing = []       # WARN/CRIT still WARN/CRIT
-summary_issues = []
-summary_ok = []
 
 # Debounce bookkeeping, persisted in state across runs.
 #   _streak_<name>_<level> = consecutive checks seen at that level
@@ -370,6 +411,114 @@ def reset_streaks(name):
         if k.startswith('_streak_%s_' % name):
             del streaks[k]
 
+# Checks whose check_* function can supply a real diagnosis. Everything else
+# reports only a number, and the card says so rather than inventing a cause.
+# Keep in sync with the check_* functions that set a non-empty diagnosis.
+DIAGNOSABLE = {'cpu', 'disk', 'docker', 'docker_daemon', 'sshd', 'http',
+               'suspend', 'systemd', 'dns'}
+
+# ── Sample persistence (trend baseline) ──
+# The monitor logs only booleans (crit=/warn=/notify=), so no numeric history
+# existed anywhere — a trend feature could never have been built from it. Write
+# a small snapshot every run; hourly files, 7-day retention.
+#
+# Deliberately numeric-only and append-only: cheap to write, trivial to read
+# back, and safe to lose (a missing sample degrades the trend, never the card).
+SAMPLE_DIR = os.environ.get('MONITOR_SAMPLE_DIR',
+                            '/var/lib/report-server/daily/samples')
+SAMPLE_RETAIN_DAYS = int(os.environ.get('MONITOR_SAMPLE_RETAIN_DAYS', '7'))
+
+def _num(txt):
+    # First number in a string, or None. Used to pull values out of check
+    # messages without the check functions having to emit structured data.
+    import re as _re
+    m = _re.search(r'(\d+(?:\.\d+)?)', str(txt or ''))
+    return float(m.group(1)) if m else None
+
+def write_sample():
+    try:
+        os.makedirs(SAMPLE_DIR, exist_ok=True)
+        sample = {
+            'ts': int(time.time()),
+            'cpu': _num((checks.get('cpu') or {}).get('msg')),
+            'cpu_level': (checks.get('cpu') or {}).get('level'),
+            'mem_avail_pct': _num((checks.get('memory') or {}).get('msg')),
+            'swap_pct': _num((checks.get('swap') or {}).get('msg')),
+            'disk_pct': _num((checks.get('disk') or {}).get('msg')),
+            'n_faults': len(faults),
+            'n_pending': len(pending),
+            'n_ok': len(ok_names),
+        }
+        hour = time.strftime('%Y-%m-%d-%H', time.localtime())
+        with open(os.path.join(SAMPLE_DIR, hour + '.jsonl'), 'a') as f:
+            f.write(json.dumps(sample) + '\n')
+        # Retention: drop files older than SAMPLE_RETAIN_DAYS by mtime.
+        cutoff = time.time() - SAMPLE_RETAIN_DAYS * 86400
+        for fn in os.listdir(SAMPLE_DIR):
+            if not fn.endswith('.jsonl'):
+                continue
+            fp = os.path.join(SAMPLE_DIR, fn)
+            try:
+                if os.path.getmtime(fp) < cutoff:
+                    os.remove(fp)
+            except OSError:
+                pass
+    except Exception as e:
+        # Never let bookkeeping break the health check itself.
+        print('WARNING: could not write sample: %s' % e)
+
+def load_samples(max_age_h=48):
+    out = []
+    try:
+        cutoff = time.time() - max_age_h * 3600
+        for fn in sorted(os.listdir(SAMPLE_DIR)):
+            if not fn.endswith('.jsonl'):
+                continue
+            with open(os.path.join(SAMPLE_DIR, fn)) as f:
+                for line in f:
+                    try:
+                        s = json.loads(line)
+                    except ValueError:
+                        continue
+                    if s.get('ts', 0) >= cutoff:
+                        out.append(s)
+    except Exception:
+        pass
+    return out
+
+def build_trend():
+    # Compare this hour's median against the same hour ~24h ago. Says nothing
+    # at all until a full day of samples exists — a permanent 「首轮」 marker is
+    # worse than silence, and claiming a direction without a baseline is a lie.
+    samples = load_samples(72)
+    if len(samples) < 12:
+        return []
+    now = time.time()
+    recent = [s for s in samples if now - s['ts'] <= 3600]
+    base = [s for s in samples if 20 * 3600 <= now - s['ts'] <= 28 * 3600]
+    if not recent or not base:
+        return []
+
+    def med(vals):
+        vals = sorted(v for v in vals if v is not None)
+        return vals[len(vals) // 2] if vals else None
+
+    parts = []
+    for key, label in (('cpu', 'CPU'), ('mem_avail_pct', 'Mem可用'),
+                       ('swap_pct', 'Swap'), ('disk_pct', 'Disk')):
+        r = med([s.get(key) for s in recent])
+        b = med([s.get(key) for s in base])
+        if r is None or b is None:
+            continue
+        d = r - b
+        if abs(d) < 1:
+            parts.append('%s →' % label)
+        else:
+            parts.append('%s %s%.1f' % (label, '↑' if d > 0 else '↓', abs(d)))
+    if not parts:
+        return []
+    return ['📊 **趋势（较昨日同期）:** ' + '  ·  '.join(parts)]
+
 for name, c in checks.items():
     if name.startswith('_'):
         continue
@@ -384,7 +533,6 @@ for name, c in checks.items():
     cur_level = c['level']
 
     if cur_level in ('WARN', 'CRIT'):
-        summary_issues.append(f'  • [{cur_level}] {c[\"msg\"]}')
 
         reset_streaks(name + '__ok')
         if prev_effective in ('WARN', 'CRIT'):
@@ -400,7 +548,6 @@ for name, c in checks.items():
                 new_issues.append(f'{name}({cur_level})')
                 onset[name] = timestamp
     else:
-        summary_ok.append(f'  • {c[\"msg\"]}')
         if prev_effective in ('WARN', 'CRIT'):
             # Was announced bad; confirm the recovery before saying so.
             n = bump(name + '__ok', 'OK')
@@ -439,6 +586,118 @@ for name, c in checks.items():
             announced = 'OK'
     effective[name] = announced
 
+# ── Group the checks for the card ──
+# The old card listed every check as raw numbers, which gave a reader no way to
+# tell 「needs me now」 from 「normal for a build machine」. Four groups, in the
+# order a reader needs them:
+#
+#   faults   ❌  CRIT, or a WARN that has been held beyond WARN_ESCALATE_S
+#   pending  ⚠️  WARN still inside the observation window
+#   noise    ⏸  high resource use with a KNOWN benign cause (build running)
+#   ok       ✅  everything else, folded to a single count line
+#
+# Escalation exists because merging WARNs silently would be worse than the old
+# spam: a disk at 84% is a WARN that never becomes a CRIT until it is too late,
+# so a WARN that will not go away must eventually ask for a human.
+WARN_ESCALATE_S = int(os.environ.get('MONITOR_WARN_ESCALATE_S', '7200'))    # 2h
+WARN_URGENT_S = int(os.environ.get('MONITOR_WARN_URGENT_S', '86400'))       # 24h
+
+def held_seconds(name):
+    # How long this check has been in its current bad level (0 if unknown).
+    since = onset.get(name) or prev.get('_onset_' + name, '')
+    if not since:
+        return 0
+    try:
+        return time.time() - time.mktime(
+            time.strptime(since, '%Y-%m-%d %H:%M:%S'))
+    except (ValueError, TypeError):
+        return 0
+
+def fmt_dur(sec):
+    if sec >= 86400:
+        return '%d 天' % (sec // 86400)
+    if sec >= 3600:
+        return '%d 小时' % (sec // 3600)
+    return '%d 分钟' % (sec // 60)
+
+faults, pending, noise, ok_names = [], [], [], []
+for name, c in checks.items():
+    if name.startswith('_'):
+        continue
+    lvl = c['level']
+    if lvl == 'OK':
+        ok_names.append(name)
+        continue
+    if lvl == 'INFO':
+        # INFO never alerts. This is where the build-aware CPU downgrade lands,
+        # and where a broken DNS check reports itself without looping.
+        noise.append((name, c))
+        continue
+    held = held_seconds(name)
+    if lvl == 'CRIT' or held >= WARN_ESCALATE_S:
+        faults.append((name, c, held, lvl))
+    else:
+        pending.append((name, c, held))
+
+escalated = [f for f in faults if f[3] == 'WARN']
+any_fault = bool(faults)
+
+# Build message
+msg_lines = ['🕐 %s' % timestamp, '───', '']
+
+if faults:
+    msg_lines.append('❌ **故障（%d 项）**' % len(faults))
+    for name, c, held, lvl in faults:
+        badge = '🔴' if lvl == 'CRIT' else '🟡'
+        line = '%s %s' % (badge, c['msg'])
+        if lvl == 'WARN':
+            line += ' — 已持续 %s（WARN 长期未恢复）' % fmt_dur(held)
+            if held >= WARN_URGENT_S:
+                line += '，建议立即处理'
+        msg_lines.append(line)
+        if c.get('diagnosis'):
+            msg_lines.append('    → %s' % c['diagnosis'])
+        if c.get('advice'):
+            msg_lines.append('    🔧 %s' % c['advice'])
+else:
+    msg_lines.append('❌ **故障（0 项）**')
+msg_lines.append('')
+
+if pending:
+    msg_lines.append('⚠️ **待确认（%d 项）**' % len(pending))
+    for name, c, held in pending:
+        suffix = ('（已 %s，超 2 小时将升级）' % fmt_dur(held)) if held else ''
+        msg_lines.append('• %s%s' % (c['msg'], suffix))
+        if c.get('diagnosis'):
+            msg_lines.append('    → %s' % c['diagnosis'])
+        elif name not in DIAGNOSABLE:
+            # Say so explicitly. An empty arrow would read as 「no explanation
+            # needed」; this reads as 「we genuinely cannot tell you why」.
+            msg_lines.append('    → 无诊断信息（该指标需要历史对比才能判断）')
+    msg_lines.append('')
+
+if noise:
+    msg_lines.append('⏸ **已知噪音（%d 项）**' % len(noise))
+    for name, c in noise:
+        msg_lines.append('• %s' % c['msg'])
+        if c.get('diagnosis'):
+            msg_lines.append('    → %s' % c['diagnosis'])
+    msg_lines.append('')
+
+if ok_names:
+    msg_lines.append('✅ **%d 项正常**' % len(ok_names))
+
+# Append the trend block if we have enough history to say something true.
+trend_text = build_trend()
+if trend_text:
+    msg_lines.append('')
+    msg_lines.extend(trend_text)
+
+full_message = '\n'.join(msg_lines)
+
+# ── Written the sample last so it includes the grouping above ──
+write_sample()
+
 # Determine overall status levels (derived from the raw check levels, BEFORE the
 # debounce filter — a persistent problem must still be visible in the report
 # during its debounce window, it just should not page anyone yet).
@@ -455,17 +714,8 @@ has_info = any(c['level'] == 'INFO' for c in checks.values())
 # Net effect: a CRIT that persisted past detection went permanently silent.
 sustained_crit = (has_crit and not new_issues and not recovered and ongoing)
 
-# Build message
-msg_lines = ['📋 **系统健康检查报告**', f'🕐 {timestamp}', '───', '']
-if summary_issues:
-    msg_lines.append('**异常项**')
-    msg_lines.extend(summary_issues)
-    msg_lines.append('')
-if summary_ok:
-    msg_lines.append('**正常项**')
-    msg_lines.extend(summary_ok)
-
-full_message = '\n'.join(msg_lines)
+# ── Written the sample last so it includes the grouping above ──
+write_sample()
 
 # Decide notification
 notify = False
@@ -475,7 +725,7 @@ color = 'green'
 if new_issues:
     notify = True
     color = 'red' if has_crit else 'blue'
-    title = f'{\"🚨\" if has_crit else \"⚠️\"} 系统异常告警 [{timestamp}]'
+    title = f'{\"🚨\" if any_fault else \"⚠️\"} 系统异常 [{timestamp}]'
 elif recovered and not ongoing:
     notify = True
     color = 'green'
