@@ -939,6 +939,29 @@ print(json.dumps(obj, ensure_ascii=False))
 
 # ── If cached, short-circuit to the cached result ───────────
 if [ -n "$CACHED_JSON" ]; then
+    # Normalize cached findings too (the normalization block at line ~1171 is
+    # bypassed by this exit, so findings cached before that fix would still carry
+    # the wrong shape). Apply the same field-name mapping here.
+    CACHED_JSON=$(printf '%s' "$CACHED_JSON" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+fs = d.get("findings") or []
+_MSG_KEYS = ("message", "summary", "short_summary", "description", "title")
+for _f in fs:
+    if not isinstance(_f, dict): continue
+    if not str(_f.get("message") or "").strip():
+        for _k in _MSG_KEYS:
+            _v = _f.get(_k)
+            if isinstance(_v, str) and _v.strip():
+                _f["message"] = _v; break
+        if not str(_f.get("message") or "").strip():
+            _v = _f.get("failure_scenario")
+            if isinstance(_v, str) and _v.strip():
+                _f["message"] = _v
+    _f.setdefault("repo", "il2cpp")
+d["findings"] = fs
+print(json.dumps(d, ensure_ascii=False))
+' 2>/dev/null || echo "$CACHED_JSON")
     echo "$CACHED_JSON" > "$OUTPUT_FILE"
     CRIT=$(echo "$CACHED_JSON" | python3 -c "
 import json, sys
@@ -1172,6 +1195,47 @@ AGG_FIND=$(python3 - "$_AGG_FIND_TMP" <<'PY'
 import sys, json
 with open(sys.argv[1]) as f:
     fs = json.load(f)
+
+# Normalize field names BEFORE the card sees them. The model does not always
+# follow the requested schema: alongside the expected rage shape
+# (message/fix/verify) it intermittently emits a legacy/variant shape
+# (summary/short_summary/failure_scenario). The card reads `message`, so a
+# variant finding rendered as an empty line and was then dropped as a "ghost"
+# — the finding silently vanished from the card while still counting in the
+# summary. Map the variants onto the canonical names here so downstream
+# consumers only ever deal with one shape.
+_MSG_KEYS  = ("message", "summary", "short_summary", "description", "title")
+_FIX_KEYS  = ("fix", "suggestion", "recommendation")
+_VER_KEYS  = ("verify", "verification", "test")
+for _f in fs:
+    if not isinstance(_f, dict):
+        continue
+    if not str(_f.get("message") or "").strip():
+        for _k in _MSG_KEYS:
+            _v = _f.get(_k)
+            if isinstance(_v, str) and _v.strip():
+                _f["message"] = _v
+                break
+        # Still nothing usable: fall back to the failure scenario so the line
+        # carries the "what goes wrong" text instead of rendering blank.
+        if not str(_f.get("message") or "").strip():
+            _v = _f.get("failure_scenario")
+            if isinstance(_v, str) and _v.strip():
+                _f["message"] = _v
+    if not str(_f.get("fix") or "").strip():
+        for _k in _FIX_KEYS:
+            _v = _f.get(_k)
+            if isinstance(_v, str) and _v.strip():
+                _f["fix"] = _v
+                break
+    if not str(_f.get("verify") or "").strip():
+        for _k in _VER_KEYS:
+            _v = _f.get(_k)
+            if isinstance(_v, str) and _v.strip():
+                _f["verify"] = _v
+                break
+    _f.setdefault("repo", "il2cpp")
+
 order = {"严重": 0, "中": 1, "轻": 2, "建议": 3}
 fs.sort(key=lambda f: order.get(f.get("severity", "建议"), 9))
 print(json.dumps(fs, ensure_ascii=False))
