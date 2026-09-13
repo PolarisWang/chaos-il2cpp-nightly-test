@@ -253,7 +253,11 @@ if _docs_only and not _incomplete and not _low_conf:
     ):
         raise SystemExit(0)
 
-# 🟡 Incomplete coverage: some files were never reviewed.
+# 🟡 Incomplete coverage: some files were never reviewed. Do NOT short-circuit
+# into an incident-only card — that would hide the findings that DID come back,
+# which is the whole point of the review. Instead remember the coverage gap and
+# render it as a warning INSIDE the normal findings card (see risk_line below).
+_coverage_warning = ''
 if _incomplete:
     _cov = ''
     if _cov_done or _cov_total:
@@ -267,21 +271,24 @@ if _incomplete:
     if _skipped:
         _files = [f for f in _skipped.replace(',', ' ').split() if f]
         _shown = _files[:8]
-        _skip_md = ('未覆盖 ' + str(len(_files)) + ' 个：\n'
+        _skip_md = ('\n未覆盖 ' + str(len(_files)) + ' 个：\n'
                     + '\n'.join('  • ' + f for f in _shown))
         if len(_files) > len(_shown):
             _skip_md += '\n  • …等 ' + str(len(_files) - len(_shown)) + ' 个'
-    if _render_incident(
-        level='YELLOW',
-        title='代码审查部分完成',
-        impact=(_cov or '部分文件未被审查') + ('\n' + _skip_md if _skip_md else ''),
-        cause='模型对部分文件返回了无法解析的结果，重试后仍未成功',
-        action='稍后重跑本次审查，或人工抽查上述文件',
-    ):
-        raise SystemExit(0)
+    _coverage_warning = ('⚠️ **审查不完整** — ' + (_cov or '部分文件未被审查')
+                         + _skip_md
+                         + '\n后续可重跑本次审查以获得完整结果')
 
-# 🟡 Low confidence: 0 findings on substantive code — suspicious, needs a look.
-if _low_conf:
+# 🟡 Low confidence: the review came back with no findings on substantive code —
+# suspicious, because the model has produced false-clean results before.
+#
+# CRITICAL: only intercept when there are genuinely ZERO findings. review-with-
+# claude.sh also sets low_confidence=true when chunks were skipped, which is
+# normal on a large diff and happens WHILE findings exist. Short-circuiting in
+# that case swallowed the entire findings list and rendered a generic warning
+# instead — build 3941 returned 10 findings and none of them reached the card.
+# With findings present, fall through and render them.
+if _low_conf and int(os.environ.get('CARD_TOTAL', '0') or 0) == 0:
     if _render_incident(
         level='YELLOW',
         title='本次审查 0 发现 — 置信度低',
@@ -307,28 +314,19 @@ if total > 0:
         parts.append('🟢 **' + os.environ.get('CARD_ADV','0') + '** 建议')
     risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
 else:
-    # No findings. docs_only / incomplete / low-confidence already took the
-    # incident-card path above, so reaching here means a genuine clean pass.
-    risk_line = '✅ 本次未发现代码问题'
+    # No findings. docs_only / low-confidence already took the incident-card
+    # path above, so reaching here means a genuine clean pass — unless the
+    # coverage check flagged missing files, which downgrades "clean" to
+    # "clean over the files we actually saw".
+    if _coverage_warning:
+        risk_line = '⚠️ 已审查的文件未发现问题（但**本次审查不完整**，见下）'
+    else:
+        risk_line = '✅ 本次未发现代码问题'
 
-# Build risk overview line with emoji icons (rage 4-tier: 严重 中 轻 建议)
-risk_line = ''
-total = int(os.environ.get('CARD_TOTAL', '0') or 0)
-if total > 0:
-    parts = []
-    if int(os.environ.get('CARD_SEV','0')) > 0:
-        parts.append('🔴 **' + os.environ.get('CARD_SEV','0') + '** 严重')
-    if int(os.environ.get('CARD_MED','0')) > 0:
-        parts.append('🟠 **' + os.environ.get('CARD_MED','0') + '** 中')
-    if int(os.environ.get('CARD_LIGHT','0')) > 0:
-        parts.append('⚪ **' + os.environ.get('CARD_LIGHT','0') + '** 轻')
-    if int(os.environ.get('CARD_ADV','0')) > 0:
-        parts.append('🟢 **' + os.environ.get('CARD_ADV','0') + '** 建议')
-    risk_line = '  '.join(parts) if parts else '⚪ 未发现问题'
-else:
-    # No findings. docs_only / incomplete / low-confidence already took the
-    # incident-card path above, so reaching here means a genuine clean pass.
-    risk_line = '✅ 本次未发现代码问题'
+# Coverage gap (if any) goes UNDER the risk line so the findings above stay
+# the first thing the reader sees, but the incompleteness is impossible to miss.
+if _coverage_warning:
+    risk_line = risk_line + '\n\n' + _coverage_warning
 
 commit_count = len(commits)
 if is_pr and pr_number:
