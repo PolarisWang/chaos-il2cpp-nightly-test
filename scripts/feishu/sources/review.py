@@ -113,6 +113,49 @@ def _render_commit_lines(commits: List[dict], prefix: str = '  • ') -> List[st
     return out
 
 
+# ── Finding field-name normalisation ──
+# The model does not always emit the schema we ask for. Alongside the expected
+# rage shape (message/fix/verify) it intermittently returns a variant —
+# summary / short_summary / failure_scenario for the description — and when it
+# does, the renderer below (which reads `message`) finds nothing and drops the
+# finding as a ghost.
+#
+# The result is the worst kind of card: the risk summary counts the findings
+# ("1 中 3 轻 1 建议") while the 问题列表 is empty, so the reader sees numbers
+# with no issues to act on. Observed 2026-09-14.
+#
+# review-with-claude.sh normalises on the way OUT, but that only protects
+# results produced after that fix. Anything already in the diff-hash cache, or
+# produced by a path that skips the normaliser, still arrives in the variant
+# shape. Normalise here too, at the point of rendering, so the card is correct
+# regardless of what the producer did.
+_MSG_KEYS = ('message', 'summary', 'short_summary', 'description',
+             'title', 'failure_scenario')
+_FIX_KEYS = ('fix', 'suggestion', 'recommendation')
+_VER_KEYS = ('verify', 'verification', 'test')
+
+
+def _normalize_finding(f: dict) -> dict:
+    """Map variant field names onto the canonical ones, in place.
+
+    Only fills a canonical field when it is empty — an explicitly-provided
+    `message` always wins over a fallback key.
+    """
+    for canon, keys in (('message', _MSG_KEYS),
+                        ('fix', _FIX_KEYS),
+                        ('verify', _VER_KEYS)):
+        if str(f.get(canon) or '').strip():
+            continue
+        for k in keys:
+            v = f.get(k)
+            if isinstance(v, str) and v.strip():
+                f[k if k != canon else canon] = v
+                f[canon] = v
+                break
+    f.setdefault('repo', 'il2cpp')
+    return f
+
+
 # ── Finding rendering (ported from code-review-card.py:128-163) ──
 def _render_findings(findings: List[dict], file_sha: str) -> str:
     """rage 4-tier finding lines: #N [严重] [repo] fname:line — message
@@ -120,15 +163,14 @@ def _render_findings(findings: List[dict], file_sha: str) -> str:
     Blob links point to file_sha, which is env.CURRENT_COMMIT from Jenkins.
     """
     lines = []
+    findings = [_normalize_finding(f) for f in findings if isinstance(f, dict)]
     ordered = sorted(findings,
                      key=lambda f: SEVERITY_ORDER.get(f.get('severity', '建议'), 9))
     n = 0
     for f in ordered:
-        if not isinstance(f, dict):
-            continue
         msg = str(f.get('message') or '').strip()
         if not msg:
-            continue   # ghost
+            continue   # genuinely empty — nothing to render
         n += 1
         sev = f.get('severity') or '建议'
         icon = SEVERITY_ICONS.get(sev, '⚪')
