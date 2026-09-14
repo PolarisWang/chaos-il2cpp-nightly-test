@@ -111,6 +111,20 @@ pipeline {
         // ─────────────────────────────────────────────────────
         stage('Dispatch') {
             agent { label 'linux-x64-cr' }
+            // D: hard timeout on the whole review.
+            //
+            // Without this, a wedged review (Claude API hang, orphaned child)
+            // leaves the build "in progress" forever. Jenkins then reports it as
+            // SUCCESS with duration=0 when the executor is eventually reclaimed
+            // — a FALSE SUCCESS that hides the failure entirely. Observed
+            // 2026-09-14 builds #5067-#5069: all recorded SUCCESS, all did
+            // nothing, while the poller kept firing because nothing advanced.
+            //
+            // A 4-chunk review takes ~12 min; 40 gives generous headroom while
+            // guaranteeing the build ends one way or the other.
+            options {
+                timeout(time: 40, unit: 'MINUTES')
+            }
             steps {
                 script {
                     if (env.JOB_NAME?.contains('code-review')) {
@@ -1491,9 +1505,31 @@ from feishu.sources.review import to_notice
                 return
             }
 
-            // Checkout — incremental fetch instead of full clone
+            // Checkout — incremental fetch instead of full clone.
+            //
+            // A: serialised via flock on /var/lock/booming-cache.lock.
+            //
+            // The chaos-agent-cr has 2 executors (even though init.groovy says 1 —
+            // someone edited it to 2). Both executors share the same cache at
+            // /home/jenkins/booming-il2cpp-cache. When both run git fetch + checkout
+            // at the same time, one tramples the other's HEAD and checkout fails:
+            //   error: Your local changes ... would be overwritten
+            // This made 27/30 recent builds FAILURE — the single worst cause of
+            // "代码审查未完成".
+            //
+            // flock(1) makes the second executor WAIT rather than collide. The lock
+            // is on a host path, not inside the workspace, so it survives cleanWs.
+            // 15 min timeout: a typical review completes in ~12 min, and the lock
+            // is only held during the ~30s git fetch+checkout, not the whole review.
             sh """
                 set -euo pipefail
+                LOCKDIR='/var/lock'
+                mkdir -p "\$LOCKDIR"
+                exec 9>"\$LOCKDIR/booming-cache.lock"
+                flock -w 900 9 || {
+                    echo 'FATAL: could not acquire cache lock after 15m'
+                    exit 1
+                }
                 if [ -d '${repoCache}/.git' ]; then
                     cd '${repoCache}'
                     git remote set-url origin '${repoUrl}' 2>/dev/null || true
@@ -1516,6 +1552,7 @@ from feishu.sources.review import to_notice
                     git fetch origin '${branch}' 2>&1
                     git checkout FETCH_HEAD 2>&1
                 fi
+                # lock released automatically when the sh process exits
             """
             env.CURRENT_COMMIT = sh(
                 script: "cd '${boomingDir}' && git rev-parse HEAD",
