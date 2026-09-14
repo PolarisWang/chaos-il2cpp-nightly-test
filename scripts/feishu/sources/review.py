@@ -7,6 +7,70 @@ Commits: extracted via git log with full body/trailer handling.
 The commit extraction and rendering are direct ports from the old
 code-review-card.py so the card text is byte-identical to what shipped before
 the architecture migration.
+
+═══════════════════════════════════════════════════════════════════════════
+  DATA FLOW — what the model sends, what survives, what the card shows
+═══════════════════════════════════════════════════════════════════════════
+
+  ① MODEL OUTPUT (deepseek-v4-flash — we do not control the schema it picks)
+     canonical: message / fix / verify
+     variant  : summary, short_summary, description, title, failure_scenario
+                suggestion, recommendation, verification, test
+     The variant shows up roughly a third of the time and is NOT an error —
+     it is the model re-describing the field. Treat both shapes as valid.
+
+  ② JSON EXTRACTION (review-with-claude.sh)
+     Strip markdown fences and prose, take the first balanced JSON object.
+     Failure → 3 retries → summary-only fallback → chunk flagged INCOMPLETE.
+
+  ③ HARD FILTER (review-with-claude.sh, "REQUIRED" block)
+     REQUIRED = {severity, file, message}; severity must be in the 4-tier set.
+     ✂ DROPS the whole finding if any is missing  ← silent, no trace
+     * Also discards the model's own `summary` counts and recounts from the
+       surviving findings, so the numbers can never disagree with the list.
+
+  ④ FIELD NORMALISATION (review-with-claude.sh)
+     message ← summary | short_summary | description | title | failure_scenario
+     fix     ← suggestion | recommendation
+     verify  ← verification | test
+     file    ← regex-rescued from the message when absent ("a.cpp:91" → file+line)
+     repo    ← defaults to "il2cpp"
+
+  ⑤ findings.json → Jenkinsfile → CARD_* env vars
+
+  ⑥ CARD RENDER (_render_findings below)
+     Normalises AGAIN (see the note below) so cached/legacy data that skipped ④
+     still renders. Then:
+     ✂ DROPS the finding if message is still empty  ← "ghost"
+     ✓ keeps a finding with no `file`, rendering "⚠️未标注文件:43" instead of a
+       meaningless empty path (dropping it would lose a real issue)
+
+  ── Field fate table ────────────────────────────────────────────────────
+    model emits                       → becomes      → card shows
+    ─────────────────────────────────────────────────────────────────────
+    message / summary / short_summary
+    / description / title
+    / failure_scenario                → message      → the issue text
+    (none of the above)               → dropped      → nothing  ✂
+    fix / suggestion / recommendation → fix          → (JSON only, not shown)
+    verify / verification / test      → verify       → (JSON only, not shown)
+    severity 严重/中/轻/建议           → kept         → 🔴/🟠/⚪/🟢 badge
+    severity missing or unrecognised  → dropped      → nothing  ✂
+    file "src/a.cpp"                  → kept         → clickable a.cpp:91
+    file absent, in message as
+      "a.cpp:91"                      → file+line    → clickable a.cpp:91
+    file absent entirely              → kept empty   → ⚠️未标注文件:91
+    line / line_range                 → kept         → ":91-99" suffix
+
+  ── Why ⑥ normalises AGAIN when ④ already did ───────────────────────────
+    The failure this prevents: the risk summary reads "1 中 3 轻 1 建议"
+    while 问题列表 is EMPTY. That happens when ③ admitted findings whose data
+    carried variant keys and ④ never ran on them (a diff-hash cache hit exits
+    before the normaliser, and the summary-only retry path skips it). ③ and ⑥
+    would then disagree: ③ counts it, ⑥ cannot render it.
+    Normalising at the render point makes the card correct regardless of what
+    the producer did or how old the cached data is. Observed 2026-09-14.
+═══════════════════════════════════════════════════════════════════════════
 """
 
 import json
