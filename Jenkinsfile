@@ -1479,6 +1479,8 @@ from feishu.sources.review import to_notice
                         git remote add origin '${repoUrl}'
                         git fetch origin '${branch}' 2>&1
                     }
+                    git reset --hard HEAD 2>/dev/null || true
+                    git clean -fd 2>/dev/null || true
                     git checkout FETCH_HEAD 2>&1
                 else
                     rm -rf '${repoCache}'
