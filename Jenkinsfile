@@ -629,11 +629,23 @@ sh """
 
                                 REM Capture the CLI's exit status IMMEDIATELY. This call
                                 REM used to have no guard at all (the linux branch at
-                                REM least has `|| echo`), so when the run was interrupted
-                                REM the script fell straight through to "Pipeline
-                                REM Complete" and the build reported SUCCESS on a run
-                                REM that produced nothing. Build 288 lost all 45 chunks
-                                REM to a KeyboardInterrupt this way and nothing said so.
+                                REM least has `|| echo`), so when the run was killed the
+                                REM script fell straight through to "Pipeline Complete"
+                                REM and the build reported SUCCESS on a run that
+                                REM produced nothing.
+                                REM
+                                REM The VALUE matters, not just non-zero. cli.py ends
+                                REM with `return 1 if result.failed_count > 0 else 0`,
+                                REM so exit 1 is the NORMAL outcome for this project —
+                                REM the best windows run so far still failed 24 of 45
+                                REM chunks. Treating any non-zero exit as a failure
+                                REM (my first version of this guard) failed build 291
+                                REM and threw away a perfectly good 21/45 result.
+                                REM
+                                REM A real interruption never reaches that return: it
+                                REM dies with NTSTATUS 0xC000013A
+                                REM (STATUS_CONTROL_C_EXIT, printed as -1073741510),
+                                REM which is the signature seen on builds 288/289/290.
                                 REM
                                 REM `!ERRORLEVEL!` is required, not `%ERRORLEVEL%`:
                                 REM this is inside a parenthesised block, where %VAR%
@@ -641,8 +653,12 @@ sh """
                                 REM value. Delayed expansion is enabled at script level.
                                 set "NIGHTLY_RC=!ERRORLEVEL!"
                                 echo === [win-x64] nightly cli exit=!NIGHTLY_RC! ===
-                                if not "!NIGHTLY_RC!"=="0" (
-                                    echo === [win-x64] ERROR: nightly cli FAILED with exit !NIGHTLY_RC! ===
+                                REM 1 = some chunks failed (normal, publish the results).
+                                REM 0 = all chunks passed. Anything else = the run did
+                                REM not finish, so say so loudly.
+                                if not "!NIGHTLY_RC!"=="0" if not "!NIGHTLY_RC!"=="1" (
+                                    echo === [win-x64] ERROR: nightly cli exited !NIGHTLY_RC! - INTERRUPTED, not a normal partial run ===
+                                    echo === [win-x64] ERROR: (0xC000013A = STATUS_CONTROL_C_EXIT) ===
                                     echo === [win-x64] ERROR: this platform produced no usable results ===
                                     REM Still publish: the payload records what little
                                     REM exists, and the publisher's runId guard turns
@@ -1339,11 +1355,11 @@ def runCodeReview(Map params = [:]) {
                 # recurse; keep this list in sync with scripts/feishu/sources/.
                 mkdir -p '${SCRIPT_DIR}/feishu/sources'
                 for f in __init__.py engine.py notice.py; do
-                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/feishu/$f' \
+                    curl -sL --max-time 30 -o "${SCRIPT_DIR}/feishu/\$f" \
                         "\$RAWT/scripts/feishu/\$f"
                 done
                 for f in __init__.py review.py nightly.py health.py; do
-                    curl -sL --max-time 30 -o '${SCRIPT_DIR}/feishu/sources/$f' \
+                    curl -sL --max-time 30 -o "${SCRIPT_DIR}/feishu/sources/\$f" \
                         "\$RAWT/scripts/feishu/sources/\$f"
                 done
                 curl -sL --max-time 30 -o '${SCRIPT_DIR}/send-health-card.sh' \

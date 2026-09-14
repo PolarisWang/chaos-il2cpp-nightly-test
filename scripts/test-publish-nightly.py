@@ -773,6 +773,16 @@ def main() -> int:
             check("windows fails the branch when the cli fails",
                   "NIGHTLY_FAILED=1" in bat_code and "exit /b 1" in bat_code,
                   "an interrupted run must not exit 0")
+            # Exit 1 must NOT be treated as a failure. cli.py ends with
+            # `return 1 if result.failed_count > 0 else 0`, so 1 is the normal
+            # outcome for this project — the best windows run so far still
+            # failed 24 of 45 chunks. The first version of this guard failed the
+            # branch on any non-zero exit and threw away build 291's good 21/45.
+            # Only the interruption signature (0xC000013A STATUS_CONTROL_C_EXIT,
+            # printed -1073741510) may fail the branch.
+            check("exit 1 is treated as a normal partial run, not a failure",
+                  '"!NIGHTLY_RC!"=="1"' in bat_code,
+                  "exiting non-zero on 'some chunks failed' discards good results")
             # `if defined` is evaluated at RUN time, so it sees a value set
             # earlier inside the same parenthesised block. `if "%NIGHTLY_FAILED%"==...`
             # would expand at PARSE time and see nothing — the same trap the
