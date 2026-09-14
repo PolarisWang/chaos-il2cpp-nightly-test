@@ -745,10 +745,17 @@ PROMPT_FOOTER
     # busy model/proxy must NEVER wedge the whole build). `-k <grace>` force-kills
     # (SIGKILL) after the grace period in case claude/Node ignores the first SIGTERM
     # — observed: a busy deepseek-v4-flash call can otherwise linger past `timeout`.
+    #
+    # `setsid -w` puts claude in its OWN process group and waits for it. Without
+    # this, `timeout` signals only the direct child; claude spawns Node helpers
+    # that survive, keep the pipes open, and hang the build indefinitely —
+    # observed 2026-09-14: build #5027 sat at building=true for 8h with orphaned
+    # review-with-claude.sh processes on the host, holding the trigger lock and
+    # blocking every subsequent review.
     OUT_CAP=$(mktemp); ERR_CAP=$(mktemp)
     set +e
     timeout -k "${REVIEW_CHUNK_KILL_AFTER:-30}" "${REVIEW_CHUNK_TIMEOUT:-180}" \
-        claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+        setsid -w claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
     RC=$?
     set -e
     CLAUDE_OUT=$(cat "$OUT_CAP")
@@ -915,8 +922,10 @@ print("TRUNCATED:%d" % lo if lo > 0 else "ALL_TRUNCATED")
 
     local OUT_CAP=$(mktemp); local ERR_CAP=$(mktemp)
     set +e
+    # setsid -w: own process group, so the timeout kills claude's whole tree
+    # (see the note on the primary invocation above).
     timeout -k "${REVIEW_CHUNK_KILL_AFTER:-30}" "${REVIEW_CHUNK_TIMEOUT:-180}" \
-        claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
+        setsid -w claude --model "$REVIEW_MODEL" --print < "$PROMPT_FILE" > "$OUT_CAP" 2> "$ERR_CAP"
     local RC=$?
     set -e
     local CLAUDE_OUT=$(cat "$OUT_CAP")

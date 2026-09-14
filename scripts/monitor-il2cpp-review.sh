@@ -163,16 +163,62 @@ log "job latest completed build #${NUM} = ${RESULT:-?} (${WHEN}) ${broken:+[${br
 # poller's LOCK_TIMEOUT, every subsequent review is silently blocked.  Alert
 # (deduped via the same alert-state file) whenever the lock is overdue.
 LOCK_FILE="/var/lib/report-server/daily/cr-trigger.lock"
-LOCK_TIMEOUT="${LOCK_TIMEOUT:-1200}"
+LOCK_TIMEOUT="${LOCK_TIMEOUT:-600}"
 if [ -f "$LOCK_FILE" ]; then
     LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
-    if [ "$LOCK_AGE" -gt "$((LOCK_TIMEOUT + 300))" ]; then
+    if [ "$LOCK_AGE" -gt "$((LOCK_TIMEOUT + 60))" ]; then
         log "WARNING: cr-trigger.lock is ${LOCK_AGE}s old (> timeout ${LOCK_TIMEOUT}s) — reviews are blocked"
         alert "RED" "代码审查已阻塞" \
 "触发锁已持有 $(( LOCK_AGE/60 )) 分钟（阈值 $(( LOCK_TIMEOUT/60 )) 分钟）
 后续所有提交都无法触发审查" \
 "上一次审查未正常释放锁（可能构建中断 / 脚本异常退出）" \
 "清除锁：rm -f ${LOCK_FILE}"
+        # Auto-clear: a stale lock is worse than the risk of a duplicate build
+        # (the engine's 30-minute dedup key prevents duplicate review cards).
+        rm -f "$LOCK_FILE"
+        log "Stale lock removed automatically"
+    fi
+fi
+
+# ── Running-build timeout check (C4) ──
+# A build that stays building=true past BUILD_TIMEOUT means the review pipeline
+# is wedged (Claude API hang, orphaned process, etc.). The lock check above
+# catches the EFFECT (lock stale), but does not name the cause or tell the user
+# WHICH build is stuck. This check finds the stuck build directly and alerts
+# before the lock has even aged past its timeout.
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-2700}"   # 45 min — a 4-chunk review ~ 12 min
+running_build_info() {
+    sudo docker exec chaos-master bash -c '
+        for job in chaos-il2cpp-code-review chaos-il2cpp-nightly chaos-il2cpp-pr-review; do
+            d="/var/jenkins_home/jobs/$job/builds"
+            [ -d "$d" ] || continue
+            for b in $(ls -t "$d" 2>/dev/null | grep -E "^[0-9]+$" | head -3); do
+                f="$d/$b/build.xml"
+                [ -f "$f" ] || continue
+                if grep -q "<building>true</building>" "$f"; then
+                    ts=$(grep -oE "<timestamp>[0-9]+" "$f" | head -1 | grep -oE "[0-9]+")
+                    echo "$b ${ts:-0}"
+                    return
+                fi
+            done
+        done
+    ' 2>/dev/null
+}
+RUNNING=$(running_build_info)
+if [ -n "$RUNNING" ]; then
+    RUNNING_NUM=$(echo "$RUNNING" | awk '{print $1}')
+    RUNNING_TS=$(echo "$RUNNING" | awk '{print $2}')
+    if [ -n "$RUNNING_TS" ] && [ "$RUNNING_TS" -gt 0 ]; then
+        RUNNING_AGE=$(( $(date +%s) - ${RUNNING_TS:0:10} ))
+        if [ "$RUNNING_AGE" -gt "$BUILD_TIMEOUT" ]; then
+            log "WARNING: build #${RUNNING_NUM} has been running for $(( RUNNING_AGE/60 ))m (> timeout $(( BUILD_TIMEOUT/60 ))m)"
+            alert "YELLOW" "代码审查构建运行超时" \
+"构建 #${RUNNING_NUM} 已运行 $(( RUNNING_AGE/60 )) 分钟
+阈值 $(( BUILD_TIMEOUT/60 )) 分钟，建议中止后重试" \
+"Claude API 调用可能挂死（子进程未正常退出）" \
+"在 Jenkins 上中止构建 #${RUNNING_NUM}
+中止后系统会自动触发下一轮审查"
+        fi
     fi
 fi
 

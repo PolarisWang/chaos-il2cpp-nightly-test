@@ -19,10 +19,10 @@ LOCK_FILE="/var/lib/report-server/daily/cr-trigger.lock"
 BOOMING_DIR="/home/debian/agent/booming-il2cpp"
 JENKINS_URL="http://localhost:8080"
 JOB_NAME="chaos-il2cpp-code-review"
-LOCK_TIMEOUT=1200  # 20 minutes — reduce from 30 to bound how long a stuck build can
-                   # hold the trigger lock and silently suppress all later reviews.
-                   # (A legit 4-chunk review usually finishes <10 min; 20 gives headroom
-                   # without letting a hung claude build block the poller all afternoon.)
+LOCK_TIMEOUT=600  # 10 minutes — down from 1200. A 4-chunk review finishes in
+                   # <10 min normally. If the lock is still held after 10 min
+                   # something went wrong (Claude hang, pipeline abort). The
+                   # next poller tick will remove the stale lock and retry.
 
 # Retry helper — GitHub TLS handshakes fail intermittently from this box
 # (GnuTLS "non-properly terminated"), so retry with a short backoff.
@@ -118,8 +118,19 @@ echo "Diff size: ${DIFF_LINES} lines (limit ${DIFF_MAX_LINES})"
 # ── Step 4: Create lock and trigger Jenkins ──
 touch "$LOCK_FILE"
 
+# The lock signals "a review build is in flight" and is released BY JENKINS
+# when the review finishes (Jenkinsfile, several points). A trap-cleanup here
+# would be WRONG: this script exits immediately after triggering, so the lock
+# would vanish before the build even started, and every 60s tick would trigger
+# another build.
+#
+# Instead, staleness is handled two ways:
+#   * the poller itself sweeps a lock older than LOCK_TIMEOUT (below), and
+#   * monitor-il2cpp-review.sh alerts on an over-age lock and clears it.
+# Both are needed because the failure mode is "Jenkins never reaches its own
+# release point" — so neither the lock nor the monitor may depend on Jenkins.
 COOKIE_FILE=$(mktemp /tmp/jenkins-cookie.XXXXXX)
-trap "rm -f '$COOKIE_FILE'" EXIT
+trap 'rm -f "$COOKIE_FILE"' EXIT
 
 CRUMB=$(curl -s -c "$COOKIE_FILE" "$JENKINS_URL/crumbIssuer/api/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['crumb'])" 2>/dev/null) || {
