@@ -107,6 +107,19 @@ def verdict(platforms: dict, missing: list, expect: list,
         return {"level": "red", "word": "需要处理",
                 "reason": "、".join(empty) + " 未产出数据（可能被中断）"}
 
+    # A run recovered from run-state after an interruption. Its numbers are
+    # real but INCOMPLETE — the denominator is only the chunks that finished,
+    # so a recovered 15/24 must never be read as "62% passed" when the worklist
+    # was 45. Red, because the run did not complete and nobody should treat the
+    # rate as this night's result.
+    incomplete = [
+        p for p in expect
+        if platforms.get(p, {}).get("present") and platforms[p].get("partial")
+    ]
+    if incomplete:
+        return {"level": "red", "word": "需要处理",
+                "reason": "、".join(incomplete) + " 结果不完整（运行被中断，仅部分 chunk 完成）"}
+
     # A platform that produced a report but passed NOTHING is unambiguously
     # broken — that is the shape both the linux and windows outages took.
     dead = [
@@ -190,6 +203,12 @@ def summarise(data: dict | None) -> dict:
         "chunk_passed": passed if passed is not None else 0,
         "chunk_total": total if total is not None else 0,
         "chunk_pct": pct,
+        # Recovered from run-state after an interruption: the numbers are real
+        # but cover only the chunks that finished, so `chunk_total` is not the
+        # worklist size. Rendered as "partial" so the rate is never read as a
+        # complete run (see summary_from_run_state in publish-nightly-results).
+        "partial": bool(s.get("partial")),
+        "incomplete": s.get("incomplete_chunks", 0),
         "error_classes": s.get("error_classes", {}) or {},
         # engine_sha is the field that actually identifies what was built;
         # run_id's trailing hash is not trustworthy across platforms (see
@@ -264,6 +283,11 @@ def build_payload(build_url: str, date_tag: str, run_tag: str,
         passed, total = info["chunk_passed"], info["chunk_total"]
         mark = "❌" if (total and passed == 0) else ("✅" if passed == total else "⚠️")
         row = f"**{label}**  {mark} {passed}/{total}"
+        if info.get("partial"):
+            # Recovered after an interruption: the denominator is only the
+            # chunks that finished, so this is not a comparable pass rate.
+            extra = info.get("incomplete") or 0
+            row += f"  ⏸ 部分结果（{extra} 个未跑完）" if extra else "  ⏸ 部分结果"
         tt = trend.get(plat) or {}
         if tt.get("comparable") and tt.get("same_total"):
             d = tt["delta"]

@@ -528,6 +528,19 @@ def main() -> int:
                   "windows" in v.get("reason", "") and "未产出数据" in v.get("reason", ""),
                   str(v))
 
+            # ── recovered-after-interruption is NOT a pass rate ──
+            # summary_from_run_state() rebuilds a summary from the per-chunk
+            # .result files an interrupted run left on disk. Real numbers, but
+            # the denominator is only the chunks that finished — a recovered
+            # 15/24 must not read as "62% passed" when the worklist was 45.
+            v = fm.verdict({"linux": P(), "windows": P(partial=True,
+                                                       chunk_passed=15, chunk_total=24)},
+                           [], ["linux", "windows"])
+            check("recovered/partial run -> red, not yellow",
+                  v["level"] == "red", str(v))
+            check("recovered/partial run says the results are incomplete",
+                  "不完整" in v.get("reason", ""), str(v))
+
             v = fm.verdict({"linux": P(chunk_passed=0), "windows": P()}, [],
                            ["linux", "windows"])
             check("Z: a platform passing 0 -> red", v["level"] == "red", str(v))

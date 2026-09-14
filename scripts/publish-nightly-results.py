@@ -123,6 +123,98 @@ def latest_run_id(report_dir: Path) -> str:
     return ""
 
 
+def summary_from_run_state(report_dir: Path, run_id: str) -> dict:
+    """Rebuild a summary from the per-chunk .result files of an interrupted run.
+
+    WHY THIS EXISTS: `aggregate_reports()` folds an *in-memory* NightlyResult —
+    it never reads run-state — so when the CLI is killed (the windows agent has
+    been losing runs to STATUS_CONTROL_C_EXIT, 0xC000013A) every chunk finished
+    up to that point is discarded, even though each one already wrote a
+    `.result` file to disk. Build 288 died with 24 results on disk, 15 of them
+    passing, and published nothing.
+
+    This reconstructs the same key space as read_nightly_summary() from those
+    files, so an interrupted run yields the work it actually completed instead
+    of an empty report. It is a FALLBACK — the real per-run summary is always
+    preferred, and this only runs when that is absent.
+
+    Only terminal statuses count. "running"/"retrying" mean the chunk never
+    reached a conclusion, so folding them in would score in-flight work as a
+    failure; they are reported separately as `incomplete` instead.
+    """
+    base = None
+    for cand in (report_dir, report_dir.parent):
+        d = cand / "run-state" / run_id
+        if d.is_dir():
+            base = d
+            break
+    if base is None:
+        return {}
+
+    terminal = {"passed", "failed", "stalled"}
+    passed = failed = stalled = 0
+    by_class: dict[str, int] = {}
+    by_asm: dict[str, dict] = {}
+    incomplete: list[str] = []
+
+    for f in sorted(base.glob("*.result")):
+        try:
+            info = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(info, dict):
+            continue
+        key = info.get("key") or f.stem
+        status = info.get("status", "unknown")
+        asm = key.split("__")[0] if "__" in key else "?"
+        ab = by_asm.setdefault(asm, {"passed": 0, "failed": 0, "total": 0})
+        if status not in terminal:
+            incomplete.append(key)
+            continue
+        ab["total"] += 1
+        if status == "passed":
+            passed += 1
+            ab["passed"] += 1
+        else:
+            failed += 1
+            ab["failed"] += 1
+            err = info.get("error_class") or "unknown"
+            if err in ("none", ""):
+                err = "unknown"
+            by_class[err] = by_class.get(err, 0) + 1
+            if status == "stalled":
+                stalled += 1
+
+    if not (passed or failed):
+        return {}
+
+    print(f"  [publish] RECOVERED {passed + failed} chunk results from run-state "
+          f"for interrupted run {run_id}"
+          + (f" ({len(incomplete)} never finished)" if incomplete else ""))
+    out: dict[str, Any] = {
+        "_source": "run-state recovery (interrupted run)",
+        "passed": passed,
+        # NOTE: this total is the number of chunks that REACHED A CONCLUSION,
+        # not the size of the worklist. A consumer that reads 15/24 as "62%
+        # passed" would be wrong — the truth is "15 passed, 9 failed, and N
+        # never ran" out of a 45-chunk worklist it cannot see from here.
+        # `partial` marks that so callers can refuse to present it as a
+        # complete run instead of silently reporting a flattering rate.
+        "partial": True,
+        "total": passed + failed,
+        "failed": failed,
+    }
+    if stalled:
+        out["stalled"] = stalled
+    if by_class:
+        out["byErrorClass"] = by_class
+    if by_asm:
+        out["byAssembly"] = by_asm
+    if incomplete:
+        out["incompleteChunks"] = incomplete
+    return out
+
+
 def read_nightly_summary(report_dir: Path, run_id: str = "") -> dict:
     """Read the Route-3 nightly CLI's authoritative summary JSON.
 
@@ -508,6 +600,14 @@ def merge_nightly_summary(summary: dict, nightly_summary: dict) -> dict:
         summary["chunk_failed"] = nightly_summary["failed"]
     if isinstance(nightly_summary.get("stalled"), int):
         summary["chunk_stalled"] = nightly_summary["stalled"]
+    # A recovered-from-run-state summary counts only the chunks that reached a
+    # conclusion, so its `total` is NOT the worklist size. Carry the flag
+    # through so the card can say "partial" instead of reporting a rate that
+    # flatters an interrupted run.
+    if nightly_summary.get("partial"):
+        summary["partial"] = True
+        if isinstance(nightly_summary.get("incompleteChunks"), list):
+            summary["incomplete_chunks"] = len(nightly_summary["incompleteChunks"])
 
     # Error-class breakdown — the analysis dimension the old payload lacked
     # entirely (the "39 native-linker-error" figures in the handoff docs were
@@ -608,6 +708,14 @@ def build_nightly_data(
         nightly_summary = parse_legacy_summary_md(report_dir, run_id=run_id)
         summary_source = ("legacy nightly-summary.md" if nightly_summary
                           else "NONE — metrics unavailable")
+    if not nightly_summary and run_id:
+        # Last resort before giving up: an interrupted run left per-chunk
+        # .result files on disk that nothing else reads. Recover what finished
+        # rather than publishing an empty report (build 288 had 15 passing
+        # chunks on disk and reported nothing).
+        nightly_summary = summary_from_run_state(report_dir, run_id)
+        if nightly_summary:
+            summary_source = "run-state recovery (interrupted run)"
     print(f"  [publish] Summary source: {summary_source}")
     if nightly_summary:
         print(f"  [publish]   {nightly_summary.get('passed', 0)}/"
