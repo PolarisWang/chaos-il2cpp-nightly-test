@@ -792,27 +792,34 @@ sh """
                                 echo === [win-x64] published artifacts ===
                                 if exist "${winArtifacts}" (dir /b "${winArtifacts}" 2>nul)
 
-                                REM Final statement decides this bat's exit code, which
-                                REM Groovy reads below. Without an explicit failure the
-                                REM branch always exited 0 and an interrupted run was
-                                REM indistinguishable from a clean one.
+                                REM Report the branch outcome to Groovy via a marker
+                                REM FILE, and do NOT exit non-zero here.
+                                REM
+                                REM This was `exit /b 1`, which made `bat` throw and
+                                REM skipped the archiveArtifacts that follows in the same
+                                REM steps block — so a failed branch archived NOTHING and
+                                REM the card, which fetches the windows payload over the
+                                REM Jenkins API, saw a 404 and printed "Windows ⚠️ 无报告"
+                                REM for a run whose results had just been recovered and
+                                REM published on this node (build 292: 29/37 salvaged,
+                                REM then thrown away again). Archive first, fail second.
                                 if defined NIGHTLY_FAILED (
                                     echo === [win-x64] branch finished with FAILURES ===
-                                    exit /b 1
+                                    REM Relative path, matching the probe below: the
+                                    REM job's cwd IS the workspace here, so this avoids
+                                    REM passing a backslash path through a Groovy GString.
+                                    echo failure> artifacts\\NIGHTLY_FAILED
+                                ) else (
+                                    echo === [win-x64] branch finished cleanly ===
                                 )
                                 exit /b 0
                             """
-                            // The bat above exits 1 when NIGHTLY_FAILED is set, which
-                            // makes `bat` throw and FAILS this branch — deliberately.
-                            // A windows run that produced nothing must not leave the
-                            // build green: build 288 lost all 45 chunks to an
-                            // interruption and still reported SUCCESS, so the gap went
-                            // unnoticed until the published numbers were inspected by
-                            // hand. Failing the branch makes Jenkins say so directly.
-                            //
-                            // The job-level verdict still comes from the payload (the
-                            // card reads a dataless platform as 无数据), so this is the
-                            // transport, not the judgement.
+                            // Archive BEFORE any failure signal. The bat deliberately
+                            // exits 0 whatever happened, so that this runs: the
+                            // artifacts ARE the product of the run, and the card reads
+                            // them back over the Jenkins API. Failing first destroys
+                            // the very data needed to explain the failure — which is
+                            // exactly what build 292 did to its own recovered 29/37.
                             // Archive on THIS node: the post block's archiveArtifacts
                             // runs on the linux-x64 agent and cannot see a Windows
                             // workspace, so without this the windows-x64
@@ -821,7 +828,26 @@ sh """
                             // collide with the Linux artifact of the same build.
                             archiveArtifacts artifacts: "artifacts/**/*",
                                            allowEmptyArchive: true,
+                                           excludes: "artifacts/NIGHTLY_FAILED",
                                            fingerprint: true
+                            // NOW fail the branch if the run did not complete. The
+                            // marker file is the signal because the bat's exit code is
+                            // committed to 0 above. A windows run that produced nothing
+                            // must not leave the build green — build 288 lost all 45
+                            // chunks to an interruption and still reported SUCCESS —
+                            // but the failure must come AFTER the artifacts are safe.
+                            //
+                            // The probe re-enters the workspace so the file test uses
+                            // the SAME relative path the bat wrote, avoiding a
+                            // backslash-escaping dance across Groovy -> GString -> cmd
+                            // that is easy to get subtly wrong (and would silently
+                            // disable this check rather than fail loudly).
+                            def winFailed = bat(
+                                script: "cd /d \"${env.WORKSPACE}\" && if exist \"artifacts\\NIGHTLY_FAILED\" (echo yes) else (echo no)",
+                                returnStdout: true).trim()
+                            if (winFailed == 'yes') {
+                                error("windows-x64 branch finished with FAILURES (nightly cli was interrupted or failed) — results were still archived")
+                            }
                         }
                     }
                 }

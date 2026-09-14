@@ -783,9 +783,23 @@ def main() -> int:
             check("windows captures the nightly cli exit code",
                   "NIGHTLY_RC=!ERRORLEVEL!" in bat_code,
                   "the cli call must record its exit status")
-            check("windows fails the branch when the cli fails",
-                  "NIGHTLY_FAILED=1" in bat_code and "exit /b 1" in bat_code,
-                  "an interrupted run must not exit 0")
+            check("windows records the cli failure",
+                  "NIGHTLY_FAILED=1" in bat_code,
+                  "an interrupted run must be recorded, not silently ignored")
+            # The failure must NOT be signalled by the bat's exit code. `exit /b 1`
+            # made `bat` throw and skipped the archiveArtifacts that follows in the
+            # same steps block, so the branch archived nothing — and the card,
+            # which fetches the windows payload over the API, printed "Windows ⚠️
+            # 无报告" for a run whose 29/37 had just been recovered and published
+            # on that node (build 292). Archive first, fail second.
+            check("windows does not fail via exit code (that skips archiving)",
+                  "exit /b 1" not in bat_code,
+                  "archiveArtifacts after a throwing bat never runs")
+            check("windows signals failure via a marker file",
+                  "NIGHTLY_FAILED" in bat_code and "endif" not in bat_code.lower())
+            check("windows archives before failing",
+                  jf.index("archiveArtifacts") < jf.index('winFailed =='),
+                  "the archive step must precede the failure check")
             # Exit 1 must NOT be treated as a failure. cli.py ends with
             # `return 1 if result.failed_count > 0 else 0`, so 1 is the normal
             # outcome for this project — the best windows run so far still
