@@ -45,7 +45,11 @@ fi
 # Install MinIO client (mc)
 if ! command -v mc &>/dev/null; then
     echo "Installing MinIO client (mc)..."
-    curl -fsSL "https://dl.min.io/client/mc/release/linux-amd64/mc" \
+    # The historical dl.min.io/client/mc/... path now returns HTTP 410 Gone
+    # (MinIO retired the "client" prefix), which fails the whole agent image
+    # build with a bare `curl: (22) ... error: 410`. The aistor path serves the
+    # same binary -- verified 200 + a static x86-64 ELF of the expected size.
+    curl -fsSL "https://dl.min.io/aistor/mc/release/linux-amd64/mc" \
         -o /usr/local/bin/mc
     chmod +x /usr/local/bin/mc
     echo "MinIO client installed: $(mc --version 2>&1 | head -1)"
