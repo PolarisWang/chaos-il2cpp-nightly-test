@@ -438,10 +438,25 @@ sh """
 
                         echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
+                        # Record the exit code instead of discarding it. The old
+                        # `|| echo "WARNING: ..."` swallowed every failure, so a
+                        # linux branch that produced 0/45 — or died before writing
+                        # any results at all — still let the build report SUCCESS
+                        # (builds #300/#301 did exactly that, while the console
+                        # showed 0/45). 1 = some chunks failed, which is a normal
+                        # partial run and must still publish; anything else means
+                        # the run did not finish.
+                        NIGHTLY_RC=0
                         python3 -m verification.nightly.cli \
                             --max-workers 4 \
                             --native-config "${BUILD_CONFIG}" \
-                            2>&1 || echo "WARNING: nightly cli had failures"
+                            2>&1 || NIGHTLY_RC=$?
+                        echo "=== [x64] nightly cli exit=${NIGHTLY_RC} ==="
+                        if [ "${NIGHTLY_RC}" != "0" ] && [ "${NIGHTLY_RC}" != "1" ]; then
+                            echo "=== [x64] ERROR: nightly cli exited ${NIGHTLY_RC} - INTERRUPTED, not a normal partial run ==="
+                            echo "=== [x64] ERROR: this platform produced no usable results ==="
+                            LINUX_FAILED=1
+                        fi
 
                         echo "=== [x64] Publish Results (collect tests/e2e report) ==="
                         # Record the ENGINE revision, not this CI repo's. The nightly
@@ -466,7 +481,65 @@ sh """
                             2>&1 || echo "WARNING: publish-nightly-results had failures"
 
                         echo "=== [x64] Pipeline Complete ==="
+
+                        # Chunk-result gate. The nightly CLI exits 1 for "some
+                        # chunks failed", so the exit-code check above cannot tell
+                        # a 0/45 run from a 44/45 one — and a run that finishes but
+                        # passes nothing is a broken platform, not a partial
+                        # success. Read back what was actually published and fail
+                        # the branch when it is empty, after the artifacts are
+                        # already safe (same archive-first ordering the windows
+                        # branch uses; see its comment for why failing earlier
+                        # destroys the data needed to explain the failure).
+                        LINUX_DATA=\$(ls -t "${ARTIFACTS_DIR}"/nightly-data-*-linux*.json 2>/dev/null | head -1)
+                        if [ -z "\${LINUX_DATA}" ]; then
+                            echo "=== [x64] ERROR: no linux nightly-data payload was produced ==="
+                            LINUX_FAILED=1
+                        else
+                            LINUX_RC=\$(python3 -c "
+import json,sys
+d=json.load(open('\${LINUX_DATA}'))
+s=d.get('summary') or {}
+p,t=int(s.get('chunk_passed',0) or 0),int(s.get('chunk_total',0) or 0)
+print('FAIL' if t>0 and p==0 else 'OK', p, t)
+" 2>/dev/null) || LINUX_RC="PARSE_FAIL 0 0"
+                            echo "=== [x64] chunk result gate: \${LINUX_RC} ==="
+                            case "\${LINUX_RC}" in
+                                OK*) ;;
+                                *) echo "=== [x64] ERROR: linux produced no passing chunks (\${LINUX_RC}) ==="
+                                   LINUX_FAILED=1 ;;
+                            esac
+                        fi
+
+                        if [ "\${LINUX_FAILED:-0}" = "1" ]; then
+                            echo "=== [x64] branch finished with FAILURES ==="
+                            # Marker file, not just an echo: the shell's variables
+                            # die with the shell, so this is how the Groovy side
+                            # below learns the run failed. Same signal the windows
+                            # branch uses.
+                            echo failure > "\${ARTIFACTS_DIR}/LINUX_FAILED"
+                        else
+                            echo "=== [x64] branch finished cleanly ==="
+                        fi
                     """
+                        }
+                        // Archive BEFORE failing. Same ordering and same reason as
+                        // the windows branch: the artifacts ARE the product of the
+                        // run, and the card reads them back over the Jenkins API.
+                        // Failing first would destroy the data needed to explain
+                        // why it failed.
+                        archiveArtifacts artifacts: "artifacts/**/*",
+                                         allowEmptyArchive: true,
+                                         excludes: "artifacts/LINUX_FAILED",
+                                         fingerprint: true
+                        // A linux run that passed nothing must not leave the build
+                        // green — builds #300/#301 reported SUCCESS on a 0/45 linux
+                        // branch, and that is what let the regression hide.
+                        def linuxFailed = sh(
+                            script: "test -f \"${env.WORKSPACE}/artifacts/LINUX_FAILED\" && echo yes || echo no",
+                            returnStdout: true).trim()
+                        if (linuxFailed == 'yes') {
+                            error("linux-x64 branch finished with FAILURES (nightly cli was interrupted or produced no passing chunks) — results were still archived")
                         }
                     }
                 }
