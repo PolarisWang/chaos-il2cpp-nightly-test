@@ -522,7 +522,6 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                             echo "=== [x64] branch finished cleanly ==="
                         fi
                     """
-                        }
                         // Archive BEFORE failing. Same ordering and same reason as
                         // the windows branch: the artifacts ARE the product of the
                         // run, and the card reads them back over the Jenkins API.
@@ -540,6 +539,7 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                             returnStdout: true).trim()
                         if (linuxFailed == 'yes') {
                             error("linux-x64 branch finished with FAILURES (nightly cli was interrupted or produced no passing chunks) — results were still archived")
+                        }
                         }
                     }
                 }
