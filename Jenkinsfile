@@ -450,10 +450,10 @@ sh """
                         python3 -m verification.nightly.cli \
                             --max-workers 4 \
                             --native-config "${BUILD_CONFIG}" \
-                            2>&1 || NIGHTLY_RC=$?
-                        echo "=== [x64] nightly cli exit=${NIGHTLY_RC} ==="
-                        if [ "${NIGHTLY_RC}" != "0" ] && [ "${NIGHTLY_RC}" != "1" ]; then
-                            echo "=== [x64] ERROR: nightly cli exited ${NIGHTLY_RC} - INTERRUPTED, not a normal partial run ==="
+                            2>&1 || NIGHTLY_RC=\$?
+                        echo "=== [x64] nightly cli exit=\${NIGHTLY_RC} ==="
+                        if [ "\${NIGHTLY_RC}" != "0" ] && [ "\${NIGHTLY_RC}" != "1" ]; then
+                            echo "=== [x64] ERROR: nightly cli exited \${NIGHTLY_RC} - INTERRUPTED, not a normal partial run ==="
                             echo "=== [x64] ERROR: this platform produced no usable results ==="
                             LINUX_FAILED=1
                         fi
