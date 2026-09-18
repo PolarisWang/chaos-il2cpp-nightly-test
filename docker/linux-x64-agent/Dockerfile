@@ -14,7 +14,7 @@ RUN apt-get update -qq && \
         ca-certificates \
         unzip \
         openjdk-21-jre-headless \
-        libnuma1 \
+        libnuma-dev \
         nodejs \
         npm \
         wget \

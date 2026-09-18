@@ -20,6 +20,7 @@ RUN apt-get update -qq && \
         qemu-user \
         binfmt-support \
         libc6-arm64-cross \
+        libnuma-dev:arm64 \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
