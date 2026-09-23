@@ -22,8 +22,12 @@ def nodesDir = new File(Jenkins.instance.getRootDir(), "nodes")
 nodesDir.mkdirs()
 
 agents.each { a ->
+    // Declared BEFORE the branch: Groovy's `def` is block-scoped, so a
+    // declaration inside the `if` would be invisible to the `else` that
+    // reconciles existing nodes (`MissingPropertyException: agentDir`).
+    def agentDir = new File(nodesDir, a.name)
+
     if (Jenkins.instance.getNode(a.name) == null) {
-        def agentDir = new File(nodesDir, a.name)
         agentDir.mkdirs()
 
         def configXml = """<?xml version='1.1' encoding='UTF-8'?>
@@ -79,37 +83,68 @@ agents.each { a ->
 // ================================================================
 // 2. Create SonarQube Credential
 // ================================================================
+//
+// Deliberately REFLECTION-BASED, and wrapped so it can never break node
+// registration above.
+//
+// The previous version used a direct `new StringCredentialsImpl(...)`.  Groovy
+// resolves class names at COMPILE time, and init.groovy is compiled very early
+// in Jenkins startup — before plugin classes contributed by
+// `plain-credentials` are on the script's classpath.  The result was not a
+// runtime failure of this block but a compilation failure of the WHOLE FILE:
+//
+//   unable to resolve class StringCredentialsImpl
+//   org.codehaus.groovy.control.MultipleCompilationErrorsException
+//
+// Jenkins dropped init.groovy entirely, so the agent-node reconciliation above
+// never ran either — a credential helper silently disabled node management.
+// Because the image copy of this script was never live (JENKINS_HOME kept a
+// stale 3-node version), the breakage stayed invisible until the mount made
+// this file authoritative.
+//
+// Class.forName + newInstance defers resolution to runtime, where the plugin is
+// loaded, and the try/catch keeps any future edit here from taking the node
+// definitions down with it.
 def sonarToken = System.getenv('SONAR_TOKEN') ?: ''
 
-if (sonarToken) {
-    def creds = CredentialsProvider.lookupCredentials(
-        UsernamePasswordCredentialsImpl,
-        Jenkins.instance,
-        null,
-        null
-    )
+if (!sonarToken) {
+    println "WARNING: SONAR_TOKEN not set. SonarQube credential will not be created."
+} else {
+    try {
+        def credClass = Class.forName(
+            'com.cloudbees.plugins.credentials.impl.StringCredentialsImpl')
+        def scopeClass = Class.forName(
+            'com.cloudbees.plugins.credentials.CredentialsScope')
 
-    def exists = creds.any { it.id == 'sonarqube-token' }
-    if (!exists) {
-        def domain = Domain.global()
         def store = Jenkins.instance.getExtensionList(
             'com.cloudbees.plugins.credentials.SystemCredentialsProvider'
         )[0].getStore()
 
-        def credential = new StringCredentialsImpl(
-            CredentialsScope.GLOBAL,
-            'sonarqube-token',
-            'SonarQube authentication token',
-            sonarToken
-        )
+        def existing = store.getCredentials(
+            Class.forName('com.cloudbees.plugins.credentials.domains.Domain').global())
+        def already = existing.any { it.id == 'sonarqube-token' }
 
-        store.addCredentials(domain, credential)
-        println "Created SonarQube credential: sonarqube-token"
-    } else {
-        println "SonarQube credential already exists"
+        if (already) {
+            println "SonarQube credential already exists"
+        } else {
+            def credential = credClass.getConstructor(
+                scopeClass, String, String, String
+            ).newInstance(
+                scopeClass.getField('GLOBAL').get(null),
+                'sonarqube-token',
+                'SonarQube authentication token',
+                sonarToken
+            )
+            store.addCredentials(
+                Class.forName('com.cloudbees.plugins.credentials.domains.Domain').global(),
+                credential)
+            println "Created SonarQube credential: sonarqube-token"
+        }
+    } catch (Throwable t) {
+        // Never fatal: a missing plugin or an API shift must not stop Jenkins
+        // from starting, and must not undo the node reconciliation above.
+        println "WARNING: SonarQube credential setup skipped (${t.class.simpleName}: ${t.message})"
     }
-} else {
-    println "WARNING: SONAR_TOKEN not set. SonarQube credential will not be created."
 }
 
 // ================================================================

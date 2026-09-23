@@ -23,5 +23,11 @@ USER jenkins
 # Copy JCasC config
 COPY jenkins/jenkins.yaml /usr/share/jenkins/ref/jenkins.yaml
 
-# Copy Groovy init script for agent registration
-COPY jenkins/init.groovy /usr/share/jenkins/ref/init.groovy.d/init.groovy
+# NOTE: jenkins/init.groovy is deliberately NOT copied into the image.
+#
+# docker-compose bind-mounts it at this same ref path, so a COPY here would be
+# permanently shadowed by the mount: the image would carry one version and the
+# container would run another.  That two-copies divergence is exactly what this
+# migration removes — the repo is now the single source of truth for node
+# definitions, and changing one needs no image rebuild.
+

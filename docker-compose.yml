@@ -44,6 +44,26 @@ services:
     volumes:
       - jenkins-home:/var/jenkins_home
       - ./jenkins/jenkins.yaml:/usr/share/jenkins/ref/jenkins.yaml
+      # Node definitions — source of truth is this repo.
+      #
+      # Mounted at the IMAGE-REF path, not at JENKINS_HOME, because the
+      # official image's jenkins.sh copies every file under
+      # /usr/share/jenkins/ref into JENKINS_HOME on each start, but
+      # copy_reference_file SKIPS any file already present there:
+      #
+      #   if [[ ! -e $JENKINS_HOME/${rel} || $f = *.override ]]
+      #   then INSTALLED  else SKIPPED
+      #
+      # That skip is why the old setup drifted: init.groovy was copied into
+      # JENKINS_HOME once (at container creation, when it listed 3 nodes)
+      # and never refreshed, so later edits to the image copy — and to this
+      # repo — did nothing.  Nodes created via the UI (linux-x64-cr,
+      # windows-x64) were equally invisible to the script.
+      #
+      # Mounting at the ref path keeps the image's own mechanism intact while
+      # making the repo authoritative.  The stale JENKINS_HOME copy must be
+      # removed ONCE so the copy actually happens on the next start.
+      - ./jenkins/init.groovy:/usr/share/jenkins/ref/init.groovy.d/init.groovy:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/debian/agent/booming-il2cpp:/home/debian/agent/booming-il2cpp:ro
     networks:
