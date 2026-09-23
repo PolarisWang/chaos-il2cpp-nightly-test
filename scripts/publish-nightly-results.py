@@ -769,6 +769,12 @@ def build_nightly_data(
         "coverage": coverage,
         "comparison": comparison,
         "summary_source": summary_source,
+        # Per-chunk real-assertion metrics, forwarded from the nightly CLI's
+        # summary payload.  The card and the cross-platform diff both need a
+        # denominator finer than chunk pass/fail: a chunk can "pass" while
+        # executing almost no assertions, and the two platforms can disagree
+        # sharply on that ratio while agreeing on pass/fail.
+        "chunk_metrics": nightly_summary.get("chunkMetrics", {}) or {},
     }
 
     # Provenance: which engine revision and platform produced this payload.

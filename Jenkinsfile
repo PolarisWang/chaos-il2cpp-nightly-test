@@ -68,6 +68,8 @@ pipeline {
         string(name: 'REVIEW_PR_TITLE', defaultValue: '', description: 'GitHub PR title')
         string(name: 'WINDOWS_BOOMING_DIR', defaultValue: 'D:/agent/workspace/booming-il2cpp',
                description: 'Windows agent: path to booming-il2cpp source (forward slashes)')
+        string(name: 'ENGINE_REVISION', defaultValue: '',
+               description: 'Engine commit to build on BOTH platforms. Empty = pin origin/main once at Init. Set this to re-run a historical revision or to reproduce a specific nightly.')
     }
 
     environment {
@@ -213,6 +215,31 @@ pipeline {
                         error("FATAL: could not resolve this repo's revision after checkout")
                     }
                     echo "Building from chaos-il2cpp-nightly-test @ ${env.GIT_COMMIT}"
+
+                    // ── Pin the ENGINE revision for BOTH platforms ──────────
+                    // Both branches used to resolve `origin/main` independently
+                    // (linux via `git archive origin/main`, windows via
+                    // `fetch --depth=1 origin main && reset --hard`).  If any
+                    // commit landed between the two branches starting, they
+                    // built DIFFERENT revisions and every per-platform
+                    // difference measured those commits rather than a platform
+                    // difference.  Observed 2026-09-22: a windows report from
+                    // 09-12 compared against a linux run from 09-22 made the
+                    // gap look like 4x when most chunks were actually identical.
+                    //
+                    // Resolve ONCE here and have both branches consume it.
+                    // ENGINE_REVISION overrides for bisects/repro.
+                    def pinnedEngineRev = params.ENGINE_REVISION?.trim()
+                    if (!pinnedEngineRev) {
+                        pinnedEngineRev = sh(
+                            script: "git --git-dir='${BOOMING_DIR}/.git' rev-parse origin/main",
+                            returnStdout: true).trim()
+                    }
+                    if (!pinnedEngineRev) {
+                        error("FATAL: could not resolve engine revision (BOOMING_DIR=${BOOMING_DIR})")
+                    }
+                    env.PINNED_ENGINE_REVISION = pinnedEngineRev
+                    echo "=== Pinned engine revision for BOTH platforms: ${pinnedEngineRev} ==="
                     // Find dotnet binary and add its directory to pipeline PATH.
                     // Resolve symlinks first: on this agent /usr/local/bin/dotnet
                     // is a symlink to /usr/share/dotnet/dotnet, so a plain
@@ -395,8 +422,13 @@ pipeline {
                                 set -euo pipefail
                                 rm -rf '${engTree}'
                                 mkdir -p '${engTree}'
-                                echo "=== [x64] materialising pristine origin/main -> ${engTree} ==="
-                                git --git-dir='${engSrc}/.git' archive --format=tar origin/main | tar -x -C '${engTree}'
+                                # PINNED_ENGINE_REVISION (resolved once in Init) rather than
+                                # a fresh origin/main: the windows branch is fetching at its
+                                # own pace, and a commit landing in between would leave the two
+                                # platforms building different revisions — which silently
+                                # invalidates every cross-platform comparison.
+                                echo "=== [x64] materialising ${PINNED_ENGINE_REVISION} -> ${engTree} ==="
+                                git --git-dir='${engSrc}/.git' archive --format=tar ${PINNED_ENGINE_REVISION} | tar -x -C '${engTree}'
                                 echo "  engine tree files: \$(find '${engTree}' -type f | wc -l)"
                                 # Probe the exact conditions build.py uses to locate the target
                                 # DLL, so a "DLL not found" is diagnosable from the console.
@@ -436,6 +468,13 @@ sh """
                         export CHAOS_FOUNDATION_DLL="${engTree}/tests/e2e/translation"
                         export CHAOS_TESTING_DIR="${engTree}/tests/e2e/verification"
 
+                        # Tie this run's report to the exact engine revision so a
+                        # cross-platform diff can prove the two platforms were
+                        # built from the same commit.  aggregate.py records this
+                        # as `engineSha` in the summary payload; build-platform-diff
+                        # refuses to compare mismatched revisions.
+                        export CHAOS_ENGINE_SHA="\${PINNED_ENGINE_REVISION:-}"
+
                         echo "=== [x64] Full Pipeline = verification.nightly.cli ==="
 
                         # Record the exit code instead of discarding it. The old
@@ -464,8 +503,11 @@ sh """
                         # and the Linux branch runs inside a `git archive` tree with no
                         # .git — so git walks up and reports whatever repo encloses the
                         # Jenkins workspace (observed: the nightly-test repo's hash).
-                        # Resolve it from the engine worktree we archived from instead.
-                        ENG_SHA=\$(git --git-dir='${engSrc}/.git' rev-parse --short origin/main 2>/dev/null || echo "")
+                        # Use the revision BOTH platforms were pinned to at Init, not a
+                        # fresh origin/main: re-resolving here could pick up a commit
+                        # that landed after the windows branch fetched, labelling two
+                        # different revisions with the same SHA.
+                        ENG_SHA="\${PINNED_ENGINE_REVISION}"
                         echo "  engine revision: \${ENG_SHA}"
                         python3 "\${WORKSPACE}/scripts/publish-nightly-results.py" \
                             --report-dir "${engTree}/tests/e2e/nightly-build-report/summary" \
@@ -552,8 +594,26 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                             // was set during Init on the linux-x64 agent to a Linux path
                             // that means nothing on a Windows node, so recompute here.
                             def winArtifacts = "${env.WORKSPACE}\\artifacts".replaceAll('\\\\','/')
-                            // Engine is synced/cloned under D:/agent/workspace/booming-il2cpp.
-                            def winBoomin = env.WINDOWS_BOOMING_DIR ?: 'D:/agent/workspace/booming-il2cpp'
+                            // Engine source used only as the FETCH ORIGIN.  The build
+                            // tree is a per-executor copy under the workspace — see
+                            // winBoomin below.
+                            def winEngSrc = env.WINDOWS_BOOMING_DIR ?: 'D:/agent/workspace/booming-il2cpp'
+                            // ── Per-executor build tree ──────────────────────────
+                            // This branch used to build directly in winEngSrc, a
+                            // single fixed path shared by every executor on the box.
+                            // That is safe only while windows-x64 has ONE executor;
+                            // the moment a second is added (needed to run a
+                            // comparison build alongside the nightly) the two jobs
+                            // fetch/checkout/rmtree the same directory concurrently
+                            // and each destroys the other's tree mid-build — results
+                            // become untrustworthy rather than merely slow, and the
+                            // failure is intermittent so it reads as flakiness.
+                            //
+                            // Mirror what linux-x64 already does with engine-src:
+                            // materialise a private tree under this executor's
+                            // WORKSPACE.  `${env.WORKSPACE}` is per-executor on a
+                            // Jenkins agent, so two executors get two trees.
+                            def winBoomin = "${env.WORKSPACE}\\engine-src".replaceAll('\\\\','/')
                             // The Jenkins agent runs as a Windows service whose PATH doesn't
                             // inherit your interactive shell's PATH (python/cmake/MSVC may be
                             // missing).  Prepend the standard install locations so the engine's
@@ -600,11 +660,28 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                 REM reset --hard (not pull): the agent tree is a disposable build
                                 REM checkout, never a place for local edits.  fetch --depth=1 keeps
                                 REM it fast; if fetch fails we keep the existing tree and continue.
-                                echo === [win-x64] syncing engine from origin/main ===
+                                echo === [win-x64] syncing engine at pinned revision ===
+                                REM PINNED_ENGINE_REVISION is resolved once in Init and
+                                REM propagated through env, so this branch builds the
+                                REM SAME commit as linux-x64.  Taking a fresh
+                                REM origin/main here (as it used to) meant a commit
+                                REM landing between the two branches starting left
+                                REM the platforms on different revisions, silently
+                                REM invalidating every cross-platform comparison.
+                                echo === [win-x64] target revision: ${PINNED_ENGINE_REVISION} ===
+                                REM The build tree is a per-executor copy; seed it from
+                                REM the shared engine source if this workspace has none.
+                                if not exist "${winBoomin}\\.git" (
+                                    echo === [win-x64] seeding per-executor engine tree from ${winEngSrc} ===
+                                    git clone --local --branch main "${winEngSrc}" "${winBoomin}"
+                                )
                                 git config --global --add safe.directory "${winBoomin}"
-                                git -C "${winBoomin}" fetch --depth=1 origin main
+                                git -C "${winBoomin}" fetch --depth=1 origin ${PINNED_ENGINE_REVISION}
                                 if not errorlevel 1 (
-                                    git -C "${winBoomin}" reset --hard origin/main
+                                    REM Detach rather than reset --hard to a branch:
+                                    REM the pin is a raw SHA, which has no branch name
+                                    REM to reset to.
+                                    git -C "${winBoomin}" checkout --detach ${PINNED_ENGINE_REVISION}
                                     REM reset --hard does NOT remove untracked leftovers, and
                                     REM one of those is a hard gate: the deprecated
                                     REM "testing/foundation-dll/verification/" tree. The
@@ -709,6 +786,12 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                 REM Default it explicitly instead.
                                 if not defined NIGHTLY_WORKERS set "NIGHTLY_WORKERS=4"
                                 echo === [win-x64] workers=%NIGHTLY_WORKERS% (cores=%NUMBER_OF_PROCESSORS%) ===
+
+                                REM Tie this run's report to the exact engine revision,
+                                REM mirroring the linux branch, so build-platform-diff can
+                                REM prove both platforms ran the same commit.  %ENG_SHA% was
+                                REM resolved above from the synced engine tree.
+                                set "CHAOS_ENGINE_SHA=%ENG_SHA%"
 
                                 python -m verification.nightly.cli ^
                                     --max-workers %NIGHTLY_WORKERS% ^
@@ -878,6 +961,43 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                 if exist "%REPORT%" (dir /s /b "%REPORT%" 2>nul) else (echo [win-x64] report dir MISSING: %REPORT%)
                                 echo === [win-x64] published artifacts ===
                                 if exist "${winArtifacts}" (dir /b "${winArtifacts}" 2>nul)
+
+                                REM ---- Chunk result gate (mirrors the linux-x64 branch) ----
+                                REM The exit-code check above only catches an ABNORMAL
+                                REM termination.  A run that finished normally but passed
+                                REM ZERO chunks (exit 1) still reported the whole build
+                                REM green, because NIGHTLY_FAILED was never set - the
+                                REM same hole the linux gate closed in ea5f367.  Read the
+                                REM published payload back and require >0 passing chunks.
+                                REM
+                                REM Guard on WIN_DATE_TAG: an earlier revisions bug produced
+                                REM "nightly-data--run1.json" (empty tag), so an unguarded
+                                REM glob would match a stale file from a previous run.
+                                set "WIN_DATA="
+                                if not "%WIN_DATE_TAG%"=="" (
+                                    for /f "delims=" %%F in ('dir /b /o-d "${winArtifacts}\\nightly-data-*-%WIN_DATE_TAG%*.json" 2^>nul') do (
+                                        if not defined WIN_DATA set "WIN_DATA=${winArtifacts}\\%%F"
+                                    )
+                                )
+                                if not defined WIN_DATA (
+                                    echo === [win-x64] ERROR: no windows nightly-data payload was produced ===
+                                    set "NIGHTLY_FAILED=1"
+                                ) else (
+                                    REM Workspace-relative, NOT %TEMP%: the temp dir is
+                                    REM shared by every executor on the box, so two
+                                    REM concurrent windows builds would write and read
+                                    REM the same win_rc.txt and each could grade itself
+                                    REM on the other run's chunk counts.
+                                    python -c "import json,sys; d=json.load(open(sys.argv[1])); s=d.get('summary') or {}; p=int(s.get('chunk_passed',0) or 0); t=int(s.get('chunk_total',0) or 0); sys.stdout.write(('FAIL' if t>0 and p==0 else 'OK')+' %d %d'%(p,t))" "!WIN_DATA!" > "${winArtifacts}\\win_rc.txt" 2>nul
+                                    set /p WIN_RC=<"${winArtifacts}\\win_rc.txt"
+                                    if not defined WIN_RC set "WIN_RC=PARSE_FAIL 0 0"
+                                    echo === [win-x64] chunk result gate: !WIN_RC! ===
+                                    echo !WIN_RC! | findstr /b "OK" >nul
+                                    if errorlevel 1 (
+                                        echo === [win-x64] ERROR: windows produced no passing chunks ^(!WIN_RC!^) ===
+                                        set "NIGHTLY_FAILED=1"
+                                    )
+                                )
 
                                 REM Report the branch outcome to Groovy via a marker
                                 REM FILE, and do NOT exit non-zero here.

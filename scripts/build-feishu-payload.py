@@ -62,6 +62,59 @@ def fetch_json(url: str, auth: str = "") -> dict | None:
         return None
 
 
+def count_platform_diffs(platforms: dict) -> int | None:
+    """How many chunks diverge between the two platforms, or None if unknown.
+
+    Mirrors the grouping in scripts/build-platform-diff.py: only chunks present
+    on BOTH sides with a usable real-assertion denominator, and a gap wide
+    enough to be a portability defect rather than noise.
+
+    Returns None (not 0) when the inputs cannot answer the question — both
+    sides lacking metrics, or the two reports not being from the same revision.
+    A "0" would read as "no platform problems", which is a different claim from
+    "we could not tell", and only one of those is true for old payloads.
+    """
+    l_metrics = (platforms.get("linux") or {}).get("chunk_metrics") or {}
+    w_metrics = (platforms.get("windows") or {}).get("chunk_metrics") or {}
+    if not l_metrics or not w_metrics:
+        return None
+    if engine_sha_match(platforms) is False:
+        return None
+
+    n = 0
+    for key in set(l_metrics) & set(w_metrics):
+        lm, wm = l_metrics[key], w_metrics[key]
+        lt, wt = lm.get("realTotal"), wm.get("realTotal")
+        lp, wp = lm.get("realPassed"), wm.get("realPassed")
+        if not lt or not wt or lp is None or wp is None:
+            continue
+        if min(lt, wt) < 30:          # sample too small to rank on
+            continue
+        if abs((wp / wt) - (lp / lt)) * 100.0 > 25.0:
+            n += 1
+    return n
+
+
+def engine_sha_match(platforms: dict) -> bool | None:
+    """Whether both platforms report the same engine revision.
+
+    None means "cannot tell" — a missing or unrecorded SHA on either side. That
+    is NOT the same as False: False asserts the reports are from different
+    revisions, which invalidates a comparison; None only means unproven.
+
+    Older payloads stored engine_sha under provenance with the placeholder
+    "(unrecorded)"; treat that and "" alike.
+    """
+    def sha(plat: str) -> str:
+        v = str((platforms.get(plat) or {}).get("engine_sha") or "").strip()
+        return "" if v in ("", "(unrecorded)") else v
+
+    l_sha, w_sha = sha("linux"), sha("windows")
+    if not l_sha or not w_sha:
+        return None
+    return l_sha == w_sha
+
+
 def verdict(platforms: dict, missing: list, expect: list,
             jenkins_result: str = "") -> dict:
     """Single source of truth for "does this run need attention?".
@@ -135,6 +188,17 @@ def verdict(platforms: dict, missing: list, expect: list,
     # Partial: chunks are failing, but not everything. Deliberately a WARNING
     # and not a failure — there is no pass-rate threshold here (see decision Z
     # below), only the absolute fact that some chunks did not pass.
+    # Both platforms reported, and the run is not otherwise broken — but they
+    # were built from DIFFERENT engine revisions.  Nothing on the card is then
+    # comparable across platforms: every per-platform difference measures the
+    # commits in between, not the platform.  Yellow, not red: the build itself
+    # succeeded, and the numbers are individually valid; what is lost is the
+    # comparison.  Placed after the red conditions so a genuine outage still
+    # outranks it.
+    if engine_sha_match(platforms) is False:
+        return {"level": "yellow", "word": "两平台非同源",
+                "reason": "Linux 与 Windows 构建自不同 commit，跨平台差异不可比"}
+
     partial = [
         (p, platforms[p].get("chunk_passed", 0), platforms[p].get("chunk_total", 0))
         for p in expect
@@ -214,6 +278,10 @@ def summarise(data: dict | None) -> dict:
         # run_id's trailing hash is not trustworthy across platforms (see
         # publish-nightly-results.py).
         "engine_sha": prov.get("engine_sha", "") or "(unrecorded)",
+        # Per-chunk real-assertion metrics, used to compute W/L divergence for
+        # the card's platform-diff line.  Empty for payloads published before
+        # the field existed, in which case the card simply omits the line.
+        "chunk_metrics": data.get("chunk_metrics", {}) or {},
         "data_dlls": s.get("data_dlls", 0),
         "total_dlls": data.get("total_dlls", 0),
     }
@@ -267,6 +335,25 @@ def build_payload(build_url: str, date_tag: str, run_tag: str,
     icons = {"red": "🔴", "yellow": "🟡", "green": "✅"}
     lines.append(f"{icons.get(v['level'], '⚪')} **{v['word']}**"
                  + (f" — {v['reason']}" if v["reason"] else ""))
+
+    # Which revision both platforms were built from.  Shown only when the two
+    # agree (or when only one platform reported), because a mismatch is already
+    # stated in the verdict line — repeating it as a header would be noise.
+    sha_match = engine_sha_match(per_platform)
+    if sha_match is True:
+        lines.append(f"engine `{per_platform['linux'].get('engine_sha', '')}`")
+    elif sha_match is None and any(
+        (per_platform.get(p) or {}).get("has_data") for p in PLATFORMS
+    ):
+        lines.append("engine `(未记录)`")
+
+    # Cross-platform divergence count.  Only the COUNT — the chunk names belong
+    # in the platform-diff artifact, not on a card that is already long.  When
+    # the inputs cannot answer the question the line is omitted rather than
+    # rendered as 0, which would claim "no platform problems".
+    diff_count = count_platform_diffs(per_platform)
+    if diff_count:
+        lines.append(f"🔀 跨平台差异 {diff_count} 个 chunk（详见 platform-diff 报告）")
 
     for plat in PLATFORMS:
         info = per_platform.get(plat) or {"present": False}

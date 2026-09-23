@@ -15,7 +15,7 @@ def agents = [
     [name:"linux-arm64",   labels:"linux arm64 qemu",           executors:1, remoteFS:"/home/jenkins"],
     [name:"android-arm64", labels:"android arm64 ndk",          executors:1, remoteFS:"/home/jenkins"],
     [name:"linux-x64-cr",  labels:"linux-x64-cr code-review",   executors:1, remoteFS:"/home/jenkins"],
-    [name:"windows-x64",   labels:"windows-x64 windows x64 msvc", executors:1, remoteFS:"D:\\agent\\workspace"],
+    [name:"windows-x64",   labels:"windows-x64 windows x64 msvc", executors:2, remoteFS:"D:\\agent\\workspace"],
 ]
 
 def nodesDir = new File(Jenkins.instance.getRootDir(), "nodes")
@@ -42,7 +42,37 @@ agents.each { a ->
         new File(agentDir, "config.xml").text = configXml
         println "Wrote config for ${a.name}"
     } else {
-        println "Agent ${a.name} already exists"
+        // The node exists. Reconcile the settings that live in the agents list
+        // above, so editing that list actually takes effect.
+        //
+        // This used to be a bare "already exists" log, which meant `executors`
+        // and `labels` were write-once: any change made here after the first
+        // container start was silently ignored, and the live node kept its
+        // original values forever.  Raising windows-x64 from 1 to 2 executors
+        // (needed so a comparison build can run alongside the nightly) looked
+        // applied in this file while the node still reported 1.
+        //
+        // Only numExecutors and label are reconciled — deliberately NOT
+        // remoteFS or the launcher: rewriting remoteFS on a live node whose
+        // workspace is already populated would strand its checkout, and the
+        // launcher/JNLP secret is managed by the agent itself.
+        def cfgFile = new File(agentDir, "config.xml")
+        if (cfgFile.exists()) {
+            def txt = cfgFile.text
+            def before = txt
+            txt = txt.replaceAll(/<numExecutors>\d+<\/numExecutors>/,
+                                 "<numExecutors>${a.executors}</numExecutors>")
+            txt = txt.replaceAll(/<label>[^<]*<\/label>/,
+                                 "<label>${a.labels}</label>")
+            if (txt != before) {
+                cfgFile.text = txt
+                println "Reconciled ${a.name}: executors=${a.executors} labels='${a.labels}'"
+            } else {
+                println "Agent ${a.name} already exists (config matches)"
+            }
+        } else {
+            println "Agent ${a.name} already exists but has no config.xml — leaving as is"
+        }
     }
 }
 
