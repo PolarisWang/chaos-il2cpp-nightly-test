@@ -250,6 +250,21 @@ pipeline {
                     if (!pinnedEngineRev) {
                         error("FATAL: could not resolve engine revision (BOOMING_DIR=${BOOMING_DIR})")
                     }
+                    // Expand whatever we were given to a FULL 40-char SHA.
+                    //
+                    // A caller-supplied ENGINE_REVISION may legitimately be a
+                    // short prefix, and a short pin breaks the Windows branch:
+                    // `git fetch --depth=1 origin <sha>` is rejected by GitHub
+                    // for non-full SHAs ("couldn't find remote ref 4a54da04e"),
+                    // which silently falls back to a stale tree.  Resolving
+                    // through the local object store handles short and full
+                    // alike, and fails loudly here if the revision is unknown.
+                    pinnedEngineRev = sh(
+                        script: "git --git-dir='${BOOMING_DIR}/.git' rev-parse --verify --quiet '${pinnedEngineRev}^{commit}'",
+                        returnStdout: true).trim()
+                    if (!pinnedEngineRev) {
+                        error("FATAL: engine revision is not a commit reachable from BOOMING_DIR")
+                    }
                     env.PINNED_ENGINE_REVISION = pinnedEngineRev
                     echo "=== Pinned engine revision for BOTH platforms: ${pinnedEngineRev} ==="
                     // Find dotnet binary and add its directory to pipeline PATH.
@@ -714,7 +729,14 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                     git -C "${winBoomin}" remote set-url origin https://github.com/PolarisWang/booming-il2cpp.git
                                 )
                                 git config --global --add safe.directory "${winBoomin}"
-                                git -C "${winBoomin}" fetch --depth=1 origin ${PINNED_ENGINE_REVISION}
+                                REM Primary: fetch the pinned revision by SHA.
+                                REM Fallback: fetch main by REF (always resolvable),
+                                REM then checkout the pin locally — this works whenever
+                                REM the pin is an ancestor of main, which it is when the
+                                REM pin came from main (short or full SHA both resolve
+                                REM locally; only the remote-ref form is picky).
+                                git -C "${winBoomin}" fetch --depth=1 origin ${PINNED_ENGINE_REVISION} ^
+                                    || git -C "${winBoomin}" fetch --depth=1 origin main
                                 if not errorlevel 1 (
                                     REM Detach rather than reset --hard to a branch:
                                     REM the pin is a raw SHA, which has no branch name
