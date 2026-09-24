@@ -231,8 +231,20 @@ pipeline {
                     // ENGINE_REVISION overrides for bisects/repro.
                     def pinnedEngineRev = params.ENGINE_REVISION?.trim()
                     if (!pinnedEngineRev) {
+                        // Fetch the actual remote ref FIRST, then resolve it.
+                        //
+                        // BOOMING_DIR is a long-lived developer worktree whose
+                        // local `origin/main` goes stale as soon as anyone pushes.
+                        // Building from a stale ref produced build 320: it pinned
+                        // a commit that predated every runtime fix on main, so the
+                        // Linux branch built a broken earlier engine while the
+                        // report still claimed to be "main".  Resolving against
+                        // the fetched ref makes the pin mean "remote main at
+                        // Dispatch time" rather than "whatever this worktree
+                        // last fetched".
+                        sh "git --git-dir='${BOOMING_DIR}/.git' fetch origin main"
                         pinnedEngineRev = sh(
-                            script: "git --git-dir='${BOOMING_DIR}/.git' rev-parse origin/main",
+                            script: "git --git-dir='${BOOMING_DIR}/.git' rev-parse --verify FETCH_HEAD",
                             returnStdout: true).trim()
                     }
                     if (!pinnedEngineRev) {
@@ -671,9 +683,35 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                 echo === [win-x64] target revision: ${PINNED_ENGINE_REVISION} ===
                                 REM The build tree is a per-executor copy; seed it from
                                 REM the shared engine source if this workspace has none.
+                                REM
+                                REM `--local` hardlinks objects for speed, but it ALSO
+                                REM points the new repo's `origin` at the local source
+                                REM path.  The very next line fetches the pinned SHA, and
+                                REM a local source sitting at some other revision cannot
+                                REM serve an arbitrary SHA:
+                                REM
+                                REM   git upload-pack: not our ref 4657934c...
+                                REM
+                                REM That failed all 40 windows chunks (build 320).  Name
+                                REM the local source as a SEPARATE remote so `origin`
+                                REM keeps meaning "the real upstream", then fetch the pin
+                                REM from there — mirroring the linux branch, whose
+                                REM BOOMING_DIR is a clone whose origin is GitHub.
                                 if not exist "${winBoomin}\\.git" (
                                     echo === [win-x64] seeding per-executor engine tree from ${winEngSrc} ===
-                                    git clone --local --branch main "${winEngSrc}" "${winBoomin}"
+                                    git clone --local --origin engsrc "${winEngSrc}" "${winBoomin}"
+                                    git -C "${winBoomin}" remote add origin https://github.com/PolarisWang/booming-il2cpp.git
+                                )
+                                REM Heal trees seeded before the remote fix: a `--local`
+                                REM clone leaves origin pointing at the local source
+                                REM path, which cannot serve an arbitrary pinned SHA.
+                                REM Without this, a workspace created by build 320 keeps
+                                REM failing the fetch even after the seed logic is fixed,
+                                REM because the guard above no longer fires.
+                                for /f "usebackq tokens=*" %%u in (`git -C "${winBoomin}" config --get remote.origin.url 2^>nul`) do set "WIN_ORIGIN=%%u"
+                                if not "!WIN_ORIGIN!"=="https://github.com/PolarisWang/booming-il2cpp.git" (
+                                    echo === [win-x64] retargeting engine-src origin: !WIN_ORIGIN! -^> github ===
+                                    git -C "${winBoomin}" remote set-url origin https://github.com/PolarisWang/booming-il2cpp.git
                                 )
                                 git config --global --add safe.directory "${winBoomin}"
                                 git -C "${winBoomin}" fetch --depth=1 origin ${PINNED_ENGINE_REVISION}
