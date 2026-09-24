@@ -741,6 +741,35 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                         echo === [win-x64] removing deprecated zombie verification tree ===
                                         rmdir /s /q "${winBoomin}/testing/foundation-dll/verification"
                                     )
+
+                                    REM ---- Re-apply line-ending attributes to the templates ----
+                                    REM Changing .gitattributes does NOT rewrite files already in
+                                    REM the working tree.  Worse, neither `git checkout -f` nor
+                                    REM `git checkout-index -f` helps: git compares the
+                                    REM post-conversion content, finds it equal to the index,
+                                    REM and skips the write — leaving `i/lf w/crlf` on disk
+                                    REM with the attribute correctly applied but unheeded.
+                                    REM
+                                    REM This tree is deliberately reused across runs (warm
+                                    REM build cache), so that stale CRLF persists indefinitely
+                                    REM and the `*.scriban text eol=lf` rule never takes hold.
+                                    REM
+                                    REM Deleting first and then checking out is what actually
+                                    REM forces the re-materialisation.  It matters because
+                                    REM Scriban splits template source on \n, so a CRLF template
+                                    REM leaves a trailing \r on every rendered line; the
+                                    REM generated C++ then carries \r\r\r\n and MSVC reads the
+                                    REM \r as a token break:
+                                    REM   native-aot.generated.cpp: error C2143 / C2182 / C2365
+                                    REM
+                                    REM Scoped to the Templates directory on purpose — the same
+                                    REM operation over the whole tree resets mtimes everywhere
+                                    REM and turns every nightly into a cold build.
+                                    pushd "${winBoomin}\\src\\managed\\Chaos.IL2CPP.Generator\\Templates"
+                                    del /f /q *.scriban >nul 2>&1
+                                    popd
+                                    git -C "${winBoomin}" checkout HEAD -- src/managed/Chaos.IL2CPP.Generator/Templates
+
                                     git -C "${winBoomin}" log -1 --oneline
                                     echo === [win-x64] engine synced ===
                                 ) else (
