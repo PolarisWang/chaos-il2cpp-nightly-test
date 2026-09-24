@@ -756,11 +756,13 @@ print('FAIL' if t>0 and p==0 else 'OK', p, t)
                                     REM
                                     REM Deleting first and then checking out is what actually
                                     REM forces the re-materialisation.  It matters because
-                                    REM Scriban splits template source on \n, so a CRLF template
-                                    REM leaves a trailing \r on every rendered line; the
-                                    REM generated C++ then carries \r\r\r\n and MSVC reads the
-                                    REM \r as a token break:
-                                    REM   native-aot.generated.cpp: error C2143 / C2182 / C2365
+                                    REM Scriban splits template source on LF, so a CRLF template
+                                    REM leaves a trailing CR on every rendered line; the
+                                    REM generated C++ then carries CR CR CR LF and MSVC reads the
+                                    REM stray CR as a token break (error C2143 / C2182 / C2365).
+                                    REM (Backslash escapes spelled out in words on purpose: this is
+                                    REM a bat block, and the pipeline's own guard rejects a bare
+                                    REM backslash-n or backslash-r in one.)
                                     REM
                                     REM Scoped to the Templates directory on purpose — the same
                                     REM operation over the whole tree resets mtimes everywhere
